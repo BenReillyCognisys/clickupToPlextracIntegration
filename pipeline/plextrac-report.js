@@ -1,6 +1,7 @@
 const api = require('../lib/plextrac-api');
 const log = require('../lib/logger');
 const TEMPLATE_MAP = require('../config/template-map');
+const store = require('../lib/task-store');
 
 const DEFAULT_TEMPLATE_NAME = process.env.PLEXTRAC_REPORT_TEMPLATE || 'Cognisys Web Application Black Box';
 const FINDINGS_LAYOUT_NAME = process.env.PLEXTRAC_FINDINGS_LAYOUT || 'Pentest Cognisys';
@@ -122,6 +123,20 @@ async function createReport(clientId, task, testingType) {
   };
 
   const result = await api.createReport(clientId, payload);
+
+  // Explicitly patch reviewers after creation — the create endpoint only reliably
+  // sets a single reviewer, so a follow-up update ensures all are applied.
+  await api.updateReport(clientId, result.report_id, { reviewers: REVIEWER_EMAILS });
+
+  // Store the ClickUp task → Plextrac report mapping so the reverse webhook
+  // (Plextrac → ClickUp) can look up which task to update later.
+  await store.saveMapping({
+    clickupTaskId: task.id,
+    plextracClientId: clientId,
+    plextracReportId: result.report_id,
+    taskName: task.name,
+  });
+
   log.info('Plextrac Report created', {
     report: name,
     report_id: result.report_id,
