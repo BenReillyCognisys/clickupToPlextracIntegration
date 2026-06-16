@@ -1,5 +1,7 @@
 const crypto = require('crypto');
 const axios = require('axios');
+const { runPipeline } = require('../pipeline');
+const log = require('../lib/logger');
 
 async function fetchTaskDetails(taskId) {
   const { data } = await axios.get(`https://api.clickup.com/api/v2/task/${taskId}`, {
@@ -15,7 +17,7 @@ async function handler(req, res) {
     return res.status(500).end();
   }
 
-  // Verify HMAC-SHA256 signature — req.body is a raw Buffer here
+  // req.body is a raw Buffer — required for correct HMAC computation
   const signature = req.headers['x-signature'];
   const computed = crypto.createHmac('sha256', secret).update(req.body).digest('hex');
   if (signature !== computed) {
@@ -35,19 +37,26 @@ async function handler(req, res) {
 
   if (payload.event !== 'taskCreated') return;
 
+  let task;
   try {
-    const task = await fetchTaskDetails(payload.task_id);
-
-    console.log('\n========== NEW TASK CREATED ==========');
-    console.log(`Task Name : ${task.name}`);
-    console.log(`Task ID   : ${task.id}`);
-    console.log(`URL       : ${task.url}`);
-    console.log('\nFull task details:');
-    console.log(JSON.stringify(task, null, 2));
-    console.log('======================================\n');
+    task = await fetchTaskDetails(payload.task_id);
   } catch (err) {
-    console.error('[ClickUp] Failed to fetch task details:', err.message);
+    log.error('Failed to fetch ClickUp task details', {
+      reason: err.message,
+      task_id: payload.task_id,
+    });
+    return;
   }
+
+  console.log('\n========== NEW TASK CREATED ==========');
+  console.log(`Task Name : ${task.name}`);
+  console.log(`Task ID   : ${task.id}`);
+  console.log(`URL       : ${task.url}`);
+  console.log('\nFull task details:');
+  console.log(JSON.stringify(task, null, 2));
+  console.log('======================================\n');
+
+  await runPipeline(task);
 }
 
 module.exports = handler;
