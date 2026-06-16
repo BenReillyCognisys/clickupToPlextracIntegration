@@ -58,6 +58,11 @@ async function handler(req, res) {
     return;
   }
 
+  if (task.parent) {
+    log.info('Task ignored — subtask skipped', { task: task.name, parent: task.parent });
+    return;
+  }
+
   console.log('\n========== NEW TASK CREATED ==========');
   console.log(`Task Name : ${task.name}`);
   console.log(`Task ID   : ${task.id}`);
