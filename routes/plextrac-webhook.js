@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { findByReportId } = require('../lib/task-store');
 const { updateTaskStatus } = require('../lib/clickup-api');
+const { getReportByCuid } = require('../lib/plextrac-api');
 const log = require('../lib/logger');
 
 // Plextrac signature: SHA256(secret + rawBody), header: X-Authorization-HMAC-256
@@ -9,10 +10,10 @@ function verifySignature(secret, rawBody, header) {
   return header === computed;
 }
 
-// Plextrac status → ClickUp status
+// Plextrac status → ClickUp status (only statuses we act on)
 const STATUS_MAP = {
-  'Ready For Review': process.env.CLICKUP_STATUS_QA       || 'QA / Reviewing',
-  'Published':        process.env.CLICKUP_STATUS_COMPLETE  || 'Completed',
+  'Ready For Review': process.env.CLICKUP_STATUS_QA      || 'QA / Reviewing',
+  'Published':        process.env.CLICKUP_STATUS_COMPLETE || 'Completed',
 };
 
 async function handler(req, res) {
@@ -25,7 +26,7 @@ async function handler(req, res) {
     }
   }
 
-  // Acknowledge immediately
+  // Acknowledge immediately so Plextrac doesn't retry
   res.status(200).end();
 
   let payload;
@@ -36,25 +37,47 @@ async function handler(req, res) {
     return;
   }
 
-  // Log full payload so we can identify the exact field names Plextrac sends
-  console.log('[Plextrac] Full webhook payload:', JSON.stringify(payload, null, 2));
+  const { event, targetCuid, targetType } = payload;
 
-  const { event, reportId, clientId } = payload;
+  if (event !== 'ReportStatusChanged' || targetType !== 'report' || !targetCuid) {
+    return;
+  }
 
-  // Determine which ClickUp status to apply
-  let clickupStatus;
+  // The webhook payload's `statuses` field is the list of all configured trigger
+  // statuses — not the status the report just changed to. We must call the API
+  // to discover the current status.
+  let report;
+  try {
+    report = await getReportByCuid(targetCuid);
+  } catch (err) {
+    log.error('Failed to fetch Plextrac report by CUID', {
+      reason: err.message,
+      cuid: targetCuid,
+    });
+    return;
+  }
 
-  if (event === 'ReportPublished' || payload.status === 'Published') {
-    clickupStatus = STATUS_MAP['Published'];
-  } else if (payload.status === 'Ready For Review') {
-    clickupStatus = STATUS_MAP['Ready For Review'];
-  } else {
-    // Event is not one we act on — ignore silently
+  // v2 API may nest data differently — try the most likely field paths
+  const reportStatus = report?.status ?? report?.data?.status;
+  const reportId     = report?.report_id ?? report?.id ?? report?.data?.report_id ?? report?.data?.id;
+
+  if (!reportStatus) {
+    log.warn('Plextrac report response missing status', { cuid: targetCuid, response: JSON.stringify(report) });
+    return;
+  }
+
+  const clickupStatus = STATUS_MAP[reportStatus];
+  if (!clickupStatus) {
+    // Status we don't act on (Draft, In Review, Approved, etc.)
+    log.info('Plextrac report status change — no ClickUp action required', {
+      cuid: targetCuid,
+      status: reportStatus,
+    });
     return;
   }
 
   if (!reportId) {
-    log.warn('Plextrac webhook missing reportId — cannot look up ClickUp task', { event, payload: JSON.stringify(payload) });
+    log.warn('Plextrac report response missing numeric ID', { cuid: targetCuid, response: JSON.stringify(report) });
     return;
   }
 
@@ -65,21 +88,21 @@ async function handler(req, res) {
 
   if (!mapping) {
     log.warn('Plextrac webhook — no ClickUp task mapping found for report', {
+      cuid: targetCuid,
       report_id: reportId,
-      client_id: clientId,
-      event,
+      status: reportStatus,
     });
     return;
   }
 
   try {
     await updateTaskStatus(mapping.clickup_task_id, clickupStatus);
-    log.info('ClickUp task status updated', {
-      event,
+    log.info('ClickUp task status updated from Plextrac', {
+      plextrac_status: reportStatus,
+      clickup_status: clickupStatus,
       report_id: reportId,
       clickup_task_id: mapping.clickup_task_id,
       task: mapping.task_name,
-      status: clickupStatus,
     });
   } catch (err) {
     log.error('Failed to update ClickUp task status', {
