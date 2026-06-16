@@ -24,19 +24,19 @@ function buildReportName(testingType, startEpochMs) {
 async function resolveTemplateId(name) {
   const templates = await api.listReportTemplates();
   const match = (templates || []).find(
-    t => (t.name || t.title || '').toLowerCase() === name.toLowerCase()
+    t => (t.data?.template_name || t.data?.name || t.name || '').toLowerCase() === name.toLowerCase()
   );
   if (!match) throw new Error(`Report template not found: "${name}"`);
-  return match.id || match.template_id;
+  return match.data?.doc_id || match.id;
 }
 
 async function resolveLayoutId(name) {
   const layouts = await api.listFieldTemplates();
   const match = (layouts || []).find(
-    l => (l.name || l.title || '').toLowerCase() === name.toLowerCase()
+    l => (l.data?.name || l.data?.template_name || l.name || '').toLowerCase() === name.toLowerCase()
   );
   if (!match) throw new Error(`Findings layout not found: "${name}"`);
-  return match.id || match.field_template_id;
+  return match.data?.doc_id || match.id;
 }
 
 /**
