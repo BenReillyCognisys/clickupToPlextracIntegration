@@ -20,7 +20,9 @@ async function handler(req, res) {
   // req.body is a raw Buffer — required for correct HMAC computation
   const signature = req.headers['x-signature'];
   const computed = crypto.createHmac('sha256', secret).update(req.body).digest('hex');
-  if (signature !== computed) {
+  const sigBuf = Buffer.from(signature || '');
+  const cmpBuf = Buffer.from(computed);
+  if (sigBuf.length !== cmpBuf.length || !crypto.timingSafeEqual(sigBuf, cmpBuf)) {
     console.warn('[ClickUp] Rejected webhook — invalid signature');
     return res.status(401).end();
   }
@@ -63,13 +65,7 @@ async function handler(req, res) {
     return;
   }
 
-  console.log('\n========== NEW TASK CREATED ==========');
-  console.log(`Task Name : ${task.name}`);
-  console.log(`Task ID   : ${task.id}`);
-  console.log(`URL       : ${task.url}`);
-  console.log('\nFull task details:');
-  console.log(JSON.stringify(task, null, 2));
-  console.log('======================================\n');
+  log.info('ClickUp task received', { task: task.name, task_id: task.id });
 
   await runPipeline(task);
 }

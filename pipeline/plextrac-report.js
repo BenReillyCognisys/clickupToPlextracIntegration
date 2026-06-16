@@ -87,7 +87,7 @@ async function createReport(clientId, task, testingType) {
       report_id: reportId,
       client_id: clientId,
     });
-    return;
+    return null;
   }
 
   // Resolve names → IDs; fail loudly if template or layout can't be found
@@ -142,6 +142,8 @@ async function createReport(clientId, task, testingType) {
     report_id: result.report_id,
     client_id: clientId,
   });
+
+  return name;
 }
 
 module.exports = { createReport };

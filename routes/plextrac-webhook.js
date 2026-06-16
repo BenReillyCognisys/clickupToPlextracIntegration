@@ -7,7 +7,9 @@ const log = require('../lib/logger');
 // Plextrac signature: SHA256(secret + rawBody), header: X-Authorization-HMAC-256
 function verifySignature(secret, rawBody, header) {
   const computed = crypto.createHash('sha256').update(secret + rawBody).digest('hex');
-  return header === computed;
+  const headerBuf   = Buffer.from(header || '');
+  const computedBuf = Buffer.from(computed);
+  return headerBuf.length === computedBuf.length && crypto.timingSafeEqual(headerBuf, computedBuf);
 }
 
 // Plextrac status → ClickUp status (only statuses we act on)
@@ -18,12 +20,14 @@ const STATUS_MAP = {
 
 async function handler(req, res) {
   const secret = process.env.PLEXTRAC_WEBHOOK_SECRET;
-  if (secret) {
-    const sig = req.headers['x-authorization-hmac-256'];
-    if (!sig || !verifySignature(secret, req.body.toString(), sig)) {
-      log.warn('Plextrac webhook rejected — invalid signature', {});
-      return res.status(401).end();
-    }
+  if (!secret) {
+    log.error('PLEXTRAC_WEBHOOK_SECRET is not set — rejecting request', {});
+    return res.status(500).end();
+  }
+  const sig = req.headers['x-authorization-hmac-256'];
+  if (!sig || !verifySignature(secret, req.body.toString(), sig)) {
+    log.warn('Plextrac webhook rejected — invalid signature', {});
+    return res.status(401).end();
   }
 
   // Acknowledge immediately so Plextrac doesn't retry

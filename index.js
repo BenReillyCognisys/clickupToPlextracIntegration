@@ -1,16 +1,26 @@
 require('dotenv').config();
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // Both webhook routes need raw body buffers for HMAC signature verification.
 app.post('/webhook/clickup',
-  express.raw({ type: 'application/json' }),
+  webhookLimiter,
+  express.raw({ type: 'application/json', limit: '100kb' }),
   require('./routes/clickup-webhook')
 );
 
 app.post('/webhook/plextrac',
-  express.raw({ type: 'application/json' }),
+  webhookLimiter,
+  express.raw({ type: 'application/json', limit: '100kb' }),
   require('./routes/plextrac-webhook')
 );
 

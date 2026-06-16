@@ -21,9 +21,9 @@ async function runPipeline(task) {
   }
 
   // ── Phase 2: Find or create Plextrac client ───────────────────────────────
-  let clientId;
+  let clientId, clientCreated;
   try {
-    clientId = await findOrCreateClient(client_name);
+    ({ clientId, clientCreated } = await findOrCreateClient(client_name));
   } catch (err) {
     log.error('Phase 2 failed | client find/create', {
       reason: err.message,
@@ -33,14 +33,23 @@ async function runPipeline(task) {
   }
 
   // ── Phase 3: Create Plextrac report ──────────────────────────────────────
+  let reportName;
   try {
-    await createReport(clientId, task, testing_type);
+    reportName = await createReport(clientId, task, testing_type);
   } catch (err) {
     log.error('Phase 3 failed | report create', {
       reason: err.message,
       client_id: clientId,
       task: task.name,
     });
+    return;
+  }
+
+  if (reportName) {
+    const msg = clientCreated
+      ? `Client and report has been created for ${client_name} - ${reportName}.`
+      : `Report has been created for ${client_name} - ${reportName}.`;
+    log.notify(msg);
   }
 }
 

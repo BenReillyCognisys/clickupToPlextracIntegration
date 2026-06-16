@@ -24,12 +24,12 @@ async function findOrCreateClient(clientName) {
 
   if (match) {
     log.info('Plextrac Client found', { client: clientName, client_id: match.client_id });
-    return match.client_id;
+    return { clientId: match.client_id, clientCreated: false };
   }
 
   const created = await api.createClient(clientName);
   log.info('Plextrac Client created', { client: clientName, client_id: created.client_id });
-  return created.client_id;
+  return { clientId: created.client_id, clientCreated: true };
 }
 
 module.exports = { findOrCreateClient };
