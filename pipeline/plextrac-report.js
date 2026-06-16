@@ -1,8 +1,21 @@
 const api = require('../lib/plextrac-api');
 const log = require('../lib/logger');
+const TEMPLATE_MAP = require('../config/template-map');
 
-const REPORT_TEMPLATE_NAME = process.env.PLEXTRAC_REPORT_TEMPLATE || 'Cognisys Web Application Black Box';
+const DEFAULT_TEMPLATE_NAME = process.env.PLEXTRAC_REPORT_TEMPLATE || 'Cognisys Web Application Black Box';
 const FINDINGS_LAYOUT_NAME = process.env.PLEXTRAC_FINDINGS_LAYOUT || 'Pentest Cognisys';
+
+function templateNameForType(testingType) {
+  const mapped = Object.entries(TEMPLATE_MAP).find(
+    ([key]) => key.toLowerCase() === testingType.toLowerCase()
+  );
+  if (mapped) return mapped[1];
+  log.warn('No template mapping for testing type — using default', {
+    type: testingType,
+    fallback: DEFAULT_TEMPLATE_NAME,
+  });
+  return DEFAULT_TEMPLATE_NAME;
+}
 const REVIEWER_EMAILS = ['ben.reilly@cognisys.group', 'punit.sharma@cognisys.group'];
 
 const MONTHS = ['January','February','March','April','May','June',
@@ -76,9 +89,10 @@ async function createReport(clientId, task, testingType) {
   }
 
   // Resolve names → IDs; fail loudly if template or layout can't be found
+  const templateName = templateNameForType(testingType);
   let templateId, layoutId;
   try {
-    templateId = await resolveTemplateId(REPORT_TEMPLATE_NAME);
+    templateId = await resolveTemplateId(templateName);
   } catch (err) {
     throw new Error(`Template resolution failed | ${err.message}`);
   }
