@@ -48,6 +48,16 @@ async function handler(req, res) {
     return;
   }
 
+  const allowedSpaceId = process.env.CLICKUP_SPACE_ID;
+  if (allowedSpaceId && String(task.space?.id) !== String(allowedSpaceId)) {
+    log.info('Task ignored — outside monitored space', {
+      task: task.name,
+      space: task.space?.name,
+      space_id: task.space?.id,
+    });
+    return;
+  }
+
   console.log('\n========== NEW TASK CREATED ==========');
   console.log(`Task Name : ${task.name}`);
   console.log(`Task ID   : ${task.id}`);
