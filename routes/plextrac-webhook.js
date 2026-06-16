@@ -36,13 +36,8 @@ async function handler(req, res) {
     return;
   }
 
-  // Log the raw payload the first time so exact event names are visible in logs
-  log.info('Plextrac webhook received', {
-    event: payload.event,
-    status: payload.status,
-    report_id: payload.reportId,
-    client_id: payload.clientId,
-  });
+  // Log full payload so we can identify the exact field names Plextrac sends
+  console.log('[Plextrac] Full webhook payload:', JSON.stringify(payload, null, 2));
 
   const { event, reportId, clientId } = payload;
 
