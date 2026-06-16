@@ -1,10 +1,10 @@
-// Maps parsed testing types to their Plextrac report template names.
-// Keys must match the canonical spellings in config/testing-types.js (case-insensitive match is applied at runtime).
-// Any type not listed here falls back to PLEXTRAC_REPORT_TEMPLATE in .env.
-module.exports = {
-  'Grey Box':           'Cognisys Web Application Grey Box',
-  'Black Box':          'Cognisys Web Application Black Box',
-  'Internal':           'Cognisys Internal Security Assessment',
-  'External':           'Cognisys External Security Assessment',
-  'Code Review':        'Cognisys Code Review Assessment',
-};
+// Each entry maps one or more keywords to a Plextrac template name.
+// Keywords are matched case-insensitively against the full testing type string.
+// First match wins, so put more specific entries before broader ones.
+module.exports = [
+  { keywords: ['grey'],         template: 'Cognisys Web Application Grey Box' },
+  { keywords: ['black'],        template: 'Cognisys Web Application Black Box' },
+  { keywords: ['external'],     template: 'Cognisys External Security Assessment' },
+  { keywords: ['internal'],     template: 'Cognisys Internal Security Assessment' },
+  { keywords: ['code review'],  template: 'Cognisys Code Review Assessment' },
+];

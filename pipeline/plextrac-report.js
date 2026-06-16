@@ -6,10 +6,11 @@ const DEFAULT_TEMPLATE_NAME = process.env.PLEXTRAC_REPORT_TEMPLATE || 'Cognisys 
 const FINDINGS_LAYOUT_NAME = process.env.PLEXTRAC_FINDINGS_LAYOUT || 'Pentest Cognisys';
 
 function templateNameForType(testingType) {
-  const mapped = Object.entries(TEMPLATE_MAP).find(
-    ([key]) => key.toLowerCase() === testingType.toLowerCase()
+  const lower = testingType.toLowerCase();
+  const match = TEMPLATE_MAP.find(
+    entry => entry.keywords.some(kw => lower.includes(kw.toLowerCase()))
   );
-  if (mapped) return mapped[1];
+  if (match) return match.template;
   log.warn('No template mapping for testing type — using default', {
     type: testingType,
     fallback: DEFAULT_TEMPLATE_NAME,
