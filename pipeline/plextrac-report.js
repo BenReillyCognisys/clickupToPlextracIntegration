@@ -39,28 +39,13 @@ async function resolveLayoutId(name) {
   return match.data?.doc_id || match.id;
 }
 
-/**
- * Maps ClickUp assignee emails to Plextrac user emails.
- * Logs a WARN for each assignee that has no Plextrac match; never throws.
- */
-async function resolveOperators(assignees) {
-  if (!assignees?.length) return [];
-
-  const users = await api.listUsers();
-  const knownEmails = new Set((users || []).map(u => (u.email || '').toLowerCase()));
-
-  const resolved = [];
-  for (const a of assignees) {
-    const email = (a.email || '').toLowerCase();
-    if (knownEmails.has(email)) {
-      resolved.push(a.email);
-    } else {
-      log.warn('ClickUp assignee has no matching Plextrac user — omitting from operators', {
-        assignee_email: a.email || a.username,
-      });
-    }
-  }
-  return resolved;
+// Extract assignee emails directly from the ClickUp task.
+// Plextrac validates emails server-side on report creation; we skip the
+// pre-validation user list call because the service account lacks that permission.
+function resolveOperators(assignees) {
+  return (assignees || [])
+    .map(a => a.email)
+    .filter(Boolean);
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────

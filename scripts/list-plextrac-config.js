@@ -17,9 +17,5 @@ const api = require('../lib/plextrac-api');
   const layouts = await api.listFieldTemplates();
   (layouts || []).forEach(l => console.log(' ', l.data?.name || l.data?.template_name || JSON.stringify(l)));
 
-  console.log('\n── Users ─────────────────────────────────────────────');
-  const users = await api.listUsers();
-  (users || []).forEach(u => console.log(' ', u.email || u.data?.email || JSON.stringify(u)));
-
   console.log('');
 })().catch(err => { console.error(err.message); process.exit(1); });
