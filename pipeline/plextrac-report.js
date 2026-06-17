@@ -128,13 +128,19 @@ async function createReport(clientId, task, testingType) {
   // sets a single reviewer, so a follow-up update ensures all are applied.
   await api.updateReport(clientId, result.report_id, { reviewers: REVIEWER_EMAILS });
 
+  // Fetch the full report to get its CUID — the create endpoint only returns the
+  // numeric report_id, but the Plextrac webhook uses CUIDs to identify reports.
+  const fullReport = await api.getReport(clientId, result.report_id);
+  const reportCuid = fullReport?.cuid || null;
+
   // Store the ClickUp task → Plextrac report mapping so the reverse webhook
   // (Plextrac → ClickUp) can look up which task to update later.
   await store.saveMapping({
-    clickupTaskId: task.id,
-    plextracClientId: clientId,
-    plextracReportId: result.report_id,
-    taskName: task.name,
+    clickupTaskId:      task.id,
+    plextracClientId:   clientId,
+    plextracReportId:   result.report_id,
+    plextracReportCuid: reportCuid,
+    taskName:           task.name,
   });
 
   log.info('Plextrac Report created', {

@@ -1,7 +1,7 @@
 const crypto = require('crypto');
-const { findByReportId } = require('../lib/task-store');
+const { findByCuid } = require('../lib/task-store');
 const { updateTaskStatus } = require('../lib/clickup-api');
-const { getReportByCuid } = require('../lib/plextrac-api');
+const { getReport } = require('../lib/plextrac-api');
 const log = require('../lib/logger');
 
 // Plextrac signature: SHA256(secret + rawBody), header: X-Authorization-HMAC-256
@@ -47,26 +47,38 @@ async function handler(req, res) {
     return;
   }
 
-  // The webhook payload's `statuses` field is the list of all configured trigger
-  // statuses — not the status the report just changed to. We must call the API
-  // to discover the current status.
+  // Look up the ClickUp task mapping using the report's CUID
+  const mapping = await findByCuid(targetCuid).catch(err => {
+    log.error('MongoDB CUID lookup failed', { reason: err.message, cuid: targetCuid });
+    return null;
+  });
+
+  if (!mapping) {
+    log.warn('Plextrac webhook — no mapping found for report CUID', { cuid: targetCuid });
+    return;
+  }
+
+  // Fetch the report from Plextrac to get the current status — the webhook
+  // payload only contains the list of configured trigger statuses, not the
+  // status the report just changed to.
   let report;
   try {
-    report = await getReportByCuid(targetCuid);
+    report = await getReport(mapping.plextrac_client_id, mapping.plextrac_report_id);
   } catch (err) {
-    log.error('Failed to fetch Plextrac report by CUID', {
+    log.error('Failed to fetch Plextrac report', {
       reason: err.message,
-      cuid: targetCuid,
+      client_id: mapping.plextrac_client_id,
+      report_id: mapping.plextrac_report_id,
     });
     return;
   }
 
-  // v2 API may nest data differently — try the most likely field paths
-  const reportStatus = report?.status ?? report?.data?.status;
-  const reportId     = report?.report_id ?? report?.id ?? report?.data?.report_id ?? report?.data?.id;
-
+  const reportStatus = report?.status;
   if (!reportStatus) {
-    log.warn('Plextrac report response missing status', { cuid: targetCuid, response: JSON.stringify(report) });
+    log.warn('Plextrac report response missing status field', {
+      cuid: targetCuid,
+      report_id: mapping.plextrac_report_id,
+    });
     return;
   }
 
@@ -80,39 +92,20 @@ async function handler(req, res) {
     return;
   }
 
-  if (!reportId) {
-    log.warn('Plextrac report response missing numeric ID', { cuid: targetCuid, response: JSON.stringify(report) });
-    return;
-  }
-
-  const mapping = await findByReportId(reportId).catch(err => {
-    log.error('MongoDB lookup failed', { reason: err.message, report_id: reportId });
-    return null;
-  });
-
-  if (!mapping) {
-    log.warn('Plextrac webhook — no ClickUp task mapping found for report', {
-      cuid: targetCuid,
-      report_id: reportId,
-      status: reportStatus,
-    });
-    return;
-  }
-
   try {
     await updateTaskStatus(mapping.clickup_task_id, clickupStatus);
     log.info('ClickUp task status updated from Plextrac', {
       plextrac_status: reportStatus,
-      clickup_status: clickupStatus,
-      report_id: reportId,
+      clickup_status:  clickupStatus,
+      report_id:       mapping.plextrac_report_id,
       clickup_task_id: mapping.clickup_task_id,
-      task: mapping.task_name,
+      task:            mapping.task_name,
     });
   } catch (err) {
     log.error('Failed to update ClickUp task status', {
-      reason: err.message,
+      reason:          err.message,
       clickup_task_id: mapping.clickup_task_id,
-      report_id: reportId,
+      report_id:       mapping.plextrac_report_id,
     });
   }
 }
