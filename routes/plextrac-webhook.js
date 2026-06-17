@@ -25,11 +25,7 @@ async function handler(req, res) {
     return res.status(500).end();
   }
   const sig = req.headers['x-authorization-hmac-256'];
-  const rawBody = req.body.toString();
-  const computed = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
-  console.log('[Plextrac sig debug] received:', sig);
-  console.log('[Plextrac sig debug] computed:', computed);
-  if (!sig || !verifySignature(secret, rawBody, sig)) {
+  if (!sig || !verifySignature(secret, req.body.toString(), sig)) {
     log.warn('Plextrac webhook rejected — invalid signature', {});
     return res.status(401).end();
   }
