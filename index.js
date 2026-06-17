@@ -1,6 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const { validateToken } = require('./lib/clickup-api');
+const log = require('./lib/logger');
 const app = express();
 const PORT = process.env.PORT || 4000;
 
@@ -34,6 +36,12 @@ app.get('/', (req, res) => {
   res.status(200).send('ClickUp → Plextrac integration API is running.');
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Server listening on port ${PORT}`);
+  try {
+    await validateToken();
+    log.info('ClickUp API token validated successfully', {});
+  } catch (err) {
+    log.error('ClickUp API token validation failed — requests will be rejected', { reason: err.message });
+  }
 });

@@ -4,10 +4,17 @@ const { runPipeline } = require('../pipeline');
 const log = require('../lib/logger');
 
 async function fetchTaskDetails(taskId) {
-  const { data } = await axios.get(`https://api.clickup.com/api/v2/task/${taskId}`, {
-    headers: { Authorization: process.env.CLICKUP_API_TOKEN }
-  });
-  return data;
+  try {
+    const { data } = await axios.get(`https://api.clickup.com/api/v2/task/${taskId}`, {
+      headers: { Authorization: process.env.CLICKUP_API_TOKEN },
+    });
+    return data;
+  } catch (err) {
+    if (err.response?.status === 401 || err.response?.status === 403) {
+      throw new Error('CLICKUP_API_TOKEN is invalid or revoked — check your .env');
+    }
+    throw err;
+  }
 }
 
 async function handler(req, res) {
