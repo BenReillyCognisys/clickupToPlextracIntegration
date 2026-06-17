@@ -143,7 +143,7 @@ async function createReport(clientId, task, testingType) {
     client_id: clientId,
   });
 
-  return name;
+  return { name, reportId: result.report_id };
 }
 
 module.exports = { createReport };

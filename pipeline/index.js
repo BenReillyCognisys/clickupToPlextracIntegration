@@ -2,6 +2,12 @@ const { parseTaskName } = require('./parse-task');
 const { findOrCreateClient } = require('./plextrac-client');
 const { createReport } = require('./plextrac-report');
 const log = require('../lib/logger');
+const BLACKLIST = require('../config/blacklist');
+
+function findBlacklistedWord(text) {
+  const lower = text.toLowerCase();
+  return BLACKLIST.find(word => lower.includes(word.toLowerCase())) || null;
+}
 
 async function runPipeline(task) {
   // ── Phase 1: Parse task name ─────────────────────────────────────────────
@@ -18,6 +24,14 @@ async function runPipeline(task) {
 
   if (testing_type === 'Unknown') {
     log.warn('Testing type could not be determined from task name', { task: task.name });
+  }
+
+  // ── Blacklist check ───────────────────────────────────────────────────────
+  const hit = findBlacklistedWord(task.name);
+  if (hit) {
+    log.warn('Blacklisted word detected — pipeline aborted', { word: hit, task: task.name });
+    log.notify(`Blacklisted word detected - ${hit} - ${client_name} ${testing_type}`);
+    return;
   }
 
   // ── Phase 2: Find or create Plextrac client ───────────────────────────────
@@ -46,10 +60,11 @@ async function runPipeline(task) {
   }
 
   if (reportName) {
-    const msg = clientCreated
-      ? `Client and report has been created for ${client_name} - ${reportName}.`
-      : `Report has been created for ${client_name} - ${reportName}.`;
-    log.notify(msg);
+    const { name, reportId } = reportName;
+    const base = `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}`;
+    const url = `${base}/client/${clientId}/report/${reportId}`;
+    const suffix = clientCreated ? 'Client was created.' : 'Client already exists.';
+    log.notify(`Report has been created for ${client_name} - <${url}|${name}>. ${suffix}`);
   }
 }
 
