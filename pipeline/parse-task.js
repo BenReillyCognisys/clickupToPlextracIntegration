@@ -14,12 +14,22 @@ function parseTaskName(rawName) {
 
   if (name.includes('|')) {
     const idx = name.indexOf('|');
+    const client_name = name.slice(0, idx).trim();
     const rawType = name.slice(idx + 1).trim();
-    const canonical = SORTED_TYPES.find(t => t.toLowerCase() === rawType.toLowerCase());
-    return {
-      client_name: name.slice(0, idx).trim(),
-      testing_type: canonical || rawType,
-    };
+
+    // Extra pipes or a ? mean the name is ambiguous — don't guess
+    if (rawType.includes('|') || rawType.includes('?')) {
+      return { client_name, testing_type: 'Unknown' };
+    }
+
+    // Exact canonical match
+    const exact = SORTED_TYPES.find(t => t.toLowerCase() === rawType.toLowerCase());
+    if (exact) return { client_name, testing_type: exact };
+
+    // Keyword match (e.g. "Grey Box Pentest" → "Grey Box")
+    const lower = rawType.toLowerCase();
+    const keyword = SORTED_TYPES.find(t => lower.includes(t.toLowerCase()));
+    return { client_name, testing_type: keyword || 'Unknown' };
   }
 
   const lower = name.toLowerCase();
