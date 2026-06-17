@@ -4,9 +4,9 @@ const { updateTaskStatus } = require('../lib/clickup-api');
 const { getReport } = require('../lib/plextrac-api');
 const log = require('../lib/logger');
 
-// Plextrac signature: SHA256(secret + rawBody), header: X-Authorization-HMAC-256
+// Plextrac signature: HMAC-SHA256(secret, rawBody), header: X-Authorization-HMAC-256
 function verifySignature(secret, rawBody, header) {
-  const computed = crypto.createHash('sha256').update(secret + rawBody).digest('hex');
+  const computed    = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
   const headerBuf   = Buffer.from(header || '');
   const computedBuf = Buffer.from(computed);
   return headerBuf.length === computedBuf.length && crypto.timingSafeEqual(headerBuf, computedBuf);
@@ -25,7 +25,11 @@ async function handler(req, res) {
     return res.status(500).end();
   }
   const sig = req.headers['x-authorization-hmac-256'];
-  if (!sig || !verifySignature(secret, req.body.toString(), sig)) {
+  const rawBody = req.body.toString();
+  const computed = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+  console.log('[Plextrac sig debug] received:', sig);
+  console.log('[Plextrac sig debug] computed:', computed);
+  if (!sig || !verifySignature(secret, rawBody, sig)) {
     log.warn('Plextrac webhook rejected — invalid signature', {});
     return res.status(401).end();
   }
