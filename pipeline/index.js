@@ -23,7 +23,9 @@ async function runPipeline(task) {
   });
 
   if (testing_type === 'Unknown') {
-    log.warn('Testing type could not be determined from task name', { task: task.name });
+    log.warn('Testing type could not be determined — pipeline aborted', { task: task.name });
+    log.notify(`Could not determine testing type from task name — no report created. Task: "${task.name}"`);
+    return;
   }
 
   // ── Blacklist check ───────────────────────────────────────────────────────
