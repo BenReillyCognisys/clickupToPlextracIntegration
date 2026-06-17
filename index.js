@@ -4,6 +4,10 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+// Trust nginx as the first proxy so express-rate-limit can read the real client IP
+// from X-Forwarded-For without throwing ERR_ERL_UNEXPECTED_X_FORWARDED_FOR.
+app.set('trust proxy', 1);
+
 const webhookLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
