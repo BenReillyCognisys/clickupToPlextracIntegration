@@ -75,7 +75,9 @@ async function runQaReview(mapping) {
       let updatedReport = report;
       const changedRoots = new Set();
       for (const seg of execSegments) {
-        const result = await runChecks(seg.text, { label: seg.label, clientName, isExecutiveSummary: true });
+        const result = await runChecks(seg.text, {
+          label: seg.label, clientName, isExecutiveSummary: true, clientNameOnly: seg.clientNameOnly,
+        });
         applied.push(...result.applied);
         flags.push(...result.flags);
         if (result.changed) {

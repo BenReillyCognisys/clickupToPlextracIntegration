@@ -57,6 +57,8 @@ function editIsSafe(before, after, change, ctx, flags) {
  * @param {string} ctx.label        human label for logging (e.g. "exec_summary")
  * @param {string} ctx.clientName   correct client name
  * @param {boolean} ctx.isExecutiveSummary  whether de-jargon applies
+ * @param {boolean} ctx.clientNameOnly  reduced review (Methodology / Issue Matrix /
+ *   Limitations): client-name check only — no de-jargon or sentence checks
  * @returns {{ finalText, changed, applied: [], flags: [] }}
  */
 async function runChecks(text, ctx) {
@@ -75,9 +77,11 @@ async function runChecks(text, ctx) {
 
   // 2. AI review (client name + de-jargon + incomplete sentences) ───────────────
   // All enabled AI checks run in ONE request per segment to minimise API cost.
+  // Reduced-review sections (Methodology, Issue Matrix, Limitations) get the
+  // client-name check only — de-jargon and incomplete-sentence checks are skipped.
   const doClientName = ENABLED.clientName && !!ctx.clientName;
-  const doDejargon = ENABLED.deJargon && ctx.isExecutiveSummary;
-  const doSentences = ENABLED.sentences;
+  const doDejargon = ENABLED.deJargon && ctx.isExecutiveSummary && !ctx.clientNameOnly;
+  const doSentences = ENABLED.sentences && !ctx.clientNameOnly;
 
   if (doClientName || doDejargon || doSentences) {
     try {

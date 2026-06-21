@@ -68,13 +68,15 @@ the author via Slack/log instead of auto-edited.
 
 Each check is independently toggleable (`QA_CHECK_*` env vars, default on).
 
-**Excluded sections.** Some executive-summary sections are templated/boilerplate
-(e.g. **Methodology**, **Issue Matrix**) and must not be run through the AI at
-all. Sections whose label/title matches `config/excluded-sections.js` (override
-via `QA_EXCLUDED_SECTIONS`, comma-separated) are dropped before any check runs —
-matching is case-insensitive and substring-based, so "Testing Methodology" also
-matches "Methodology". This saves API spend and avoids rewriting fixed structural
-content.
+**Reduced-review sections.** Some executive-summary sections are templated/
+boilerplate (e.g. **Methodology**, **Issue Matrix**, **Limitations**). These are
+**not** skipped entirely — the **client-name check still runs** on them, because
+an incorrect client name must be caught everywhere in the report. They only skip
+the **de-jargon** and **incomplete-sentence** checks, which would wrongly rewrite
+fixed structural content. Sections whose label/title matches
+`config/excluded-sections.js` (override via `QA_EXCLUDED_SECTIONS`,
+comma-separated) get this reduced review — matching is case-insensitive and
+substring-based, so "Testing Methodology" also matches "Methodology".
 
 ## Claude Pro vs Claude API
 
@@ -166,8 +168,8 @@ These were coded defensively but could not be validated against the real API:
 - `lib/slack.js` — Slack Web API helper (parent message + threaded reply for first-round QA)
 - `pipeline/qa-review/index.js` — orchestrator
 - `pipeline/qa-review/checks.js` — per-segment check runner
-- `pipeline/qa-review/report-fields.js` — shape-tolerant field locate/read/write (also filters out excluded sections)
-- `config/excluded-sections.js` — exec-summary section names to skip (Methodology, Issue Matrix, …)
+- `pipeline/qa-review/report-fields.js` — shape-tolerant field locate/read/write (tags reduced-review sections)
+- `config/excluded-sections.js` — exec-summary sections that get client-name-only review (Methodology, Issue Matrix, Limitations, …)
 - `pipeline/qa-review/change-tracking.js` — best-effort Plextrac tracking toggle
 - `lib/ai-review.js` — Claude API calls (structured outputs)
 - `lib/html-text.js` — deterministic formatting strip

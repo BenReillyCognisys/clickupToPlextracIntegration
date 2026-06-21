@@ -36,7 +36,8 @@ function setByPath(obj, path, value) {
 // Sub-properties that hold the actual text inside an exec-summary section object.
 const TEXT_KEYS = ['text', 'value', 'custom_field', 'content', 'body'];
 
-// Section names the AI QA review skips entirely (e.g. Methodology, Issue Matrix).
+// Section names that get a reduced review — client-name check only, no de-jargon
+// or incomplete-sentence checks (e.g. Methodology, Issue Matrix, Limitations).
 const EXCLUDED_SECTIONS = require('../../config/excluded-sections');
 
 // True if a section's name matches one of the excluded names (case-insensitive,
@@ -78,15 +79,18 @@ function pushSection(segments, field, basePath, section) {
   }
   if (!section || typeof section !== 'object') return;
   const name = section.label || section.title;
-  // Skip boilerplate/reference sections (Methodology, Issue Matrix, …) — they are
-  // templated, not narrative, and must not be run through the AI.
-  if (isExcludedSection(name)) return;
+  // Boilerplate/reference sections (Methodology, Issue Matrix, Limitations, …) are
+  // templated, not narrative. They are STILL checked for the client name (which
+  // must be right everywhere) but skip the de-jargon and incomplete-sentence
+  // checks, which would wrongly rewrite fixed structural content.
+  const clientNameOnly = isExcludedSection(name);
   for (const key of TEXT_KEYS) {
     if (typeof section[key] === 'string') {
       segments.push({
         path: `${basePath}.${key}`,
         label: name ? `${field}: ${name}` : `${basePath}.${key}`,
         text: section[key],
+        clientNameOnly,
       });
       break;
     }

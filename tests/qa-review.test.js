@@ -125,29 +125,37 @@ test('no exec summary → empty', () => {
   eq(getExecutiveSummarySegments({ foo: 'bar' }), []);
 });
 
-// ── excluded sections (Methodology / Issue Matrix) ────────────────────────────
-console.log('\nexcluded sections:');
+// ── reduced-review sections (Methodology / Issue Matrix / Limitations) ────────
+console.log('\nreduced-review sections:');
 
 test('isExcludedSection matches case-insensitively and as substring', () => {
   eq(isExcludedSection('Methodology'), true);
   eq(isExcludedSection('issue matrix'), true);
   eq(isExcludedSection('Testing Methodology'), true);
+  eq(isExcludedSection('Limitations'), true);
   eq(isExcludedSection('Overview'), false);
   eq(isExcludedSection(undefined), false);
 });
 
-test('excluded sections are dropped from exec summary segments', () => {
+test('reduced-review sections are kept but tagged clientNameOnly', () => {
   const segs = getExecutiveSummarySegments({
     exec_summary: {
       custom_fields: [
         { label: 'Overview', text: '<p>One</p>' },
         { label: 'Methodology', text: '<p>Method</p>' },
         { label: 'Issue Matrix', text: '<p>Matrix</p>' },
+        { label: 'Limitations', text: '<p>Limits</p>' },
         { label: 'Roadmap', text: '<p>Two</p>' },
       ],
     },
   });
-  eq(segs.map(s => s.label), ['exec_summary: Overview', 'exec_summary: Roadmap']);
+  // All sections are retained (none dropped) so client-name still gets checked.
+  eq(segs.map(s => s.label), [
+    'exec_summary: Overview', 'exec_summary: Methodology', 'exec_summary: Issue Matrix',
+    'exec_summary: Limitations', 'exec_summary: Roadmap',
+  ]);
+  // Narrative sections get the full review; boilerplate ones get client-name only.
+  eq(segs.map(s => !!s.clientNameOnly), [false, true, true, true, false]);
 });
 
 // ── finding extraction ────────────────────────────────────────────────────────
