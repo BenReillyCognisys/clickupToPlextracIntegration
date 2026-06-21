@@ -8,6 +8,7 @@ const PORT = process.env.PORT || 4000;
 
 // Trust nginx as the first proxy so express-rate-limit can read the real client IP
 // from X-Forwarded-For without throwing ERR_ERL_UNEXPECTED_X_FORWARDED_FOR.
+// Test push from VM.
 app.set('trust proxy', 1);
 
 const webhookLimiter = rateLimit({
