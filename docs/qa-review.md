@@ -62,29 +62,44 @@ Each check is independently toggleable (`QA_CHECK_*` env vars, default on).
 
 ## Claude Pro vs Claude API
 
-This feature uses the **Claude API** (`@anthropic-ai/sdk`, model `claude-opus-4-8`)
-with a billed `ANTHROPIC_API_KEY` from console.anthropic.com.
+This feature uses the **Claude API** (`@anthropic-ai/sdk`) with a billed
+`ANTHROPIC_API_KEY` from console.anthropic.com.
 
 A **Claude Pro/Max subscription will not work** — Pro is for interactive use
 (claude.ai, Claude Code) and cannot be called from a server. An unattended
 webhook handler needs the API.
 
-Each AI check is a single structured-output (JSON-schema-constrained) request, so
-results are always machine-parseable and carry an explicit list of changes for
-the audit log.
+## Cost
 
-## Change tracking — what's guaranteed
+All enabled AI checks for one segment run as a **single** structured-output
+request (`reviewSegment`), and the defaults are tuned for low cost:
 
-The **authoritative audit trail is internal**: every applied change is written to
-`LOG_FILE` and posted to Slack. This always works and does not depend on Plextrac.
+- **Model: `claude-haiku-4-5`** (~5× cheaper per token than Opus). Override with
+  `ANTHROPIC_MODEL`.
+- **Extended thinking OFF** by default (`QA_AI_THINKING=true` to enable) — thinking
+  tokens bill as output, and these bounded edit tasks don't need them.
+- **No `effort`** sent by default (`QA_AI_EFFORT`; only valid on Opus/Sonnet).
+- One merged call per segment instead of three, so the segment text and system
+  prompt aren't re-sent per check and the text is only rewritten once.
 
-Mirroring tracking state into **Plextrac's own change-tracking/review UI** is
-**best-effort and off by default** (`pipeline/qa-review/change-tracking.js`).
-Whether Plextrac exposes that feature over its API — and at which endpoint — was
-**not verifiable while building this**. To enable it once confirmed, set the
-`PLEXTRAC_CHANGE_TRACKING_ENABLED` / `PLEXTRAC_TRACKING_*` env vars (no code
-change needed). A failure to toggle tracking never aborts the review — the
-internal audit log still captures everything.
+If you need higher edit quality, raise `ANTHROPIC_MODEL` (e.g.
+`claude-sonnet-4-6`) and/or set `QA_AI_THINKING=true` — at higher cost.
+
+## Change tracking
+
+Plextrac tracks changes at the report level via the boolean `isTrackChanges`
+field on the report object (`true` = track changes across all rich-text fields).
+The pipeline sets it `true` before editing and `false` after, using the standard
+report update endpoint (`pipeline/qa-review/change-tracking.js`). It is **on by
+default**; set `PLEXTRAC_CHANGE_TRACKING_ENABLED=false` to opt out.
+
+The executive-summary write uses a **partial update** (only the changed
+top-level fields) precisely so it doesn't reset `isTrackChanges` mid-edit by
+PUT-ing back a stale full report object.
+
+A failure to toggle tracking never aborts the review — the **internal audit
+trail** (every change written to `LOG_FILE` and posted to Slack) always works and
+does not depend on Plextrac.
 
 ## ⚠️ Assumptions to confirm against the live Plextrac instance
 

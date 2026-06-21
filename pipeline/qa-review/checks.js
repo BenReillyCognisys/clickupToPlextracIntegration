@@ -59,47 +59,39 @@ async function runChecks(text, ctx) {
     }
   }
 
-  // 2. Correct client name (AI) ────────────────────────────────────────────────
-  if (ENABLED.clientName && ctx.clientName) {
+  // 2. AI review (client name + de-jargon + incomplete sentences) ───────────────
+  // All enabled AI checks run in ONE request per segment to minimise API cost.
+  const doClientName = ENABLED.clientName && !!ctx.clientName;
+  const doDejargon = ENABLED.deJargon && ctx.isExecutiveSummary;
+  const doSentences = ENABLED.sentences;
+
+  if (doClientName || doDejargon || doSentences) {
     try {
-      const res = await ai.correctClientName(current, ctx.clientName);
-      if (res.changed && res.revised_text && res.revised_text !== current
-          && placeholderGuard('client_name', current, res.revised_text, ctx, flags)) {
+      const res = await ai.reviewSegment(current, {
+        clientName: ctx.clientName,
+        doClientName,
+        doDejargon,
+        doSentences,
+      });
+
+      // Apply the text edits (client_name + dejargon) — but only if the rewrite
+      // leaves every %%...%% placeholder intact.
+      if (res.revised_text && res.revised_text !== current
+          && placeholderGuard('ai_review', current, res.revised_text, ctx, flags)) {
         for (const c of res.changes || []) {
-          applied.push({ type: 'client_name', label: ctx.label, before: c.original, after: c.replacement, reason: c.reason });
+          applied.push({ type: c.type, label: ctx.label, before: c.before, after: c.after, reason: c.reason });
         }
         current = res.revised_text;
       }
-    } catch (err) {
-      log.error('Client-name check failed', { reason: err.message, label: ctx.label });
-    }
-  }
 
-  // 3. De-jargon (AI) — executive summary only ─────────────────────────────────
-  if (ENABLED.deJargon && ctx.isExecutiveSummary) {
-    try {
-      const res = await ai.deJargonExecutiveSummary(current);
-      if (res.changed && res.revised_text && res.revised_text !== current
-          && placeholderGuard('dejargon', current, res.revised_text, ctx, flags)) {
-        for (const c of res.changes || []) {
-          applied.push({ type: 'dejargon', label: ctx.label, before: c.original, after: c.replacement, reason: c.reason });
+      // Incomplete sentences are detection-only (never auto-fixed).
+      if (doSentences) {
+        for (const s of res.incomplete || []) {
+          flags.push({ type: 'incomplete_sentence', label: ctx.label, sentence: s.sentence, issue: s.issue });
         }
-        current = res.revised_text;
       }
     } catch (err) {
-      log.error('De-jargon check failed', { reason: err.message, label: ctx.label });
-    }
-  }
-
-  // 4. Flag incomplete sentences (AI) — detection only, never auto-completed ────
-  if (ENABLED.sentences) {
-    try {
-      const res = await ai.findIncompleteSentences(current);
-      for (const s of res.incomplete || []) {
-        flags.push({ type: 'incomplete_sentence', label: ctx.label, sentence: s.sentence, issue: s.issue });
-      }
-    } catch (err) {
-      log.error('Incomplete-sentence check failed', { reason: err.message, label: ctx.label });
+      log.error('AI review failed', { reason: err.message, label: ctx.label });
     }
   }
 

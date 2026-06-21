@@ -68,20 +68,25 @@ async function runQaReview(mapping) {
     const execSegments = fields.getExecutiveSummarySegments(report);
     if (execSegments.length) {
       let updatedReport = report;
-      let dirty = false;
+      const changedRoots = new Set();
       for (const seg of execSegments) {
         const result = await runChecks(seg.text, { label: seg.label, clientName, isExecutiveSummary: true });
         applied.push(...result.applied);
         flags.push(...result.flags);
         if (result.changed) {
           updatedReport = fields.setByPath(updatedReport, seg.path, result.finalText);
-          dirty = true;
+          changedRoots.add(seg.path.split(/[.[]/)[0]); // e.g. "exec_summary"
         }
       }
-      if (dirty) {
+      if (changedRoots.size) {
+        // Partial update — send only the changed top-level field(s). This avoids
+        // clobbering other report fields (notably isTrackChanges, which the
+        // tracking toggle just set) by PUT-ing the whole report object.
+        const payload = {};
+        for (const root of changedRoots) payload[root] = updatedReport[root];
         try {
-          await api.updateReport(clientId, reportId, updatedReport);
-          log.info('Executive summary updated in Plextrac', { report_id: reportId });
+          await api.updateReport(clientId, reportId, payload);
+          log.info('Executive summary updated in Plextrac', { report_id: reportId, fields: [...changedRoots] });
         } catch (err) {
           log.error('Failed to write executive summary changes', { reason: err.message, report_id: reportId });
         }

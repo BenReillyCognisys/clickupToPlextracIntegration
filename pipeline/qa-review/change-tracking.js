@@ -1,83 +1,45 @@
-// Plextrac change-tracking toggle (best-effort).
+// Plextrac report-level change tracking.
 //
-// The user requirement is: "set Plextrac to track changes before doing anything,
-// then turn tracking off once fully completed."
+// Plextrac controls "track changes" for a report via the boolean `isTrackChanges`
+// field on the report object: true = track changes across all rich-text fields,
+// false = off at the report level (per-field default).
+// Ref: https://docs.plextrac.com/.../object-structures/report-object
 //
-// ⚠️ Whether Plextrac exposes its change-tracking / review-mode feature over the
-// API — and at what endpoint — could NOT be verified while building this. It may
-// be a UI-only feature. So this module is deliberately:
-//   1. A no-op by default (PLEXTRAC_CHANGE_TRACKING_ENABLED is unset/false).
-//   2. Driven entirely by env config when enabled, so you can wire in the real
-//      endpoint once confirmed WITHOUT code changes.
+// We set it true before editing and false again once the QA review completes,
+// using the standard report update endpoint (PUT /client/{id}/report/{id}).
 //
-// The authoritative audit trail does NOT depend on this — every applied change
-// is independently logged to the log file + Slack in pipeline/qa-review/index.js.
-// That is the real guarantee; this is a convenience that mirrors the tracking
-// state into Plextrac's own UI when the API supports it.
-//
-// To enable once you've confirmed the endpoint, set in .env, e.g.:
-//   PLEXTRAC_CHANGE_TRACKING_ENABLED=true
-//   PLEXTRAC_TRACKING_METHOD=put
-//   PLEXTRAC_TRACKING_PATH=/api/v1/client/{clientId}/report/{reportId}/track
-//   PLEXTRAC_TRACKING_ON_BODY={"enabled":true}
-//   PLEXTRAC_TRACKING_OFF_BODY={"enabled":false}
+// On by default. Set PLEXTRAC_CHANGE_TRACKING_ENABLED=false to opt out (the
+// internal audit log — log file + Slack — records every change regardless).
 
 const api = require('../../lib/plextrac-api');
 const log = require('../../lib/logger');
 
-const ENABLED = String(process.env.PLEXTRAC_CHANGE_TRACKING_ENABLED).toLowerCase() === 'true';
+const DISABLED = String(process.env.PLEXTRAC_CHANGE_TRACKING_ENABLED).toLowerCase() === 'false';
 
-function buildPath(clientId, reportId) {
-  const tmpl = process.env.PLEXTRAC_TRACKING_PATH || '';
-  return tmpl
-    .replace('{clientId}', String(clientId))
-    .replace('{reportId}', String(reportId));
-}
-
-function parseBody(envVar) {
-  const raw = process.env[envVar];
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw);
-  } catch {
-    log.warn('Change-tracking body env var is not valid JSON', { var: envVar });
-    return {};
-  }
-}
-
-async function toggle(clientId, reportId, on) {
-  if (!ENABLED) {
-    log.info('Plextrac change-tracking toggle skipped (disabled) — relying on internal audit log', {
-      desired_state: on ? 'on' : 'off',
-      report_id: reportId,
+async function setTracking(clientId, reportId, on) {
+  if (DISABLED) {
+    log.info('Plextrac change-tracking toggle skipped (PLEXTRAC_CHANGE_TRACKING_ENABLED=false)', {
+      desired_state: on ? 'on' : 'off', report_id: reportId,
     });
     return false;
   }
 
-  const method = (process.env.PLEXTRAC_TRACKING_METHOD || 'put').toLowerCase();
-  const path = buildPath(clientId, reportId);
-  if (!path) {
-    log.warn('Change-tracking enabled but PLEXTRAC_TRACKING_PATH is not set — skipping', {});
-    return false;
-  }
-  const body = parseBody(on ? 'PLEXTRAC_TRACKING_ON_BODY' : 'PLEXTRAC_TRACKING_OFF_BODY');
-
   try {
-    await api.raw(method, path, body);
+    // Partial update — merges, so it only touches isTrackChanges.
+    await api.updateReport(clientId, reportId, { isTrackChanges: on });
     log.info('Plextrac change-tracking toggled', { state: on ? 'on' : 'off', report_id: reportId });
     return true;
   } catch (err) {
-    // Never abort the QA run because tracking failed — we still log every change.
+    // Never abort the QA run because tracking failed — the internal audit log
+    // still records every change.
     log.error('Plextrac change-tracking toggle failed (continuing with internal audit log)', {
-      reason: err.message,
-      state: on ? 'on' : 'off',
-      report_id: reportId,
+      reason: err.message, state: on ? 'on' : 'off', report_id: reportId,
     });
     return false;
   }
 }
 
-const enable = (clientId, reportId) => toggle(clientId, reportId, true);
-const disable = (clientId, reportId) => toggle(clientId, reportId, false);
+const enable = (clientId, reportId) => setTracking(clientId, reportId, true);
+const disable = (clientId, reportId) => setTracking(clientId, reportId, false);
 
 module.exports = { enable, disable };
