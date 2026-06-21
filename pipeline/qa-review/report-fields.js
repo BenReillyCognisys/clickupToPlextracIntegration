@@ -36,6 +36,17 @@ function setByPath(obj, path, value) {
 // Sub-properties that hold the actual text inside an exec-summary section object.
 const TEXT_KEYS = ['text', 'value', 'custom_field', 'content', 'body'];
 
+// Section names the AI QA review skips entirely (e.g. Methodology, Issue Matrix).
+const EXCLUDED_SECTIONS = require('../../config/excluded-sections');
+
+// True if a section's name matches one of the excluded names (case-insensitive,
+// substring — so "Testing Methodology" matches "Methodology").
+function isExcludedSection(name, excluded = EXCLUDED_SECTIONS) {
+  if (!name) return false;
+  const hay = String(name).toLowerCase();
+  return excluded.some(n => n && hay.includes(String(n).toLowerCase()));
+}
+
 // Returns [{ path, label, text }] for every executive-summary text segment found.
 function getExecutiveSummarySegments(report) {
   const segments = [];
@@ -66,9 +77,12 @@ function pushSection(segments, field, basePath, section) {
     return;
   }
   if (!section || typeof section !== 'object') return;
+  const name = section.label || section.title;
+  // Skip boilerplate/reference sections (Methodology, Issue Matrix, …) — they are
+  // templated, not narrative, and must not be run through the AI.
+  if (isExcludedSection(name)) return;
   for (const key of TEXT_KEYS) {
     if (typeof section[key] === 'string') {
-      const name = section.label || section.title;
       segments.push({
         path: `${basePath}.${key}`,
         label: name ? `${field}: ${name}` : `${basePath}.${key}`,
@@ -112,4 +126,5 @@ module.exports = {
   getExecutiveSummarySegments,
   getFindingSegments,
   clientNameFromRecord,
+  isExcludedSection,
 };

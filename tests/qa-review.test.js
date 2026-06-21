@@ -2,6 +2,7 @@ const assert = require('assert');
 const { stripFormatting, hasFormatting, decodeEntities } = require('../lib/html-text');
 const {
   getByPath, setByPath, getExecutiveSummarySegments, getFindingSegments, clientNameFromRecord,
+  isExcludedSection,
 } = require('../pipeline/qa-review/report-fields');
 const { extractPlaceholders, placeholdersPreserved } = require('../lib/placeholders');
 const { namesPreserved, countOccurrences } = require('../lib/protected-names');
@@ -122,6 +123,31 @@ test('real Plextrac exec_summary.custom_fields shape', () => {
 
 test('no exec summary → empty', () => {
   eq(getExecutiveSummarySegments({ foo: 'bar' }), []);
+});
+
+// ── excluded sections (Methodology / Issue Matrix) ────────────────────────────
+console.log('\nexcluded sections:');
+
+test('isExcludedSection matches case-insensitively and as substring', () => {
+  eq(isExcludedSection('Methodology'), true);
+  eq(isExcludedSection('issue matrix'), true);
+  eq(isExcludedSection('Testing Methodology'), true);
+  eq(isExcludedSection('Overview'), false);
+  eq(isExcludedSection(undefined), false);
+});
+
+test('excluded sections are dropped from exec summary segments', () => {
+  const segs = getExecutiveSummarySegments({
+    exec_summary: {
+      custom_fields: [
+        { label: 'Overview', text: '<p>One</p>' },
+        { label: 'Methodology', text: '<p>Method</p>' },
+        { label: 'Issue Matrix', text: '<p>Matrix</p>' },
+        { label: 'Roadmap', text: '<p>Two</p>' },
+      ],
+    },
+  });
+  eq(segs.map(s => s.label), ['exec_summary: Overview', 'exec_summary: Roadmap']);
 });
 
 // ── finding extraction ────────────────────────────────────────────────────────
