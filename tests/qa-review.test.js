@@ -3,6 +3,7 @@ const { stripFormatting, hasFormatting, decodeEntities } = require('../lib/html-
 const {
   getByPath, setByPath, getExecutiveSummarySegments, getFindingSegments, clientNameFromRecord,
 } = require('../pipeline/qa-review/report-fields');
+const { extractPlaceholders, placeholdersPreserved } = require('../lib/placeholders');
 
 let passed = 0;
 let failed = 0;
@@ -101,6 +102,22 @@ test('executive_summary fallback field', () => {
   eq(segs[0].text, 'Alt');
 });
 
+test('real Plextrac exec_summary.custom_fields shape', () => {
+  const segs = getExecutiveSummarySegments({
+    exec_summary: {
+      custom_fields: [
+        { label: 'Overview', text: '<p>One</p>' },
+        { label: 'Roadmap', text: '<p>Two</p>' },
+      ],
+    },
+  });
+  eq(segs.length, 2);
+  eq(segs[0].path, 'exec_summary.custom_fields[0].text');
+  eq(segs[0].label, 'exec_summary: Overview');
+  eq(segs[1].path, 'exec_summary.custom_fields[1].text');
+  eq(segs[1].text, '<p>Two</p>');
+});
+
 test('no exec summary → empty', () => {
   eq(getExecutiveSummarySegments({ foo: 'bar' }), []);
 });
@@ -128,6 +145,32 @@ console.log('\nclientNameFromRecord:');
 test('object with name', () => eq(clientNameFromRecord({ name: 'Acme' }, 'fb'), 'Acme'));
 test('array data shape', () => eq(clientNameFromRecord({ data: [12, 'Acme Corp'] }, 'fb'), 'Acme Corp'));
 test('falls back', () => eq(clientNameFromRecord(null, 'fb'), 'fb'));
+
+// ── placeholder guard ─────────────────────────────────────────────────────────
+console.log('\nplaceholders:');
+
+test('extracts and sorts %% placeholders', () => {
+  eq(extractPlaceholders('a %%CLIENT_SHORTNAME%% b %%REPORT_START_DATE%%'),
+    ['%%CLIENT_SHORTNAME%%', '%%REPORT_START_DATE%%']);
+});
+
+test('none found → empty', () => eq(extractPlaceholders('plain text'), []));
+
+test('preserved when unchanged (reorder allowed)', () => {
+  eq(placeholdersPreserved('x %%A%% y %%B%%', 'y %%B%% then %%A%% rewritten'), true);
+});
+
+test('rejected when a placeholder is removed', () => {
+  eq(placeholdersPreserved('Engaged by %%CLIENT_SHORTNAME%%.', 'Engaged by Bank of Days.'), false);
+});
+
+test('rejected when a placeholder is altered', () => {
+  eq(placeholdersPreserved('%%CLIENT_SHORTNAME%%', '%%CLIENT_NAME%%'), false);
+});
+
+test('rejected when a placeholder is added', () => {
+  eq(placeholdersPreserved('no tokens', 'now has %%CLIENT_SHORTNAME%%'), false);
+});
 
 // ── Summary ───────────────────────────────────────────────────────────────────
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`);

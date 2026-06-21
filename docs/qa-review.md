@@ -38,10 +38,18 @@ mapping reuses the existing MongoDB `task_mappings` collection
 
 | Check | Applies to | How | Auto-applied? |
 |---|---|---|---|
-| **Strip text formatting** | exec summary + findings | Deterministic HTML→plain-text (`lib/html-text.js`) | Yes |
+| **Strip text formatting** | exec summary + findings | Deterministic HTML→plain-text (`lib/html-text.js`) | ⏸ **PAUSED** — being redefined (report fields are rich HTML; a blanket strip would flatten tables/headings). See `STRIP_FORMATTING_PAUSED` in `pipeline/qa-review/checks.js`. |
 | **Correct client name** | exec summary + findings | Claude API — replaces wrong org names with the real client name | Yes |
 | **De-jargon** (no TLS/SMB/etc.) | **exec summary only** | Claude API — rewrites for a non-technical audience | Yes |
 | **Incomplete sentences** | exec summary + findings | Claude API — **detection only** | **No — flagged to Slack** |
+
+**Placeholder guard.** Plextrac template variables (`%%CLIENT_SHORTNAME%%`,
+`%%REPORT_START_DATE%%`, `%%Author_01%%`, …) must never be altered — Plextrac
+substitutes them at render time. Two layers protect them: (1) the AI prompts are
+instructed to leave `%%...%%` tokens byte-for-byte unchanged, and (2) a guard
+(`lib/placeholders.js`) verifies every AI revision preserves the exact set of
+placeholders — if an edit would add/remove/change one, it is **rejected** (not
+applied) and flagged to Slack/log.
 
 **Why de-jargon is exec-summary-only:** findings are written for a technical
 audience; removing acronyms there would be wrong.

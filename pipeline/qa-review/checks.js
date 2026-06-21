@@ -5,14 +5,37 @@
 const { stripFormatting, hasFormatting } = require('../../lib/html-text');
 const ai = require('../../lib/ai-review');
 const log = require('../../lib/logger');
+const { placeholdersPreserved } = require('../../lib/placeholders');
 
 // Each check defaults ON; set the env var to "false" to disable it.
+//
+// NOTE: stripFormatting is PAUSED. The report fields are rich HTML (headings,
+// tables, lists) and a blanket strip would flatten them. It will be redefined to
+// strip only the specific formatting we want once examples are provided; until
+// then it never runs, regardless of QA_CHECK_STRIP_FORMATTING.
+const STRIP_FORMATTING_PAUSED = true;
 const ENABLED = {
-  stripFormatting: process.env.QA_CHECK_STRIP_FORMATTING !== 'false',
+  stripFormatting: !STRIP_FORMATTING_PAUSED && process.env.QA_CHECK_STRIP_FORMATTING !== 'false',
   clientName: process.env.QA_CHECK_CLIENT_NAME !== 'false',
   deJargon: process.env.QA_CHECK_DEJARGON !== 'false',
   sentences: process.env.QA_CHECK_SENTENCES !== 'false',
 };
+
+// Guard: accept an AI revision only if it leaves every %%...%% placeholder
+// untouched. Returns true if safe to apply; otherwise logs + records a flag.
+function placeholderGuard(checkLabel, before, after, ctx, flags) {
+  if (placeholdersPreserved(before, after)) return true;
+  log.warn('AI revision rejected — would alter %% placeholders', {
+    check: checkLabel, label: ctx.label,
+  });
+  flags.push({
+    type: 'placeholder_guard',
+    label: ctx.label,
+    sentence: `${checkLabel} suggested an edit that changed a Plextrac %% placeholder`,
+    issue: 'Edit NOT applied — it would have altered a %%...%% template variable',
+  });
+  return false;
+}
 
 /**
  * @param {string} text             the segment's current text
@@ -40,7 +63,8 @@ async function runChecks(text, ctx) {
   if (ENABLED.clientName && ctx.clientName) {
     try {
       const res = await ai.correctClientName(current, ctx.clientName);
-      if (res.changed && res.revised_text && res.revised_text !== current) {
+      if (res.changed && res.revised_text && res.revised_text !== current
+          && placeholderGuard('client_name', current, res.revised_text, ctx, flags)) {
         for (const c of res.changes || []) {
           applied.push({ type: 'client_name', label: ctx.label, before: c.original, after: c.replacement, reason: c.reason });
         }
@@ -55,7 +79,8 @@ async function runChecks(text, ctx) {
   if (ENABLED.deJargon && ctx.isExecutiveSummary) {
     try {
       const res = await ai.deJargonExecutiveSummary(current);
-      if (res.changed && res.revised_text && res.revised_text !== current) {
+      if (res.changed && res.revised_text && res.revised_text !== current
+          && placeholderGuard('dejargon', current, res.revised_text, ctx, flags)) {
         for (const c of res.changes || []) {
           applied.push({ type: 'dejargon', label: ctx.label, before: c.original, after: c.replacement, reason: c.reason });
         }

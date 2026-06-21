@@ -49,25 +49,34 @@ function getExecutiveSummarySegments(report) {
     if (typeof val === 'string') {
       segments.push({ path: field, label: field, text: val });
     } else if (Array.isArray(val)) {
-      val.forEach((section, i) => {
-        if (typeof section === 'string') {
-          segments.push({ path: `${field}[${i}]`, label: `${field}[${i}]`, text: section });
-        } else if (section && typeof section === 'object') {
-          for (const key of TEXT_KEYS) {
-            if (typeof section[key] === 'string') {
-              segments.push({
-                path: `${field}[${i}].${key}`,
-                label: section.title ? `${field}: ${section.title}` : `${field}[${i}].${key}`,
-                text: section[key],
-              });
-              break;
-            }
-          }
-        }
-      });
+      val.forEach((section, i) => pushSection(segments, field, `${field}[${i}]`, section));
+    } else if (val && typeof val === 'object' && Array.isArray(val.custom_fields)) {
+      // Real Plextrac shape: exec_summary = { custom_fields: [{ label, text }, ...] }
+      val.custom_fields.forEach((section, i) =>
+        pushSection(segments, field, `${field}.custom_fields[${i}]`, section));
     }
   }
   return segments;
+}
+
+// Pushes a segment for a section object, picking the first text-bearing key.
+function pushSection(segments, field, basePath, section) {
+  if (typeof section === 'string') {
+    segments.push({ path: basePath, label: basePath, text: section });
+    return;
+  }
+  if (!section || typeof section !== 'object') return;
+  for (const key of TEXT_KEYS) {
+    if (typeof section[key] === 'string') {
+      const name = section.label || section.title;
+      segments.push({
+        path: `${basePath}.${key}`,
+        label: name ? `${field}: ${name}` : `${basePath}.${key}`,
+        text: section[key],
+      });
+      break;
+    }
+  }
 }
 
 // Returns [{ path, label, text }] for the editable narrative fields of a finding.
