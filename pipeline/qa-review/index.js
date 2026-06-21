@@ -1,15 +1,16 @@
 // QA-review pipeline: triggered when a Plextrac report moves to "ready for QA".
 //
 // Flow:
-//   1. Enable Plextrac change-tracking (best-effort; see change-tracking.js).
-//   2. Review + correct the executive summary (formatting, client name,
+//   1. Post the "ready for first round of QA" parent message to #pt-first-round-qa
+//      up front (so the channel is notified the moment review begins).
+//   2. Enable Plextrac change-tracking (best-effort; see change-tracking.js).
+//   3. Review + correct the executive summary (formatting, client name,
 //      de-jargon, flag incomplete sentences).
-//   3. Review + correct each finding (formatting, client name, flag incomplete
+//   4. Review + correct each finding (formatting, client name, flag incomplete
 //      sentences — NOT de-jargon: findings are for a technical audience).
-//   4. Disable Plextrac change-tracking.
-//   5. Log every change to the log file, post "ready for first round of QA" to
-//      the #pt-first-round-qa Slack channel, and reply in-thread with the AI
-//      QA feedback (the changes + flags).
+//   5. Log every change to the log file, then reply IN THE PARENT'S THREAD with
+//      the AI QA feedback (the changes + flags) once the review has fully
+//      completed.
 
 const api = require('../../lib/plextrac-api');
 const log = require('../../lib/logger');
@@ -65,6 +66,15 @@ async function runQaReview(mapping) {
   } catch (err) {
     log.warn('Could not fetch client record — falling back to mapping name', { reason: err.message });
   }
+
+  // Announce up front, BEFORE the (slower) review runs: post the "ready for first
+  // round of QA" parent message now and keep its thread anchor (ts). The AI QA
+  // feedback is posted as a threaded reply once the review has fully completed.
+  const base = `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}`;
+  const clientUrl = `${base}/client/${clientId}`;
+  const reportUrl = `${base}/client/${clientId}/report/${reportId}`;
+  const reportName = report?.name || mapping.task_name || `Report ${reportId}`;
+  const threadTs = await postFirstRoundParent({ clientName, clientUrl, reportName, reportUrl });
 
   await tracking.enable(clientId, reportId);
 
@@ -171,11 +181,9 @@ async function runQaReview(mapping) {
     log.warn('QA flag (needs author attention)', { type: f.type, field: f.label, sentence: truncate(f.sentence, 120), issue: f.issue });
   }
 
-  const base = `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}`;
-  const clientUrl = `${base}/client/${clientId}`;
-  const reportUrl = `${base}/client/${clientId}/report/${reportId}`;
-  const reportName = report?.name || mapping.task_name || `Report ${reportId}`;
-  await postFirstRoundQa({ clientName, clientUrl, reportName, reportUrl, applied, flags });
+  // Now that QA has fully completed, post the AI feedback as a threaded reply to
+  // the parent message sent at the start.
+  await postFirstRoundReply({ threadTs, reportUrl, applied, flags });
 
   log.info('QA review complete', {
     report_id: reportId, changes_applied: applied.length, flags_raised: flags.length,
@@ -197,23 +205,29 @@ function buildFirstRoundMessage({ clientName, clientUrl, reportName, reportUrl }
   return `Client: ${client} - ${report} ready for first round of QA`;
 }
 
-// Posts the "ready for first round of QA" message to #pt-first-round-qa, then
-// replies in its thread with the AI QA feedback (the changes + flags).
-async function postFirstRoundQa({ clientName, clientUrl, reportName, reportUrl, applied, flags }) {
+// Posts the "ready for first round of QA" parent message to #pt-first-round-qa up
+// front (before the review runs). Returns the message `ts` to thread the feedback
+// reply against, or null if the post failed (the review still proceeds).
+async function postFirstRoundParent({ clientName, clientUrl, reportName, reportUrl }) {
   const parent = buildFirstRoundMessage({ clientName, clientUrl, reportName, reportUrl });
-
-  let ts;
   try {
-    ts = await slack.postMessage(FIRST_ROUND_QA_CHANNEL, parent);
+    return await slack.postMessage(FIRST_ROUND_QA_CHANNEL, parent);
   } catch (err) {
     log.error('Failed to post first-round QA message to Slack', { reason: err.message });
-    return;
+    return null;
   }
+}
 
+// Posts the AI QA feedback once the review is complete — as a reply in the parent
+// message's thread. If the parent post failed (no threadTs), it falls back to a
+// standalone message so the feedback is never silently lost.
+async function postFirstRoundReply({ threadTs, reportUrl, applied, flags }) {
+  const body = buildThreadBody(applied, flags, reportUrl);
   try {
-    await slack.postReply(FIRST_ROUND_QA_CHANNEL, ts, buildThreadBody(applied, flags, reportUrl));
+    if (threadTs) await slack.postReply(FIRST_ROUND_QA_CHANNEL, threadTs, body);
+    else await slack.postMessage(FIRST_ROUND_QA_CHANNEL, body);
   } catch (err) {
-    log.error('Failed to post first-round QA feedback thread to Slack', { reason: err.message });
+    log.error('Failed to post first-round QA feedback to Slack', { reason: err.message });
   }
 }
 

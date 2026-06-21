@@ -22,14 +22,14 @@ routes/plextrac-webhook.js          verify signature → ack 200 → look up map
         pipeline/qa-review/index.js
           1. fetch report; status gate (PLEXTRAC_QA_STATUS)
           2. resolve canonical client name (Plextrac client record)
-          3. enable change tracking (best-effort — see below)
-          4. executive summary:  strip formatting → client-name → de-jargon → flag incomplete sentences
-          5. findings:           strip formatting → client-name → flag incomplete sentences
-          6. disable change tracking (always, via finally)
-          7. log every change to LOG_FILE; post "Client: {client} - {report}
-             ready for first round of QA" to #pt-first-round-qa (client + report
-             names hyperlinked to Plextrac), then reply in-thread with the AI QA
-             feedback (changes + flags)
+          3. post parent msg "Client: {client} - {report} ready for first round of
+             QA" to #pt-first-round-qa FIRST (client + report names hyperlinked);
+             keep its thread anchor
+          4. enable change tracking (best-effort — see below)
+          5. executive summary:  strip formatting → client-name → de-jargon → flag incomplete sentences
+          6. findings:           strip formatting → client-name → flag incomplete sentences
+          7. log every change to LOG_FILE; once QA is fully complete, reply in the
+             parent's thread with the AI QA feedback (changes + flags)
 ```
 
 The QA review runs **fire-and-forget** so the (slower, billable) review never
