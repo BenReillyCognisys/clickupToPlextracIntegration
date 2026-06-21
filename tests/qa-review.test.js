@@ -6,7 +6,7 @@ const {
 } = require('../pipeline/qa-review/report-fields');
 const { extractPlaceholders, placeholdersPreserved } = require('../lib/placeholders');
 const { namesPreserved, countOccurrences } = require('../lib/protected-names');
-const { buildThreadBody } = require('../pipeline/qa-review');
+const { buildThreadBody, buildFirstRoundMessage } = require('../pipeline/qa-review');
 
 let passed = 0;
 let failed = 0;
@@ -245,6 +245,38 @@ test('lists applied changes and flags', () => {
 
 test('says nothing found when empty', () => {
   eq(buildThreadBody([], [], 'https://x').includes('No changes or issues found.'), true);
+});
+
+console.log('\nbuildFirstRoundMessage:');
+
+test('hyperlinks the client and report names', () => {
+  eq(
+    buildFirstRoundMessage({
+      clientName: 'Acme Corp',
+      clientUrl: 'https://x/client/1',
+      reportName: 'Web App Pentest',
+      reportUrl: 'https://x/client/1/report/2',
+    }),
+    'Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> ready for first round of QA',
+  );
+});
+
+test('escapes mrkdwn-special characters in link text', () => {
+  const msg = buildFirstRoundMessage({
+    clientName: 'A & B <Ltd>',
+    clientUrl: 'https://x/client/1',
+    reportName: 'Q1 <draft>',
+    reportUrl: 'https://x/report/2',
+  });
+  eq(msg.includes('A &amp; B &lt;Ltd&gt;'), true);
+  eq(msg.includes('Q1 &lt;draft&gt;'), true);
+});
+
+test('falls back to plain text when a url is missing', () => {
+  eq(
+    buildFirstRoundMessage({ clientName: 'Acme', reportName: 'Report 5' }),
+    'Client: Acme - Report 5 ready for first round of QA',
+  );
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────

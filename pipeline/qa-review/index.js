@@ -172,9 +172,10 @@ async function runQaReview(mapping) {
   }
 
   const base = `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}`;
+  const clientUrl = `${base}/client/${clientId}`;
   const reportUrl = `${base}/client/${clientId}/report/${reportId}`;
   const reportName = report?.name || mapping.task_name || `Report ${reportId}`;
-  await postFirstRoundQa({ clientName, reportName, reportUrl, applied, flags });
+  await postFirstRoundQa({ clientName, clientUrl, reportName, reportUrl, applied, flags });
 
   log.info('QA review complete', {
     report_id: reportId, changes_applied: applied.length, flags_raised: flags.length,
@@ -183,10 +184,23 @@ async function runQaReview(mapping) {
   return { applied, flags };
 }
 
+// Escapes the three characters that are special in Slack mrkdwn link text.
+function slackEscape(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Builds the parent message with the client and report names hyperlinked.
+//   Client: <client> - <report> ready for first round of QA
+function buildFirstRoundMessage({ clientName, clientUrl, reportName, reportUrl }) {
+  const client = clientUrl ? `<${clientUrl}|${slackEscape(clientName)}>` : slackEscape(clientName);
+  const report = reportUrl ? `<${reportUrl}|${slackEscape(reportName)}>` : slackEscape(reportName);
+  return `Client: ${client} - ${report} ready for first round of QA`;
+}
+
 // Posts the "ready for first round of QA" message to #pt-first-round-qa, then
 // replies in its thread with the AI QA feedback (the changes + flags).
-async function postFirstRoundQa({ clientName, reportName, reportUrl, applied, flags }) {
-  const parent = `Client: ${clientName} - ${reportName} ready for first round of QA.`;
+async function postFirstRoundQa({ clientName, clientUrl, reportName, reportUrl, applied, flags }) {
+  const parent = buildFirstRoundMessage({ clientName, clientUrl, reportName, reportUrl });
 
   let ts;
   try {
@@ -231,4 +245,4 @@ function buildThreadBody(applied, flags, url) {
   return lines.join('\n');
 }
 
-module.exports = { runQaReview, buildThreadBody };
+module.exports = { runQaReview, buildThreadBody, buildFirstRoundMessage };

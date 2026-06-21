@@ -27,8 +27,9 @@ routes/plextrac-webhook.js          verify signature → ack 200 → look up map
           5. findings:           strip formatting → client-name → flag incomplete sentences
           6. disable change tracking (always, via finally)
           7. log every change to LOG_FILE; post "Client: {client} - {report}
-             ready for first round of QA." to #pt-first-round-qa, then reply
-             in-thread with the AI QA feedback (changes + flags)
+             ready for first round of QA" to #pt-first-round-qa (client + report
+             names hyperlinked to Plextrac), then reply in-thread with the AI QA
+             feedback (changes + flags)
 ```
 
 The QA review runs **fire-and-forget** so the (slower, billable) review never
