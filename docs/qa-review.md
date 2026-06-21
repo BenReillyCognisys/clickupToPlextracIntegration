@@ -26,7 +26,9 @@ routes/plextrac-webhook.js          verify signature → ack 200 → look up map
           4. executive summary:  strip formatting → client-name → de-jargon → flag incomplete sentences
           5. findings:           strip formatting → client-name → flag incomplete sentences
           6. disable change tracking (always, via finally)
-          7. log every change to LOG_FILE + post a Slack summary to the QA channel
+          7. log every change to LOG_FILE; post "Client: {client} - {report}
+             ready for first round of QA." to #pt-first-round-qa, then reply
+             in-thread with the AI QA feedback (changes + flags)
 ```
 
 The QA review runs **fire-and-forget** so the (slower, billable) review never
@@ -136,8 +138,11 @@ These were coded defensively but could not be validated against the real API:
 
 1. `npm install` (adds `@anthropic-ai/sdk`).
 2. Fill in the new `.env` values (see `.env.example` → "AI QA Review"): at minimum
-   `ANTHROPIC_API_KEY`, `LOG_FILE`, `PLEXTRAC_QA_STATUS`, and (optionally)
-   `QA_SLACK_WEBHOOK_URL`.
+   `ANTHROPIC_API_KEY`, `LOG_FILE`, `PLEXTRAC_QA_STATUS`.
+2b. **Slack first-round QA** — create a Slack app with a bot token (`xoxb-...`)
+   that has the `chat:write` scope, invite it to **#pt-first-round-qa**, and set
+   `SLACK_BOT_TOKEN` + `SLACK_FIRST_ROUND_QA_CHANNEL` (defaults to the channel id
+   `C0B9D6487HR`). A bot token is required because incoming webhooks can't thread.
 3. **No new webhook needed** — the review runs from the existing
    `/webhook/plextrac` handler. Just ensure that webhook is configured to fire on
    the QA status (and that `PLEXTRAC_QA_STATUS` matches it exactly).
@@ -150,6 +155,7 @@ These were coded defensively but could not be validated against the real API:
 ## Files
 
 - `routes/plextrac-webhook.js` — existing webhook; now also triggers `runQaReview` on the QA status
+- `lib/slack.js` — Slack Web API helper (parent message + threaded reply for first-round QA)
 - `pipeline/qa-review/index.js` — orchestrator
 - `pipeline/qa-review/checks.js` — per-segment check runner
 - `pipeline/qa-review/report-fields.js` — shape-tolerant field locate/read/write

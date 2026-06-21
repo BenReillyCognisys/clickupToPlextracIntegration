@@ -5,6 +5,7 @@ const {
 } = require('../pipeline/qa-review/report-fields');
 const { extractPlaceholders, placeholdersPreserved } = require('../lib/placeholders');
 const { namesPreserved, countOccurrences } = require('../lib/protected-names');
+const { buildThreadBody } = require('../pipeline/qa-review');
 
 let passed = 0;
 let failed = 0;
@@ -193,6 +194,23 @@ test('rejected when Cognisys is replaced (the reported bug)', () => {
 
 test('preserved when an unrelated client name is corrected', () => {
   eq(namesPreserved('MMA Guru asked Cognisys to test.', 'Mental Outlaw Inc asked Cognisys to test.', COG), true);
+});
+
+// ── first-round QA thread body ────────────────────────────────────────────────
+console.log('\nbuildThreadBody:');
+
+test('lists applied changes and flags', () => {
+  const body = buildThreadBody(
+    [{ label: 'exec_summary: Overview', type: 'dejargon', before: 'TLS', after: 'encryption' }],
+    [{ label: 'exec_summary: Roadmap', issue: 'placeholder text', sentence: 'Lorem Ipsum' }],
+    'https://x/report/1');
+  eq(body.includes('1 change(s) applied, 1 item(s) flagged.'), true);
+  eq(body.includes('_dejargon_: "TLS" → "encryption"'), true);
+  eq(body.includes('Lorem Ipsum'), true);
+});
+
+test('says nothing found when empty', () => {
+  eq(buildThreadBody([], [], 'https://x').includes('No changes or issues found.'), true);
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────

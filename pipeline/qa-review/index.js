@@ -7,15 +7,20 @@
 //   3. Review + correct each finding (formatting, client name, flag incomplete
 //      sentences — NOT de-jargon: findings are for a technical audience).
 //   4. Disable Plextrac change-tracking.
-//   5. Log every change to the log file and post a summary to Slack.
+//   5. Log every change to the log file, post "ready for first round of QA" to
+//      the #pt-first-round-qa Slack channel, and reply in-thread with the AI
+//      QA feedback (the changes + flags).
 
 const api = require('../../lib/plextrac-api');
 const log = require('../../lib/logger');
+const slack = require('../../lib/slack');
 const tracking = require('./change-tracking');
 const { runChecks } = require('./checks');
 const fields = require('./report-fields');
 
 const MAX_FINDINGS = Number(process.env.QA_MAX_FINDINGS || 200);
+// #pt-first-round-qa channel id (override via env).
+const FIRST_ROUND_QA_CHANNEL = process.env.SLACK_FIRST_ROUND_QA_CHANNEL || 'C0B9D6487HR';
 
 function truncate(s, n = 80) {
   const flat = String(s).replace(/\s+/g, ' ').trim();
@@ -164,7 +169,10 @@ async function runQaReview(mapping) {
     log.warn('QA flag (needs author attention)', { type: f.type, field: f.label, sentence: truncate(f.sentence, 120), issue: f.issue });
   }
 
-  postSlackSummary(mapping, clientId, reportId, applied, flags);
+  const base = `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}`;
+  const reportUrl = `${base}/client/${clientId}/report/${reportId}`;
+  const reportName = report?.name || mapping.task_name || `Report ${reportId}`;
+  await postFirstRoundQa({ clientName, reportName, reportUrl, applied, flags });
 
   log.info('QA review complete', {
     report_id: reportId, changes_applied: applied.length, flags_raised: flags.length,
@@ -173,31 +181,52 @@ async function runQaReview(mapping) {
   return { applied, flags };
 }
 
-function postSlackSummary(mapping, clientId, reportId, applied, flags) {
-  const base = `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}`;
-  const url = `${base}/client/${clientId}/report/${reportId}`;
-  const title = mapping.task_name || `Report ${reportId}`;
+// Posts the "ready for first round of QA" message to #pt-first-round-qa, then
+// replies in its thread with the AI QA feedback (the changes + flags).
+async function postFirstRoundQa({ clientName, reportName, reportUrl, applied, flags }) {
+  const parent = `Client: ${clientName} - ${reportName} ready for first round of QA.`;
 
-  const lines = [`*QA review complete* — <${url}|${title}>`,
-    `${applied.length} change(s) applied, ${flags.length} item(s) flagged.`];
+  let ts;
+  try {
+    ts = await slack.postMessage(FIRST_ROUND_QA_CHANNEL, parent);
+  } catch (err) {
+    log.error('Failed to post first-round QA message to Slack', { reason: err.message });
+    return;
+  }
+
+  try {
+    await slack.postReply(FIRST_ROUND_QA_CHANNEL, ts, buildThreadBody(applied, flags, reportUrl));
+  } catch (err) {
+    log.error('Failed to post first-round QA feedback thread to Slack', { reason: err.message });
+  }
+}
+
+// Builds the threaded reply body listing the AI QA feedback.
+function buildThreadBody(applied, flags, url) {
+  const lines = [
+    `*AI QA feedback* — <${url}|open report>`,
+    `${applied.length} change(s) applied, ${flags.length} item(s) flagged.`,
+  ];
 
   if (applied.length) {
     lines.push('', '*Changes applied:*');
-    for (const c of applied.slice(0, 40)) {
+    for (const c of applied.slice(0, 50)) {
       lines.push(`• [${c.label}] _${c.type}_: "${truncate(c.before)}" → "${truncate(c.after)}"`);
     }
-    if (applied.length > 40) lines.push(`…and ${applied.length - 40} more (see log file).`);
+    if (applied.length > 50) lines.push(`…and ${applied.length - 50} more (see log file).`);
   }
 
   if (flags.length) {
     lines.push('', '*Flagged for author (not auto-changed):*');
-    for (const f of flags.slice(0, 20)) {
+    for (const f of flags.slice(0, 30)) {
       lines.push(`• [${f.label}] ${f.issue}: "${truncate(f.sentence)}"`);
     }
-    if (flags.length > 20) lines.push(`…and ${flags.length - 20} more (see log file).`);
+    if (flags.length > 30) lines.push(`…and ${flags.length - 30} more (see log file).`);
   }
 
-  log.notifyQA(lines.join('\n'));
+  if (!applied.length && !flags.length) lines.push('', 'No changes or issues found.');
+
+  return lines.join('\n');
 }
 
-module.exports = { runQaReview };
+module.exports = { runQaReview, buildThreadBody };
