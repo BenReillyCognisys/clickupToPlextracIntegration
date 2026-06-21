@@ -2,7 +2,11 @@ const crypto = require('crypto');
 const { findByCuid } = require('../lib/task-store');
 const { updateTaskStatus } = require('../lib/clickup-api');
 const { getReport } = require('../lib/plextrac-api');
+const { runQaReview } = require('../pipeline/qa-review');
 const log = require('../lib/logger');
+
+// Status that triggers the automated AI QA review (defaults to the QA status).
+const QA_TRIGGER_STATUS = process.env.PLEXTRAC_QA_STATUS || 'Ready For Review';
 
 // Plextrac signature: HMAC-SHA256(secret, rawBody), header: X-Authorization-HMAC-256
 function verifySignature(secret, rawBody, header) {
@@ -80,6 +84,19 @@ async function handler(req, res) {
       report_id: mapping.plextrac_report_id,
     });
     return;
+  }
+
+  // When the report enters the QA status, kick off the automated AI QA review.
+  // Fire-and-forget so the (fast) ClickUp status sync below isn't blocked by the
+  // (slower, billable) review; runQaReview logs its own outcome and errors.
+  if (reportStatus === QA_TRIGGER_STATUS) {
+    runQaReview(mapping).catch(err => {
+      log.error('QA review pipeline threw', {
+        reason: err.message,
+        cuid: targetCuid,
+        report_id: mapping.plextrac_report_id,
+      });
+    });
   }
 
   const clickupStatus = STATUS_MAP[reportStatus];

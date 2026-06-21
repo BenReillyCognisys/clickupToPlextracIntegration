@@ -1,0 +1,126 @@
+# Automated QA Review (Plextrac → AI → Plextrac)
+
+When a Plextrac report moves to **ready for QA**, Plextrac calls the existing
+`/webhook/plextrac` endpoint. That single handler does two things: it syncs the
+ClickUp task status (its original job) **and** kicks off the AI QA review. The
+review corrects the report's **executive summary** and **findings**, writes
+changes back to Plextrac, and logs every change to a log file and a Slack channel.
+
+There is **no separate QA webhook** — it is integrated into the existing Plextrac
+webhook, so only one webhook needs to be configured in Plextrac.
+
+## Flow
+
+```
+Plextrac (status → QA)
+   │  POST /webhook/plextrac        (HMAC-SHA256 signed — existing endpoint)
+   ▼
+routes/plextrac-webhook.js          verify signature → ack 200 → look up mapping by CUID → fetch report
+   ├─ sync ClickUp task status (existing behaviour)
+   └─ if report status === PLEXTRAC_QA_STATUS → runQaReview(mapping)  [fire-and-forget]
+        ▼
+        pipeline/qa-review/index.js
+          1. fetch report; status gate (PLEXTRAC_QA_STATUS)
+          2. resolve canonical client name (Plextrac client record)
+          3. enable change tracking (best-effort — see below)
+          4. executive summary:  strip formatting → client-name → de-jargon → flag incomplete sentences
+          5. findings:           strip formatting → client-name → flag incomplete sentences
+          6. disable change tracking (always, via finally)
+          7. log every change to LOG_FILE + post a Slack summary to the QA channel
+```
+
+The QA review runs **fire-and-forget** so the (slower, billable) review never
+blocks the fast ClickUp status sync. The report CUID → `{clientId, reportId}`
+mapping reuses the existing MongoDB `task_mappings` collection
+(`lib/task-store.findByCuid`).
+
+## The checks
+
+| Check | Applies to | How | Auto-applied? |
+|---|---|---|---|
+| **Strip text formatting** | exec summary + findings | Deterministic HTML→plain-text (`lib/html-text.js`) | Yes |
+| **Correct client name** | exec summary + findings | Claude API — replaces wrong org names with the real client name | Yes |
+| **De-jargon** (no TLS/SMB/etc.) | **exec summary only** | Claude API — rewrites for a non-technical audience | Yes |
+| **Incomplete sentences** | exec summary + findings | Claude API — **detection only** | **No — flagged to Slack** |
+
+**Why de-jargon is exec-summary-only:** findings are written for a technical
+audience; removing acronyms there would be wrong.
+
+**Why incomplete sentences are flagged, not fixed:** completing a half-written
+sentence means inventing content the author never wrote. These are reported to
+the author via Slack/log instead of auto-edited.
+
+Each check is independently toggleable (`QA_CHECK_*` env vars, default on).
+
+## Claude Pro vs Claude API
+
+This feature uses the **Claude API** (`@anthropic-ai/sdk`, model `claude-opus-4-8`)
+with a billed `ANTHROPIC_API_KEY` from console.anthropic.com.
+
+A **Claude Pro/Max subscription will not work** — Pro is for interactive use
+(claude.ai, Claude Code) and cannot be called from a server. An unattended
+webhook handler needs the API.
+
+Each AI check is a single structured-output (JSON-schema-constrained) request, so
+results are always machine-parseable and carry an explicit list of changes for
+the audit log.
+
+## Change tracking — what's guaranteed
+
+The **authoritative audit trail is internal**: every applied change is written to
+`LOG_FILE` and posted to Slack. This always works and does not depend on Plextrac.
+
+Mirroring tracking state into **Plextrac's own change-tracking/review UI** is
+**best-effort and off by default** (`pipeline/qa-review/change-tracking.js`).
+Whether Plextrac exposes that feature over its API — and at which endpoint — was
+**not verifiable while building this**. To enable it once confirmed, set the
+`PLEXTRAC_CHANGE_TRACKING_ENABLED` / `PLEXTRAC_TRACKING_*` env vars (no code
+change needed). A failure to toggle tracking never aborts the review — the
+internal audit log still captures everything.
+
+## ⚠️ Assumptions to confirm against the live Plextrac instance
+
+These were coded defensively but could not be validated against the real API:
+
+1. **Findings endpoints** use Plextrac's v1 "flaw" routes
+   (`/client/{c}/report/{r}/flaws`, `.../flaw/{id}`). Confirm with
+   `node scripts/inspect-findings.js`.
+2. **Executive-summary field shape.** `report-fields.js` tolerates a string
+   field (`exec_summary` / `executive_summary`) or an array of section objects
+   (`{title, text|value|custom_field|...}`). Confirm with
+   `node scripts/inspect-report.js`; if a field isn't picked up it is logged as
+   "No executive-summary segment found".
+3. **Write-back.** The exec summary is written by PUT-ing the full (edited)
+   report object; findings by PUT-ing the full (edited) finding object. If your
+   instance rejects round-tripped fields, adjust `updateReport`/`updateFinding`
+   payloads.
+
+## Setup
+
+1. `npm install` (adds `@anthropic-ai/sdk`).
+2. Fill in the new `.env` values (see `.env.example` → "AI QA Review"): at minimum
+   `ANTHROPIC_API_KEY`, `LOG_FILE`, `PLEXTRAC_QA_STATUS`, and (optionally)
+   `QA_SLACK_WEBHOOK_URL`.
+3. **No new webhook needed** — the review runs from the existing
+   `/webhook/plextrac` handler. Just ensure that webhook is configured to fire on
+   the QA status (and that `PLEXTRAC_QA_STATUS` matches it exactly).
+4. Run the diagnostics once to confirm field shapes:
+   `node scripts/inspect-report.js` and `node scripts/inspect-findings.js`.
+5. Recommended first run: set `QA_CHECK_*` to disable AI checks and verify
+   formatting-only behaviour, then enable AI checks on a test report and review
+   the Slack summary before relying on it.
+
+## Files
+
+- `routes/plextrac-webhook.js` — existing webhook; now also triggers `runQaReview` on the QA status
+- `pipeline/qa-review/index.js` — orchestrator
+- `pipeline/qa-review/checks.js` — per-segment check runner
+- `pipeline/qa-review/report-fields.js` — shape-tolerant field locate/read/write
+- `pipeline/qa-review/change-tracking.js` — best-effort Plextrac tracking toggle
+- `lib/ai-review.js` — Claude API calls (structured outputs)
+- `lib/html-text.js` — deterministic formatting strip
+- `lib/logger.js` — extended with file sink + QA Slack channel
+- `lib/plextrac-api.js` — added `getClient`, findings calls, `raw` passthrough
+- `scripts/inspect-findings.js` — diagnostic
+- `tests/qa-review.test.js` — unit tests for the deterministic pieces
+```

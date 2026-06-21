@@ -4,9 +4,10 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node tests/parse-task.test.js"
+    "test": "node tests/parse-task.test.js && node tests/qa-review.test.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.105.0",
     "axios": "^1.18.0",
     "dotenv": "^17.4.2",
     "express": "^4.18.2",

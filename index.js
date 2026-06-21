@@ -25,6 +25,8 @@ app.post('/webhook/clickup',
   require('./routes/clickup-webhook')
 );
 
+// The Plextrac webhook handles both the ClickUp status sync and (when a report
+// enters the QA status) the automated AI QA review — see routes/plextrac-webhook.js.
 app.post('/webhook/plextrac',
   webhookLimiter,
   express.raw({ type: 'application/json', limit: '100kb' }),
