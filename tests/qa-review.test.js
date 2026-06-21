@@ -4,6 +4,7 @@ const {
   getByPath, setByPath, getExecutiveSummarySegments, getFindingSegments, clientNameFromRecord,
 } = require('../pipeline/qa-review/report-fields');
 const { extractPlaceholders, placeholdersPreserved } = require('../lib/placeholders');
+const { namesPreserved, countOccurrences } = require('../lib/protected-names');
 
 let passed = 0;
 let failed = 0;
@@ -170,6 +171,28 @@ test('rejected when a placeholder is altered', () => {
 
 test('rejected when a placeholder is added', () => {
   eq(placeholdersPreserved('no tokens', 'now has %%CLIENT_SHORTNAME%%'), false);
+});
+
+// ── protected names guard ─────────────────────────────────────────────────────
+console.log('\nprotected names:');
+
+const COG = ['Cognisys Group Limited', 'Cognisys Group', 'Cognisys'];
+
+test('counts occurrences case-insensitively', () => {
+  eq(countOccurrences('Cognisys and COGNISYS again', 'Cognisys'), 2);
+});
+
+test('preserved when Cognisys is left intact', () => {
+  eq(namesPreserved('Cognisys were engaged by %%CLIENT_SHORTNAME%%.',
+    'Cognisys were engaged by Acme.', COG), true);
+});
+
+test('rejected when Cognisys is replaced (the reported bug)', () => {
+  eq(namesPreserved('Cognisys were engaged to test.', 'Ben Test were engaged to test.', COG), false);
+});
+
+test('preserved when an unrelated client name is corrected', () => {
+  eq(namesPreserved('MMA Guru asked Cognisys to test.', 'Mental Outlaw Inc asked Cognisys to test.', COG), true);
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────

@@ -39,7 +39,7 @@ mapping reuses the existing MongoDB `task_mappings` collection
 | Check | Applies to | How | Auto-applied? |
 |---|---|---|---|
 | **Strip text formatting** | exec summary + findings | Deterministic HTML→plain-text (`lib/html-text.js`) | ⏸ **PAUSED** — being redefined (report fields are rich HTML; a blanket strip would flatten tables/headings). See `STRIP_FORMATTING_PAUSED` in `pipeline/qa-review/checks.js`. |
-| **Correct client name** | exec summary + findings | Claude API — replaces wrong org names with the real client name | Yes |
+| **Correct client name** | exec summary + findings | Claude API — replaces wrong org names with the real client name. **Protected names** (the testing provider — Cognisys / Cognisys Group / Cognisys Group Limited, configurable via `QA_PROTECTED_NAMES` / `config/protected-names.js`) are never changed. | Yes |
 | **De-jargon** (no TLS/SMB/etc.) | **exec summary only** | Claude API — rewrites for a non-technical audience | Yes |
 | **Incomplete sentences** | exec summary + findings | Claude API — **detection only** | **No — flagged to Slack** |
 
@@ -50,6 +50,12 @@ instructed to leave `%%...%%` tokens byte-for-byte unchanged, and (2) a guard
 (`lib/placeholders.js`) verifies every AI revision preserves the exact set of
 placeholders — if an edit would add/remove/change one, it is **rejected** (not
 applied) and flagged to Slack/log.
+
+**Protected-name guard.** The same guard (`lib/protected-names.js`) also rejects
+any revision that would remove or rename a protected organisation name (the
+testing provider — Cognisys, etc.; see `config/protected-names.js`). This
+deterministically prevents the client-name check from rewriting "Cognisys" into
+the client's name.
 
 **Why de-jargon is exec-summary-only:** findings are written for a technical
 audience; removing acronyms there would be wrong.
@@ -80,7 +86,12 @@ request (`reviewSegment`), and the defaults are tuned for low cost:
   tokens bill as output, and these bounded edit tasks don't need them.
 - **No `effort`** sent by default (`QA_AI_EFFORT`; only valid on Opus/Sonnet).
 - One merged call per segment instead of three, so the segment text and system
-  prompt aren't re-sent per check and the text is only rewritten once.
+  prompt aren't re-sent per check.
+- **Edits-only responses**: the model returns just the before→after spans to
+  change (not the full rewritten text), and `checks.js` applies them in code.
+  Output tokens are the expensive part (5× input), so for mostly-unchanged
+  sections this is the largest saving — an unchanged segment returns ~empty
+  instead of echoing hundreds of tokens.
 
 If you need higher edit quality, raise `ANTHROPIC_MODEL` (e.g.
 `claude-sonnet-4-6`) and/or set `QA_AI_THINKING=true` — at higher cost.
@@ -89,9 +100,12 @@ If you need higher edit quality, raise `ANTHROPIC_MODEL` (e.g.
 
 Plextrac tracks changes at the report level via the boolean `isTrackChanges`
 field on the report object (`true` = track changes across all rich-text fields).
-The pipeline sets it `true` before editing and `false` after, using the standard
-report update endpoint (`pipeline/qa-review/change-tracking.js`). It is **on by
-default**; set `PLEXTRAC_CHANGE_TRACKING_ENABLED=false` to opt out.
+The pipeline sets it `true` before editing via the standard report update
+endpoint (`pipeline/qa-review/change-tracking.js`). It is **on by default**; set
+`PLEXTRAC_CHANGE_TRACKING_ENABLED=false` to opt out.
+
+Tracking is **intentionally left ON after the run** — the pipeline does not turn
+it off, so the report keeps tracking any subsequent edits a reviewer makes.
 
 The executive-summary write uses a **partial update** (only the changed
 top-level fields) precisely so it doesn't reset `isTrackChanges` mid-edit by

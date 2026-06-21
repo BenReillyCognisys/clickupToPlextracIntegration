@@ -6,6 +6,8 @@ const { stripFormatting, hasFormatting } = require('../../lib/html-text');
 const ai = require('../../lib/ai-review');
 const log = require('../../lib/logger');
 const { placeholdersPreserved } = require('../../lib/placeholders');
+const { namesPreserved } = require('../../lib/protected-names');
+const PROTECTED_NAMES = require('../../config/protected-names');
 
 // Each check defaults ON; set the env var to "false" to disable it.
 //
@@ -21,20 +23,32 @@ const ENABLED = {
   sentences: process.env.QA_CHECK_SENTENCES !== 'false',
 };
 
-// Guard: accept an AI revision only if it leaves every %%...%% placeholder
-// untouched. Returns true if safe to apply; otherwise logs + records a flag.
-function placeholderGuard(checkLabel, before, after, ctx, flags) {
-  if (placeholdersPreserved(before, after)) return true;
-  log.warn('AI revision rejected — would alter %% placeholders', {
-    check: checkLabel, label: ctx.label,
-  });
-  flags.push({
-    type: 'placeholder_guard',
-    label: ctx.label,
-    sentence: `${checkLabel} suggested an edit that changed a Plextrac %% placeholder`,
-    issue: 'Edit NOT applied — it would have altered a %%...%% template variable',
-  });
-  return false;
+// Per-edit guard: reject a single edit if applying it would (1) alter a %%...%%
+// placeholder or (2) remove/rename a protected organisation name (e.g. Cognisys,
+// the testing provider). Returns true if the edit is safe to apply; otherwise
+// logs + records a flag. Rejecting one edit no longer discards the others.
+function editIsSafe(before, after, change, ctx, flags) {
+  if (!placeholdersPreserved(before, after)) {
+    log.warn('Edit rejected — would alter a %% placeholder', { label: ctx.label });
+    flags.push({
+      type: 'placeholder_guard',
+      label: ctx.label,
+      sentence: `"${change.before}" → "${change.after}"`,
+      issue: 'Edit NOT applied — it would have altered a %%...%% template variable',
+    });
+    return false;
+  }
+  if (!namesPreserved(before, after, PROTECTED_NAMES)) {
+    log.warn('Edit rejected — would change a protected organisation name', { label: ctx.label });
+    flags.push({
+      type: 'protected_name_guard',
+      label: ctx.label,
+      sentence: `"${change.before}" → "${change.after}"`,
+      issue: 'Edit NOT applied — this is the penetration-testing provider, not the client',
+    });
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -74,14 +88,14 @@ async function runChecks(text, ctx) {
         doSentences,
       });
 
-      // Apply the text edits (client_name + dejargon) — but only if the rewrite
-      // leaves every %%...%% placeholder intact.
-      if (res.revised_text && res.revised_text !== current
-          && placeholderGuard('ai_review', current, res.revised_text, ctx, flags)) {
-        for (const c of res.changes || []) {
-          applied.push({ type: c.type, label: ctx.label, before: c.before, after: c.after, reason: c.reason });
-        }
-        current = res.revised_text;
+      // Apply each edit (before→after) in code. Replaces all occurrences of the
+      // verbatim "before" span; each edit is guarded individually.
+      for (const c of res.changes || []) {
+        if (!c.before || c.before === c.after || !current.includes(c.before)) continue;
+        const candidate = current.split(c.before).join(c.after);
+        if (candidate === current || !editIsSafe(current, candidate, c, ctx, flags)) continue;
+        applied.push({ type: c.type, label: ctx.label, before: c.before, after: c.after, reason: c.reason });
+        current = candidate;
       }
 
       // Incomplete sentences are detection-only (never auto-fixed).

@@ -148,8 +148,10 @@ async function runQaReview(mapping) {
         }
       }
     }
-  } finally {
-    await tracking.disable(clientId, reportId);
+  } catch (err) {
+    // Change tracking is intentionally left ON after the run — we never toggle it
+    // off, so the report keeps tracking subsequent edits too.
+    log.error('QA review encountered an error mid-run', { reason: err.message, report_id: reportId });
   }
 
   // ── Audit: log every change + post a Slack summary ──────────────────────────
