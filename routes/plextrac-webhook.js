@@ -2,8 +2,22 @@ const crypto = require('crypto');
 const { findByCuid } = require('../lib/task-store');
 const { updateTaskStatus } = require('../lib/clickup-api');
 const { getReport } = require('../lib/plextrac-api');
+const lookup = require('../lib/plextrac-lookup');
 const { runQaReview } = require('../pipeline/qa-review');
 const log = require('../lib/logger');
+
+// Pre-integration reports carry their client/report names in the webhook `text`
+// field as "<client name>||<report name>" (see the no-mapping branch below).
+// Returns { clientName, reportName } or null when the text isn't in that form.
+function parsePreIntegrationText(text) {
+  if (typeof text !== 'string') return null;
+  const idx = text.indexOf('||');
+  if (idx === -1) return null;
+  const clientName = text.slice(0, idx).trim();
+  const reportName = text.slice(idx + 2).trim();
+  if (!clientName || !reportName) return null;
+  return { clientName, reportName };
+}
 
 // Status that triggers the automated AI QA review (defaults to the QA status).
 const QA_TRIGGER_STATUS = process.env.PLEXTRAC_QA_STATUS || 'Ready For Review';
@@ -45,7 +59,7 @@ async function handler(req, res) {
     return;
   }
 
-  const { event, targetCuid, targetType, clientId, reportId, clientName, reportName } = payload;
+  const { event, targetCuid, targetType, text } = payload;
 
   if (event !== 'ReportStatusChanged' || targetType !== 'report' || !targetCuid) {
     return;
@@ -63,30 +77,44 @@ async function handler(req, res) {
   let mapped = true;
 
   if (!mapping) {
-    // Backwards compatibility: fall back to the client/report identifiers that
-    // Plextrac sends in the webhook payload so the QA review can still run for a
-    // pre-integration report. Requires the numeric clientId + reportId fields.
-    if (!clientId || !reportId) {
-      // Log the full payload so the actual field names Plextrac sends can be
-      // confirmed (and the webhook template adjusted to include the IDs).
-      log.warn('Plextrac webhook — no mapping found and payload missing client/report id', {
-        cuid: targetCuid,
-        payload: JSON.stringify(payload),
+    // Backwards compatibility for reports created before the ClickUp integration:
+    // they have no CUID mapping. Plextrac's webhook can't send numeric IDs (only
+    // the %CLIENT_NAME% / %REPORT_NAME% template variables resolve), so the
+    // webhook `text` field is configured as "<client name>||<report name>" and we
+    // resolve the numeric client/report IDs back through the Plextrac API.
+    const parsed = parsePreIntegrationText(text);
+    if (!parsed) {
+      log.warn('Plextrac webhook — no mapping and payload text not in "<client>||<report>" form', {
+        cuid: targetCuid, payload: JSON.stringify(payload),
       });
       return;
     }
+
+    const ids = await lookup.resolveClientAndReport(parsed).catch(err => {
+      log.error('Failed to resolve client/report IDs for unmapped report', {
+        reason: err.message, cuid: targetCuid,
+      });
+      return null;
+    });
+    if (!ids) {
+      log.warn('Plextrac webhook — could not resolve client/report from payload names', {
+        cuid: targetCuid, client: parsed.clientName, report: parsed.reportName,
+      });
+      return;
+    }
+
     mapped = false;
     mapping = {
-      plextrac_client_id: clientId,
-      plextrac_report_id: reportId,
-      task_name:          reportName,
-      client_name:        clientName,
+      plextrac_client_id: ids.clientId,
+      plextrac_report_id: ids.reportId,
+      task_name:          parsed.reportName,
+      client_name:        parsed.clientName,
     };
-    log.info('Plextrac webhook — no mapping found; running QA from payload IDs (pre-integration report)', {
-      cuid: targetCuid, client_id: clientId, report_id: reportId,
+    log.info('Plextrac webhook — no mapping found; resolved IDs from payload names (pre-integration report)', {
+      cuid: targetCuid, client_id: ids.clientId, report_id: ids.reportId,
     });
     // Notify the main Slack channel (same one used for "Report has been created").
-    log.notify(`Client: ${clientName} - ${reportName}`);
+    log.notify(`Client: ${parsed.clientName} - ${parsed.reportName}`);
   }
 
   // Fetch the report from Plextrac to get the current status — the webhook

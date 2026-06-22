@@ -41,25 +41,28 @@ mapping reuses the existing MongoDB `task_mappings` collection
 
 Reports created **before** the ClickUp integration existed have no row in
 `task_mappings`, so the CUID lookup returns nothing. Rather than dropping these,
-the handler falls back to identifiers carried directly in the Plextrac webhook
-payload: it builds a synthetic mapping from `clientId`/`reportId`, runs the QA
-review as normal, and **skips the ClickUp status sync** (there is no task to
-update). It also posts `Client: {clientName} - {reportName}` to the main Slack
-channel (`SLACK_WEBHOOK_URL`, the same channel used for "Report has been
-created").
+the handler resolves the report another way, runs the QA review as normal, and
+**skips the ClickUp status sync** (there is no task to update). It also posts
+`Client: {clientName} - {reportName}` to the main Slack channel
+(`SLACK_WEBHOOK_URL`, the same channel used for "Report has been created").
 
-For this to work the Plextrac webhook payload must include these fields in
-addition to the default `event` / `targetCuid` / `targetType`:
+Plextrac's webhook **cannot** send the numeric client/report IDs — only the
+`%CLIENT_NAME%` and `%REPORT_NAME%` template variables are substituted
+(`%CLIENT_ID%` / `%REPORT_ID%` come through as literal text). So the webhook's
+**`text` field** must be configured as:
 
-| Field        | Plextrac variable | Used for                          |
-| ------------ | ----------------- | --------------------------------- |
-| `clientId`   | `%CLIENT_ID%`     | fetch the report / run QA         |
-| `reportId`   | `%REPORT_ID%`     | fetch the report / run QA         |
-| `clientName` | `%CLIENT_NAME%`   | Slack notification text           |
-| `reportName` | `%REPORT_NAME%`   | Slack notification text           |
+```
+%CLIENT_NAME%||%REPORT_NAME%
+```
 
-If `clientId` or `reportId` is missing the handler logs a warning and stops
-(it cannot fetch the report without them).
+The handler parses those two names out of `text` (split on `||`), then resolves
+the numeric IDs via the API — client name → `clientId` (`listClients`), then
+report name → `reportId` (`listClientReports`) — in `lib/plextrac-lookup.js`.
+The name→id matching uses the same `data[0]=id, data[1]=name` row shape the
+create pipeline already relies on.
+
+If `text` isn't in `<client>||<report>` form, or either name can't be resolved
+to an ID, the handler logs a warning and stops.
 
 ## The checks
 
