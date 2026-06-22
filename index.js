@@ -1,7 +1,9 @@
 require('dotenv').config();
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const cron = require('node-cron');
 const { validateToken } = require('./lib/clickup-api');
+const { runAuthFormCheck } = require('./pipeline/auth-form-check');
 const log = require('./lib/logger');
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -38,6 +40,31 @@ app.use(express.json());
 app.get('/', (req, res) => {
   res.status(200).send('ClickUp → Plextrac integration API is running.');
 });
+
+// Manual trigger for the daily auth-form check (also runs on a 14:00 cron below).
+// If AUTH_FORM_CHECK_SECRET is set, callers must send it in the x-job-secret header.
+app.post('/jobs/auth-form-check', async (req, res) => {
+  const secret = process.env.AUTH_FORM_CHECK_SECRET;
+  if (secret && req.get('x-job-secret') !== secret) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  try {
+    const result = await runAuthFormCheck();
+    res.status(200).json({ status: 'ok', ...result });
+  } catch (err) {
+    log.error('Auth-form check failed', { reason: err.message });
+    res.status(500).json({ status: 'error', reason: err.message });
+  }
+});
+
+// Daily auth-form check at 14:00 (server timezone unless AUTH_FORM_CHECK_TZ set).
+// Override the schedule with AUTH_FORM_CHECK_CRON (standard cron expression).
+const AUTH_FORM_CHECK_CRON = process.env.AUTH_FORM_CHECK_CRON || '0 14 * * *';
+const AUTH_FORM_CHECK_TZ = process.env.AUTH_FORM_CHECK_TZ || 'Europe/London';
+cron.schedule(AUTH_FORM_CHECK_CRON, () => {
+  console.log('[cron] Triggering daily auth-form check…');
+  runAuthFormCheck().catch(err => log.error('Auth-form check failed', { reason: err.message }));
+}, { timezone: AUTH_FORM_CHECK_TZ });
 
 app.listen(PORT, async () => {
   console.log(`Server listening on port ${PORT}`);
