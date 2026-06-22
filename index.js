@@ -42,19 +42,11 @@ app.get('/', (req, res) => {
 });
 
 // Manual trigger for the daily auth-form check (also runs on a 14:00 cron below).
-// If AUTH_FORM_CHECK_SECRET is set, callers must send it in the x-job-secret header.
-app.post('/jobs/auth-form-check', async (req, res) => {
-  const secret = process.env.AUTH_FORM_CHECK_SECRET;
-  if (secret && req.get('x-job-secret') !== secret) {
-    return res.status(401).json({ error: 'unauthorized' });
-  }
-  try {
-    const result = await runAuthFormCheck();
-    res.status(200).json({ status: 'ok', ...result });
-  } catch (err) {
-    log.error('Auth-form check failed', { reason: err.message });
-    res.status(500).json({ status: 'error', reason: err.message });
-  }
+// Always responds with a blank 200 and discloses nothing; the check runs
+// fire-and-forget with its outcome written to the logs.
+app.post('/jobs/auth-form-check', (req, res) => {
+  res.status(200).end();
+  runAuthFormCheck().catch(err => log.error('Auth-form check failed', { reason: err.message }));
 });
 
 // Daily auth-form check at 14:00 (server timezone unless AUTH_FORM_CHECK_TZ set).

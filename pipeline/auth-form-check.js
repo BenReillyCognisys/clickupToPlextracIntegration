@@ -2,24 +2,26 @@
 //
 // Scans every task in the Penetration Test space. For each task that has BOTH the
 // "Pre Recs Received?" and "Tester OKd Pre-Recs" checkboxes ticked, the task's
-// assignee is DM'd on Slack to remind them to check the authorisation form, and a
-// summary paragraph is posted to the channel (SLACK_WEBHOOK_URL):
+// assignee(s) are collected. A SINGLE message is then posted to the qa-chat
+// channel (SLACK_AUTH_FORM_CHANNEL, via the bot token), @-mentioning the assigned
+// users so they're pinged to check the authorisation form:
 //
-//   Check Auth Form Messages Sent
-//   @Ben Reilly - ClientA | Blackbox
-//   @Karan Luniyal - ClientB | Greybox
+//   *Check Auth Form*
+//   <@U012ABC> - ClientA | Blackbox
+//   <@U345DEF> - ClientB | Greybox
 //
-// ⚠️ TESTING MODE: while we validate this, every DM is sent to ONE person
-// (SLACK_TEST_DM_USER_ID — Ben Reilly) regardless of the real assignee, so we
-// don't spam the team. The summary still shows the real assignee names.
+// No DMs are sent and the SLACK_WEBHOOK_URL summary is no longer used.
 
 const slack = require('../lib/slack');
-const log = require('../lib/logger');
 const { listSpaceTasks } = require('../lib/clickup-api');
 const { parseTaskName } = require('./parse-task');
 
 const PRE_RECS_RECEIVED_FIELD = 'Pre Recs Received?';
 const TESTER_OKD_FIELD = 'Tester OKd Pre-Recs';
+
+// #qa-chat channel the bot is a member of (override via env). Accepts a channel
+// id (e.g. C0123ABCD) or a name (e.g. #qa-chat).
+const AUTH_FORM_CHANNEL = process.env.SLACK_AUTH_FORM_CHANNEL || '#qa-chat';
 
 // ClickUp checkbox custom fields come back as boolean true / "true" / "1" when
 // ticked, and false / null / undefined when not. Be tolerant of all of them.
@@ -34,11 +36,31 @@ function checkboxChecked(task, fieldName) {
   return field ? isChecked(field.value) : false;
 }
 
+// Turns a ClickUp assignee into a Slack @-mention by resolving their Slack id
+// from their email (cached per run). Falls back to plain "@username" if the
+// email can't be resolved to a Slack user.
+async function mentionFor(assignee, cache) {
+  const name = assignee?.username || assignee?.email || 'Unassigned';
+  const email = assignee?.email;
+  if (!email) return `@${name}`;
+
+  if (!cache.has(email)) {
+    try {
+      cache.set(email, await slack.lookupUserIdByEmail(email));
+    } catch (err) {
+      console.log(`[auth-form-check] Slack lookup failed for ${email}: ${err.message}`);
+      cache.set(email, null);
+    }
+  }
+  const id = cache.get(email);
+  return id ? `<@${id}>` : `@${name}`;
+}
+
 async function runAuthFormCheck() {
   const spaceId = process.env.CLICKUP_SPACE_ID;
   if (!spaceId) {
     console.log('[auth-form-check] CLICKUP_SPACE_ID not set — aborting.');
-    return { checked: 0, matched: 0, sent: [] };
+    return { checked: 0, matched: 0 };
   }
 
   console.log('[auth-form-check] Starting daily auth-form check…');
@@ -48,14 +70,13 @@ async function runAuthFormCheck() {
     tasks = await listSpaceTasks(spaceId);
   } catch (err) {
     console.log(`[auth-form-check] Failed to list ClickUp tasks: ${err.message}`);
-    return { checked: 0, matched: 0, sent: [] };
+    return { checked: 0, matched: 0 };
   }
 
   console.log(`[auth-form-check] Retrieved ${tasks.length} task(s) from the Penetration Test space.`);
 
-  // TESTING: all DMs go here regardless of the real assignee.
-  const testDmUserId = process.env.SLACK_TEST_DM_USER_ID;
-  const sent = [];
+  const emailToId = new Map(); // cache Slack lookups across tasks
+  const lines = [];
 
   for (const task of tasks) {
     if (task.parent) continue; // skip subtasks
@@ -64,42 +85,34 @@ async function runAuthFormCheck() {
     const okd = checkboxChecked(task, TESTER_OKD_FIELD);
     if (!received || !okd) continue;
 
-    const assignee = (task.assignees || [])[0];
-    const assigneeName = assignee?.username || assignee?.email || 'Unassigned';
     const { client_name, testing_type } = parseTaskName(task.name);
     const engagement = `${client_name} | ${testing_type}`;
 
-    console.log(`[auth-form-check] MATCH: "${task.name}" — assignee "${assigneeName}" (task ${task.id}).`);
+    const assignees = task.assignees || [];
+    const mentions = assignees.length
+      ? (await Promise.all(assignees.map(a => mentionFor(a, emailToId)))).join(' ')
+      : '_(unassigned)_';
 
-    const dmText =
-      `Hi ${assigneeName}, the pre-requisites for *${engagement}* have been received and OK'd. ` +
-      'Please check the authorisation form for this engagement before testing begins.';
-
-    if (testDmUserId) {
-      try {
-        await slack.postDirectMessage(testDmUserId, dmText);
-        console.log(`[auth-form-check] DM sent to test user for "${engagement}" (real assignee: "${assigneeName}").`);
-      } catch (err) {
-        console.log(`[auth-form-check] Failed to send DM for "${engagement}": ${err.message}`);
-      }
-    } else {
-      console.log('[auth-form-check] SLACK_TEST_DM_USER_ID not set — DM not sent (logged only).');
-    }
-
-    sent.push({ assigneeName, engagement });
+    console.log(`[auth-form-check] MATCH: "${task.name}" — ${assignees.length} assignee(s) (task ${task.id}).`);
+    lines.push(`${mentions} - ${engagement}`);
   }
 
-  // Summary paragraph → channel (SLACK_WEBHOOK_URL, via logger.notify).
-  if (sent.length) {
-    const summary = ['Check Auth Form Messages Sent', ...sent.map(s => `@${s.assigneeName} - ${s.engagement}`)].join('\n');
-    log.notify(summary);
-    console.log(`[auth-form-check] Posted summary for ${sent.length} engagement(s) to the Slack channel.`);
-  } else {
-    console.log('[auth-form-check] No matching tasks — nothing to send.');
+  if (!lines.length) {
+    console.log('[auth-form-check] No matching tasks — nothing to post.');
+    return { checked: tasks.length, matched: 0 };
+  }
+
+  // One message to the qa-chat channel, @-mentioning the assigned users.
+  const message = ['*Check Auth Form*', ...lines].join('\n');
+  try {
+    await slack.postMessage(AUTH_FORM_CHANNEL, message);
+    console.log(`[auth-form-check] Posted auth-form message for ${lines.length} engagement(s) to ${AUTH_FORM_CHANNEL}.`);
+  } catch (err) {
+    console.log(`[auth-form-check] Failed to post message to ${AUTH_FORM_CHANNEL}: ${err.message}`);
   }
 
   console.log('[auth-form-check] Done.');
-  return { checked: tasks.length, matched: sent.length, sent };
+  return { checked: tasks.length, matched: lines.length };
 }
 
 module.exports = { runAuthFormCheck };
