@@ -67,7 +67,12 @@ async function handler(req, res) {
     // Plextrac sends in the webhook payload so the QA review can still run for a
     // pre-integration report. Requires the numeric clientId + reportId fields.
     if (!clientId || !reportId) {
-      log.warn('Plextrac webhook — no mapping found and payload missing client/report id', { cuid: targetCuid });
+      // Log the full payload so the actual field names Plextrac sends can be
+      // confirmed (and the webhook template adjusted to include the IDs).
+      log.warn('Plextrac webhook — no mapping found and payload missing client/report id', {
+        cuid: targetCuid,
+        payload: JSON.stringify(payload),
+      });
       return;
     }
     mapped = false;
