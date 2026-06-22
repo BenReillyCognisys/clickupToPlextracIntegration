@@ -158,6 +158,21 @@ test('reduced-review sections are kept but tagged clientNameOnly', () => {
   eq(segs.map(s => !!s.clientNameOnly), [false, true, true, true, false]);
 });
 
+test('Limitation and Roadmap sections are tagged noDejargon (de-jargon skipped only)', () => {
+  const segs = getExecutiveSummarySegments({
+    exec_summary: {
+      custom_fields: [
+        { label: 'Overview', text: '<p>One</p>' },
+        { label: 'Methodology', text: '<p>Method</p>' },
+        { label: 'Limitation', text: '<p>Limit</p>' },   // singular still matches
+        { label: 'Project Roadmap', text: '<p>Plans</p>' },
+      ],
+    },
+  });
+  // De-jargon is skipped on Limitation / Roadmap only; the others are unaffected.
+  eq(segs.map(s => !!s.noDejargon), [false, false, true, true]);
+});
+
 // ── finding extraction ────────────────────────────────────────────────────────
 console.log('\ngetFindingSegments:');
 

@@ -113,8 +113,6 @@ async function handler(req, res) {
     log.info('Plextrac webhook — no mapping found; resolved IDs from payload names (pre-integration report)', {
       cuid: targetCuid, client_id: ids.clientId, report_id: ids.reportId,
     });
-    // Notify the main Slack channel (same one used for "Report has been created").
-    log.notify(`Client: ${parsed.clientName} - ${parsed.reportName}`);
   }
 
   // Fetch the report from Plextrac to get the current status — the webhook

@@ -42,9 +42,7 @@ mapping reuses the existing MongoDB `task_mappings` collection
 Reports created **before** the ClickUp integration existed have no row in
 `task_mappings`, so the CUID lookup returns nothing. Rather than dropping these,
 the handler resolves the report another way, runs the QA review as normal, and
-**skips the ClickUp status sync** (there is no task to update). It also posts
-`Client: {clientName} - {reportName}` to the main Slack channel
-(`SLACK_WEBHOOK_URL`, the same channel used for "Report has been created").
+**skips the ClickUp status sync** (there is no task to update).
 
 Plextrac's webhook **cannot** send the numeric client/report IDs — only the
 `%CLIENT_NAME%` and `%REPORT_NAME%` template variables are substituted
@@ -105,6 +103,14 @@ fixed structural content. Sections whose label/title matches
 `config/excluded-sections.js` (override via `QA_EXCLUDED_SECTIONS`,
 comma-separated) get this reduced review — matching is case-insensitive and
 substring-based, so "Testing Methodology" also matches "Methodology".
+
+**De-jargon-only exclusion.** Some sections should keep their client-name **and**
+incomplete-sentence checks but skip **only** the de-jargon rewrite — e.g.
+**Limitation** and **Roadmap**, which contain deliberate technical/structured
+wording. Sections matching `config/dejargon-excluded-sections.js` (override via
+`QA_DEJARGON_EXCLUDED_SECTIONS`, comma-separated) skip de-jargon only. Matching is
+case-insensitive and substring-based ("Project Roadmap" matches "Roadmap",
+"Limitation" matches both the singular and "Limitations").
 
 ## Claude Pro vs Claude API
 
@@ -198,6 +204,7 @@ These were coded defensively but could not be validated against the real API:
 - `pipeline/qa-review/checks.js` — per-segment check runner
 - `pipeline/qa-review/report-fields.js` — shape-tolerant field locate/read/write (tags reduced-review sections)
 - `config/excluded-sections.js` — exec-summary sections that get client-name-only review (Methodology, Issue Matrix, Limitations, …)
+- `config/dejargon-excluded-sections.js` — exec-summary sections that skip de-jargon only, keeping client-name + sentence checks (Limitation, Roadmap)
 - `pipeline/qa-review/change-tracking.js` — best-effort Plextrac tracking toggle
 - `lib/ai-review.js` — Claude API calls (structured outputs)
 - `lib/html-text.js` — deterministic formatting strip

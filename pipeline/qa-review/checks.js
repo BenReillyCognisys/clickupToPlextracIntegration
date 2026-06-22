@@ -59,6 +59,8 @@ function editIsSafe(before, after, change, ctx, flags) {
  * @param {boolean} ctx.isExecutiveSummary  whether de-jargon applies
  * @param {boolean} ctx.clientNameOnly  reduced review (Methodology / Issue Matrix /
  *   Limitations): client-name check only — no de-jargon or sentence checks
+ * @param {boolean} ctx.noDejargon  skip ONLY the de-jargon check (Limitation /
+ *   Roadmap): client-name and sentence checks still run
  * @returns {{ finalText, changed, applied: [], flags: [] }}
  */
 async function runChecks(text, ctx) {
@@ -80,7 +82,7 @@ async function runChecks(text, ctx) {
   // Reduced-review sections (Methodology, Issue Matrix, Limitations) get the
   // client-name check only — de-jargon and incomplete-sentence checks are skipped.
   const doClientName = ENABLED.clientName && !!ctx.clientName;
-  const doDejargon = ENABLED.deJargon && ctx.isExecutiveSummary && !ctx.clientNameOnly;
+  const doDejargon = ENABLED.deJargon && ctx.isExecutiveSummary && !ctx.clientNameOnly && !ctx.noDejargon;
   const doSentences = ENABLED.sentences && !ctx.clientNameOnly;
 
   if (doClientName || doDejargon || doSentences) {

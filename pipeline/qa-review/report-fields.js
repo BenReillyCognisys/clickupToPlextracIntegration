@@ -40,6 +40,10 @@ const TEXT_KEYS = ['text', 'value', 'custom_field', 'content', 'body'];
 // or incomplete-sentence checks (e.g. Methodology, Issue Matrix, Limitations).
 const EXCLUDED_SECTIONS = require('../../config/excluded-sections');
 
+// Section names that skip ONLY the de-jargon check (client-name + sentence checks
+// still run) — e.g. Limitation, Roadmap.
+const DEJARGON_EXCLUDED_SECTIONS = require('../../config/dejargon-excluded-sections');
+
 // True if a section's name matches one of the excluded names (case-insensitive,
 // substring — so "Testing Methodology" matches "Methodology").
 function isExcludedSection(name, excluded = EXCLUDED_SECTIONS) {
@@ -84,6 +88,9 @@ function pushSection(segments, field, basePath, section) {
   // must be right everywhere) but skip the de-jargon and incomplete-sentence
   // checks, which would wrongly rewrite fixed structural content.
   const clientNameOnly = isExcludedSection(name);
+  // De-jargon-only exclusion: skip the de-jargon rewrite but keep client-name and
+  // incomplete-sentence checks (e.g. Limitation, Roadmap).
+  const noDejargon = isExcludedSection(name, DEJARGON_EXCLUDED_SECTIONS);
   for (const key of TEXT_KEYS) {
     if (typeof section[key] === 'string') {
       segments.push({
@@ -91,6 +98,7 @@ function pushSection(segments, field, basePath, section) {
         label: name ? `${field}: ${name}` : `${basePath}.${key}`,
         text: section[key],
         clientNameOnly,
+        noDejargon,
       });
       break;
     }
