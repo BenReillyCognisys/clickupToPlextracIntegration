@@ -37,6 +37,30 @@ blocks the fast ClickUp status sync. The report CUID → `{clientId, reportId}`
 mapping reuses the existing MongoDB `task_mappings` collection
 (`lib/task-store.findByCuid`).
 
+### Pre-integration reports (no CUID mapping)
+
+Reports created **before** the ClickUp integration existed have no row in
+`task_mappings`, so the CUID lookup returns nothing. Rather than dropping these,
+the handler falls back to identifiers carried directly in the Plextrac webhook
+payload: it builds a synthetic mapping from `clientId`/`reportId`, runs the QA
+review as normal, and **skips the ClickUp status sync** (there is no task to
+update). It also posts `Client: {clientName} - {reportName}` to the main Slack
+channel (`SLACK_WEBHOOK_URL`, the same channel used for "Report has been
+created").
+
+For this to work the Plextrac webhook payload must include these fields in
+addition to the default `event` / `targetCuid` / `targetType`:
+
+| Field        | Plextrac variable | Used for                          |
+| ------------ | ----------------- | --------------------------------- |
+| `clientId`   | `%CLIENT_ID%`     | fetch the report / run QA         |
+| `reportId`   | `%REPORT_ID%`     | fetch the report / run QA         |
+| `clientName` | `%CLIENT_NAME%`   | Slack notification text           |
+| `reportName` | `%REPORT_NAME%`   | Slack notification text           |
+
+If `clientId` or `reportId` is missing the handler logs a warning and stops
+(it cannot fetch the report without them).
+
 ## The checks
 
 | Check | Applies to | How | Auto-applied? |

@@ -45,21 +45,43 @@ async function handler(req, res) {
     return;
   }
 
-  const { event, targetCuid, targetType } = payload;
+  const { event, targetCuid, targetType, clientId, reportId, clientName, reportName } = payload;
 
   if (event !== 'ReportStatusChanged' || targetType !== 'report' || !targetCuid) {
     return;
   }
 
   // Look up the ClickUp task mapping using the report's CUID
-  const mapping = await findByCuid(targetCuid).catch(err => {
+  let mapping = await findByCuid(targetCuid).catch(err => {
     log.error('MongoDB CUID lookup failed', { reason: err.message, cuid: targetCuid });
     return null;
   });
 
+  // Tracks whether this report has a ClickUp task mapping. Reports created before
+  // the ClickUp integration existed have no mapping — we still run the QA review
+  // for them (below), but skip the ClickUp status sync since there is no task.
+  let mapped = true;
+
   if (!mapping) {
-    log.warn('Plextrac webhook — no mapping found for report CUID', { cuid: targetCuid });
-    return;
+    // Backwards compatibility: fall back to the client/report identifiers that
+    // Plextrac sends in the webhook payload so the QA review can still run for a
+    // pre-integration report. Requires the numeric clientId + reportId fields.
+    if (!clientId || !reportId) {
+      log.warn('Plextrac webhook — no mapping found and payload missing client/report id', { cuid: targetCuid });
+      return;
+    }
+    mapped = false;
+    mapping = {
+      plextrac_client_id: clientId,
+      plextrac_report_id: reportId,
+      task_name:          reportName,
+      client_name:        clientName,
+    };
+    log.info('Plextrac webhook — no mapping found; running QA from payload IDs (pre-integration report)', {
+      cuid: targetCuid, client_id: clientId, report_id: reportId,
+    });
+    // Notify the main Slack channel (same one used for "Report has been created").
+    log.notify(`Client: ${clientName} - ${reportName}`);
   }
 
   // Fetch the report from Plextrac to get the current status — the webhook
@@ -97,6 +119,15 @@ async function handler(req, res) {
         report_id: mapping.plextrac_report_id,
       });
     });
+  }
+
+  // Pre-integration reports have no ClickUp task to update — the QA review above
+  // is the only action we take for them.
+  if (!mapped) {
+    log.info('Plextrac report status change — no ClickUp mapping, skipping status sync', {
+      cuid: targetCuid, status: reportStatus,
+    });
+    return;
   }
 
   const clickupStatus = STATUS_MAP[reportStatus];
