@@ -11,16 +11,22 @@
 //   <@U345DEF> - ClientB | Greybox
 //
 // No DMs are sent and the SLACK_WEBHOOK_URL summary is no longer used.
+//
+// After posting, the PREVIOUS day's "Check Auth Form" message is deleted: we
+// persist the single most recent message id in MongoDB and delete exactly that
+// one on the next run (so only ever one message is removed). Cleanup is
+// best-effort — if it fails, the freshly posted message still stands.
 
 const slack = require('../lib/slack');
+const store = require('../lib/auth-form-store');
 const { listSpaceTasks } = require('../lib/clickup-api');
 const { parseTaskName } = require('./parse-task');
 
 const PRE_RECS_RECEIVED_FIELD = 'Pre Recs Received?';
 const TESTER_OKD_FIELD = 'Tester OKd Pre-Recs';
 
-// #qa-chat channel the bot is a member of (override via env). Accepts a channel
-// id (e.g. C0123ABCD) or a name (e.g. #qa-chat).
+// qa-chat channel the bot is a member of (override via env). MUST be a channel
+// ID (e.g. C0123ABCD) — chat.postMessage returns channel_not_found for names.
 const AUTH_FORM_CHANNEL = process.env.SLACK_AUTH_FORM_CHANNEL || '#qa-chat';
 
 // ClickUp checkbox custom fields come back as boolean true / "true" / "1" when
@@ -104,15 +110,48 @@ async function runAuthFormCheck() {
 
   // One message to the qa-chat channel, @-mentioning the assigned users.
   const message = ['*Check Auth Form*', ...lines].join('\n');
+  let newTs;
   try {
-    await slack.postMessage(AUTH_FORM_CHANNEL, message);
+    newTs = await slack.postMessage(AUTH_FORM_CHANNEL, message);
     console.log(`[auth-form-check] Posted auth-form message for ${lines.length} engagement(s) to ${AUTH_FORM_CHANNEL}.`);
   } catch (err) {
     console.log(`[auth-form-check] Failed to post message to ${AUTH_FORM_CHANNEL}: ${err.message}`);
+    return { checked: tasks.length, matched: lines.length };
   }
+
+  // Now that the new message is up, delete the previous day's one (exactly one).
+  await replacePreviousMessage(AUTH_FORM_CHANNEL, newTs);
 
   console.log('[auth-form-check] Done.');
   return { checked: tasks.length, matched: lines.length };
+}
+
+// Deletes the single previously posted "Check Auth Form" message and records the
+// new one in its place. Best-effort: any failure (Mongo unavailable, message
+// already gone) is logged and ignored so it never affects the run.
+async function replacePreviousMessage(channel, newTs) {
+  let previous;
+  try {
+    previous = await store.getLastMessage();
+  } catch (err) {
+    console.log(`[auth-form-check] Could not read previous message id — skipping delete: ${err.message}`);
+    return;
+  }
+
+  if (previous?.ts && previous.ts !== newTs) {
+    try {
+      await slack.deleteMessage(previous.channel || channel, previous.ts);
+      console.log(`[auth-form-check] Deleted previous auth-form message (ts ${previous.ts}).`);
+    } catch (err) {
+      console.log(`[auth-form-check] Failed to delete previous message (ts ${previous.ts}): ${err.message}`);
+    }
+  }
+
+  try {
+    await store.setLastMessage(channel, newTs);
+  } catch (err) {
+    console.log(`[auth-form-check] Failed to record new message id (next run won't delete this one): ${err.message}`);
+  }
 }
 
 module.exports = { runAuthFormCheck };
