@@ -103,8 +103,8 @@ router.get('/internalaudit', requireApiKey, requireInternalAuditCache, (req, res
   }
   slots.sort((a, b) => a.start_date.localeCompare(b.start_date) || a.end_date.localeCompare(b.end_date));
 
-  const uniqueSlots = dedupeSlots(slots);
-
+  // No date-window de-dupe here (unlike /pentest): every consultant's earliest
+  // window is surfaced, even when two consultants share the same start→end range.
   res.json({
     request:               { days: daysNum },
     qualified_consultants: roster,
@@ -117,8 +117,8 @@ router.get('/internalaudit', requireApiKey, requireInternalAuditCache, (req, res
       days:       s.days,
     })),
     availability_window: ia.window || null,
-    next_available:      uniqueSlots[0] || null,
-    alternatives:        uniqueSlots.slice(1),
+    next_available:      slots[0] || null,
+    alternatives:        slots.slice(1),
     cache_generated_at:  ia.generated_at,
     cache_refreshed_at:  cache.lastRefresh,
   });
