@@ -42,12 +42,36 @@ app.get('/', (req, res) => {
   res.status(200).send('ClickUp → Plextrac integration API is running.');
 });
 
+// CORS for the browser-facing scheduling API. The /webhook/* routes above are
+// server-to-server (signed ClickUp/Plextrac callbacks) and intentionally get no
+// CORS. Mirrors the permissive, credentialed CORS the sfe-portal previously
+// applied to these endpoints, and answers the preflight the X-API-Key header
+// triggers. Lock it down by setting SCHEDULING_ALLOWED_ORIGINS to a
+// comma-separated allowlist; left blank, any origin is reflected.
+const SCHEDULING_ALLOWED_ORIGINS = (process.env.SCHEDULING_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+function schedulingCors(req, res, next) {
+  const origin = req.headers.origin;
+  if (origin && (SCHEDULING_ALLOWED_ORIGINS.length === 0 || SCHEDULING_ALLOWED_ORIGINS.includes(origin))) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+}
+
 // ClickUp scheduling API (X-API-Key required), backed by a background-refreshed
 // availability/service-types cache started below:
 //   GET  /availability/pentest?testType=X&days=N — earliest consultant slots
 //   POST /schedule/pentest                        — create an engagement task
-app.use('/availability', require('./routes/availability'));
-app.use('/schedule', require('./routes/schedule'));
+app.use('/availability', schedulingCors, require('./routes/availability'));
+app.use('/schedule', schedulingCors, require('./routes/schedule'));
 
 // Manual trigger for the daily auth-form check (also runs on a 14:00 cron below).
 // Always responds with a blank 200 and discloses nothing; the check runs
