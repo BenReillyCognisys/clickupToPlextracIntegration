@@ -43,7 +43,17 @@ router.get('/pentest', requireApiKey, requireCache, (req, res) => {
     const slot = earliestRun(cache.availability.days, consultant, daysNum);
     if (slot) slots.push(slot);
   }
-  slots.sort((a, b) => a.start_date.localeCompare(b.start_date));
+  slots.sort((a, b) => a.start_date.localeCompare(b.start_date) || a.end_date.localeCompare(b.end_date));
+
+  // Collapse slots that cover the exact same start→end window — the consumer only
+  // needs each distinct date range once, not one entry per available consultant.
+  const seen = new Set();
+  const uniqueSlots = slots.filter((s) => {
+    const key = `${s.start_date}|${s.end_date}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
   res.json({
     request: {
@@ -54,8 +64,8 @@ router.get('/pentest', requireApiKey, requireCache, (req, res) => {
     qualified_consultants: resolved,
     name_resolution:       { matched, unmatched },
     availability_window:   cache.availability.window || null,
-    next_available:        slots[0]      || null,
-    alternatives:          slots.slice(1),
+    next_available:        uniqueSlots[0]      || null,
+    alternatives:          uniqueSlots.slice(1),
     cache_generated_at:    cache.availability.generated_at,
     cache_refreshed_at:    cache.lastRefresh,
   });
