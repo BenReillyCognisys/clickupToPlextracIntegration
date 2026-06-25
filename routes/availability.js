@@ -6,7 +6,20 @@ const {
   earliestRun,
   requireApiKey,
   requireCache,
+  requireInternalAuditCache,
 } = require('../lib/availability-cache');
+
+// Collapses slots covering the same start→end window — the consumer only needs
+// each distinct date range once, not one entry per available consultant.
+function dedupeSlots(slots) {
+  const seen = new Set();
+  return slots.filter((s) => {
+    const key = `${s.start_date}|${s.end_date}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 const router = express.Router();
 
@@ -45,15 +58,7 @@ router.get('/pentest', requireApiKey, requireCache, (req, res) => {
   }
   slots.sort((a, b) => a.start_date.localeCompare(b.start_date) || a.end_date.localeCompare(b.end_date));
 
-  // Collapse slots that cover the exact same start→end window — the consumer only
-  // needs each distinct date range once, not one entry per available consultant.
-  const seen = new Set();
-  const uniqueSlots = slots.filter((s) => {
-    const key = `${s.start_date}|${s.end_date}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  const uniqueSlots = dedupeSlots(slots);
 
   res.json({
     request: {
@@ -68,6 +73,44 @@ router.get('/pentest', requireApiKey, requireCache, (req, res) => {
     alternatives:          uniqueSlots.slice(1),
     cache_generated_at:    cache.availability.generated_at,
     cache_refreshed_at:    cache.lastRefresh,
+  });
+});
+
+// ── GET /availability/internalaudit?days=N ────────────────────────────────────
+// Earliest available slots for an internal audit. Unlike /pentest there is no
+// service-type/skill filtering — the roster is the assignees of the configured
+// internal-audit ClickUp task, and the search is purely on day count. Requires
+// the X-API-Key header.
+router.get('/internalaudit', requireApiKey, requireInternalAuditCache, (req, res) => {
+  const { days } = req.query;
+  if (!days) {
+    return res.status(400).json({ error: 'days query param is required' });
+  }
+  const daysNum = Number(days);
+  if (!Number.isFinite(daysNum) || daysNum < 1) {
+    return res.status(400).json({ error: 'days must be a positive integer' });
+  }
+
+  const ia     = cache.internalAudit;
+  const roster = ia.roster || [];
+
+  const slots = [];
+  for (const consultant of roster) {
+    const slot = earliestRun(ia.days, consultant, daysNum);
+    if (slot) slots.push(slot);
+  }
+  slots.sort((a, b) => a.start_date.localeCompare(b.start_date) || a.end_date.localeCompare(b.end_date));
+
+  const uniqueSlots = dedupeSlots(slots);
+
+  res.json({
+    request:             { days: daysNum },
+    qualified_consultants: roster,
+    availability_window: ia.window || null,
+    next_available:      uniqueSlots[0] || null,
+    alternatives:        uniqueSlots.slice(1),
+    cache_generated_at:  ia.generated_at,
+    cache_refreshed_at:  cache.lastRefresh,
   });
 });
 

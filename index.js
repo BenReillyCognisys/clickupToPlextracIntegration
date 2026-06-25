@@ -69,6 +69,7 @@ function schedulingCors(req, res, next) {
 // ClickUp scheduling API (X-API-Key required), backed by a background-refreshed
 // availability/service-types cache started below:
 //   GET  /availability/pentest?testType=X&days=N — earliest consultant slots
+//   GET  /availability/internalaudit?days=N       — earliest slots by day count
 //   POST /schedule/pentest                        — create an engagement task
 app.use('/availability', schedulingCors, require('./routes/availability'));
 app.use('/schedule', schedulingCors, require('./routes/schedule'));
