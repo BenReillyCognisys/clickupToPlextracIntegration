@@ -42,9 +42,11 @@ app.get('/', (req, res) => {
   res.status(200).send('ClickUp → Plextrac integration API is running.');
 });
 
-// POST /schedule/pentest — create a ClickUp engagement task from a chosen
-// consultant/date range (X-API-Key required). Backed by a background-refreshed
-// ClickUp availability/service-types cache started below.
+// ClickUp scheduling API (X-API-Key required), backed by a background-refreshed
+// availability/service-types cache started below:
+//   GET  /availability/pentest?testType=X&days=N — earliest consultant slots
+//   POST /schedule/pentest                        — create an engagement task
+app.use('/availability', require('./routes/availability'));
 app.use('/schedule', require('./routes/schedule'));
 
 // Manual trigger for the daily auth-form check (also runs on a 14:00 cron below).
