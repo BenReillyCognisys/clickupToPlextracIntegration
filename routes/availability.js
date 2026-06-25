@@ -94,6 +94,8 @@ router.get('/internalaudit', requireApiKey, requireInternalAuditCache, (req, res
   const ia     = cache.internalAudit;
   const roster = ia.roster || [];
 
+  // Per consultant, their earliest window that fits the requested day count. Only
+  // consultants with such a window can deliver the job.
   const slots = [];
   for (const consultant of roster) {
     const slot = earliestRun(ia.days, consultant, daysNum);
@@ -104,8 +106,16 @@ router.get('/internalaudit', requireApiKey, requireInternalAuditCache, (req, res
   const uniqueSlots = dedupeSlots(slots);
 
   res.json({
-    request:             { days: daysNum },
+    request:               { days: daysNum },
     qualified_consultants: roster,
+    // Consultants who can actually deliver the job (have an N-day slot), each with
+    // their earliest available window. Subset of qualified_consultants.
+    available_consultants: slots.map((s) => ({
+      consultant: s.consultant,
+      start_date: s.start_date,
+      end_date:   s.end_date,
+      days:       s.days,
+    })),
     availability_window: ia.window || null,
     next_available:      uniqueSlots[0] || null,
     alternatives:        uniqueSlots.slice(1),
