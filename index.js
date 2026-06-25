@@ -4,6 +4,7 @@ const rateLimit = require('express-rate-limit');
 const cron = require('node-cron');
 const { validateToken } = require('./lib/clickup-api');
 const { runAuthFormCheck } = require('./pipeline/auth-form-check');
+const { startAvailabilityCache } = require('./lib/availability-cache');
 const log = require('./lib/logger');
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -41,6 +42,11 @@ app.get('/', (req, res) => {
   res.status(200).send('ClickUp → Plextrac integration API is running.');
 });
 
+// POST /schedule/pentest — create a ClickUp engagement task from a chosen
+// consultant/date range (X-API-Key required). Backed by a background-refreshed
+// ClickUp availability/service-types cache started below.
+app.use('/schedule', require('./routes/schedule'));
+
 // Manual trigger for the daily auth-form check (also runs on a 14:00 cron below).
 // Always responds with a blank 200 and discloses nothing; the check runs
 // fire-and-forget with its outcome written to the logs.
@@ -66,4 +72,6 @@ app.listen(PORT, async () => {
   } catch (err) {
     log.error('ClickUp API token validation failed — requests will be rejected', { reason: err.message });
   }
+  // Warm + schedule the availability cache that backs /schedule/pentest.
+  startAvailabilityCache();
 });
