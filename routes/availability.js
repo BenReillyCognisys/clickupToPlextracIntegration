@@ -24,7 +24,7 @@ function dedupeSlots(slots) {
 // Consultants to suppress from the public availability views, regardless of
 // what the ClickUp roster / service-type Doc returns. Matched case-insensitively
 // on the resolved roster name.
-const HIDDEN_CONSULTANTS = new Set(['ben reilly', 'kyle kreidemann']);
+const HIDDEN_CONSULTANTS = new Set(['ben reilly', 'kyle kriedemann']);
 const isHidden = (name) => HIDDEN_CONSULTANTS.has(String(name).trim().toLowerCase());
 
 const router = express.Router();
