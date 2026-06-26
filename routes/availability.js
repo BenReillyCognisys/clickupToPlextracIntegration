@@ -21,6 +21,12 @@ function dedupeSlots(slots) {
   });
 }
 
+// Consultants to suppress from the public availability views, regardless of
+// what the ClickUp roster / service-type Doc returns. Matched case-insensitively
+// on the resolved roster name.
+const HIDDEN_CONSULTANTS = new Set(['ben reilly', 'kyle kreidemann']);
+const isHidden = (name) => HIDDEN_CONSULTANTS.has(String(name).trim().toLowerCase());
+
 const router = express.Router();
 
 // ── GET /availability/pentest?testType=X&days=N ───────────────────────────────
@@ -51,8 +57,10 @@ router.get('/pentest', requireApiKey, requireCache, (req, res) => {
   const roster   = cache.availability.roster || [];
   const { matched, unmatched, resolved } = resolveNames(match.independent, roster);
 
+  const visibleResolved = resolved.filter((c) => !isHidden(c));
+
   const slots = [];
-  for (const consultant of resolved) {
+  for (const consultant of visibleResolved) {
     const slot = earliestRun(cache.availability.days, consultant, daysNum);
     if (slot) slots.push(slot);
   }
@@ -66,8 +74,8 @@ router.get('/pentest', requireApiKey, requireCache, (req, res) => {
       service_type: match.service_type,
       days:         daysNum,
     },
-    qualified_consultants: resolved,
-    name_resolution:       { matched, unmatched },
+    qualified_consultants: visibleResolved,
+    name_resolution:       { matched: matched.filter((m) => !isHidden(m.roster_name)), unmatched },
     availability_window:   cache.availability.window || null,
     next_available:        uniqueSlots[0]      || null,
     alternatives:          uniqueSlots.slice(1),
@@ -92,7 +100,7 @@ router.get('/internalaudit', requireApiKey, requireInternalAuditCache, (req, res
   }
 
   const ia     = cache.internalAudit;
-  const roster = ia.roster || [];
+  const roster = (ia.roster || []).filter((c) => !isHidden(c));
 
   // Per consultant, their earliest window that fits the requested day count. Only
   // consultants with such a window can deliver the job.
