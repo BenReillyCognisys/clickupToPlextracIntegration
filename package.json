@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node tests/parse-task.test.js && node tests/qa-review.test.js"
+    "test": "node tests/parse-task.test.js && node tests/qa-review.test.js && node tests/free-blackbox.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",

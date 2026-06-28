@@ -84,6 +84,96 @@ router.get('/pentest', requireApiKey, requireCache, (req, res) => {
   });
 });
 
+// ── GET /availability/freeblackbox ────────────────────────────────────────────
+// "Free Black Box Test" — a half-day (0.5) variant of the Black Box Web App
+// service. Surfaces Black Box-qualified consultants who have at least half a day
+// free. Half-day availability is read from each day's fractional `load` (derived
+// from tasks' "Days Balance" effort): a day where a consultant's committed load
+// is <= 0.5 still has >= 0.5 day free.
+//
+//   • Within the next 2 weeks: ANY Black Box-qualified consultant with a half-day
+//     free is surfaced (soonest first) — these are prioritised.
+//   • After the 2-week window: up to 5 distinct dates, restricted to the priority
+//     consultants (Chahat Mundra, Akshay Dandekar, Siddharth Johri).
+//
+// Requires the X-API-Key header. Booking still goes through POST /schedule/pentest
+// with testType "Black Box Web App" and days 0.5.
+const FREE_BLACKBOX_BASE_SERVICE = 'Black Box Web App';
+const FREE_BLACKBOX_PRIORITY     = ['Chahat Mundra', 'Akshay Dandekar', 'Siddharth Johri'];
+const PRIORITY_WINDOW_DAYS       = 14;
+const HALF_DAY                   = 0.5;
+const AFTER_OPTION_COUNT         = 5;
+
+// A consultant has half a day free on a day when their committed load is <= 0.5.
+const hasHalfDayFree = (day, name) => ((day.load && day.load[name]) || 0) <= HALF_DAY + 1e-9;
+
+router.get('/freeblackbox', requireApiKey, requireCache, (req, res) => {
+  const lookup = matchServiceType(FREE_BLACKBOX_BASE_SERVICE, cache.serviceTypes);
+  if (lookup.none || lookup.ambiguous) {
+    return res.status(500).json({
+      error:  `Base service type "${FREE_BLACKBOX_BASE_SERVICE}" could not be resolved from the service-types Doc`,
+      detail: lookup.ambiguous
+        ? { ambiguous: lookup.ambiguous }
+        : { available_service_types: lookup.all.map((s) => s.service_type) },
+    });
+  }
+
+  const match  = lookup.match;
+  const roster = cache.availability.roster || [];
+  const days   = cache.availability.days   || [];
+
+  // Black Box-qualified consultants (visible) — used for the 2-week priority window.
+  const { matched, unmatched, resolved } = resolveNames(match.independent, roster);
+  const qualified = resolved.filter((c) => !isHidden(c));
+
+  // The named consultants, resolved to their roster names — used after 2 weeks.
+  const priorityResolved = resolveNames(FREE_BLACKBOX_PRIORITY, roster).resolved.filter((c) => !isHidden(c));
+  const priorityRank = (name) => {
+    const i = priorityResolved.indexOf(name);
+    return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+  };
+  // Named consultants first (in the configured order), then the rest alphabetically.
+  const orderConsultants = (names) =>
+    [...names].sort((a, b) => priorityRank(a) - priorityRank(b) || a.localeCompare(b));
+
+  const today    = cache.availability.today || null;
+  const boundary = today
+    ? new Date(Date.parse(`${today}T00:00:00Z`) + PRIORITY_WINDOW_DAYS * 86400000).toISOString().slice(0, 10)
+    : null;
+
+  // Within 2 weeks: any qualified consultant with a half-day free (soonest first;
+  // `days` is already chronological).
+  const withinTwoWeeks = [];
+  for (const day of days) {
+    if (boundary && day.date > boundary) continue;
+    const free = orderConsultants(qualified.filter((c) => hasHalfDayFree(day, c)));
+    if (free.length) withinTwoWeeks.push({ date: day.date, weekday: day.weekday, consultants: free });
+  }
+
+  // After 2 weeks: distinct dates where a priority consultant has a half-day free,
+  // capped at 5 options.
+  const afterOptions = [];
+  for (const day of days) {
+    if (boundary && day.date <= boundary) continue;
+    const free = orderConsultants(priorityResolved.filter((c) => hasHalfDayFree(day, c)));
+    if (free.length) afterOptions.push({ date: day.date, weekday: day.weekday, consultants: free });
+    if (afterOptions.length >= AFTER_OPTION_COUNT) break;
+  }
+
+  res.json({
+    request:               { testType: 'Free Black Box Test', based_on: match.service_type, days: HALF_DAY },
+    qualified_consultants: qualified,
+    name_resolution:       { matched: matched.filter((m) => !isHidden(m.roster_name)), unmatched },
+    availability_window:   cache.availability.window || null,
+    priority_window:       boundary ? { start: today, end: boundary, days: PRIORITY_WINDOW_DAYS } : null,
+    within_two_weeks:      withinTwoWeeks,
+    after_two_weeks:       { prioritised_consultants: priorityResolved, options: afterOptions },
+    next_available:        withinTwoWeeks[0] || afterOptions[0] || null,
+    cache_generated_at:    cache.availability.generated_at,
+    cache_refreshed_at:    cache.lastRefresh,
+  });
+});
+
 // ── GET /availability/internalaudit?days=N ────────────────────────────────────
 // Earliest available slots for an internal audit. Unlike /pentest there is no
 // service-type/skill filtering — the roster is the assignees of the configured
