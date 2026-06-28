@@ -171,7 +171,7 @@ router.get('/freeblackbox', requireApiKey, requireCache, (req, res) => {
     if (afterOptions.length >= AFTER_OPTION_COUNT) break;
   }
 
-  res.json({
+  const payload = {
     request:               { testType: 'Free Black Box Test', based_on: match.service_type, days: HALF_DAY },
     qualified_consultants: qualified,
     name_resolution:       { matched: matched.filter((m) => !isHidden(m.roster_name)), unmatched },
@@ -182,7 +182,35 @@ router.get('/freeblackbox', requireApiKey, requireCache, (req, res) => {
     next_available:        withinTwoWeeks[0] || afterOptions[0] || null,
     cache_generated_at:    cache.availability.generated_at,
     cache_refreshed_at:    cache.lastRefresh,
-  });
+  };
+
+  // ?debug=1 — surface how half-day load is actually being computed, so we can see
+  // whether the "Days Balance" field is being read off tasks at all. Lists every
+  // (consultant, date) with a non-zero load across the whole window for the
+  // qualified + priority consultants, plus the distinct load values seen.
+  if (req.query.debug) {
+    const watch = [...new Set([...qualified, ...priorityResolved])];
+    const loadByConsultant = {};
+    const distinct = new Set();
+    for (const day of days) {
+      for (const name of watch) {
+        const v = (day.load && day.load[name]) || 0;
+        if (v > 0) {
+          (loadByConsultant[name] = loadByConsultant[name] || []).push({ date: day.date, load: v });
+          distinct.add(Number(v.toFixed(4)));
+        }
+      }
+    }
+    payload.debug = {
+      load_stats:             cache.availability.loadStats || null,
+      distinct_load_values:   [...distinct].sort((a, b) => a - b),
+      nonzero_load_by_consultant: loadByConsultant,
+      note: 'If distinct_load_values has no entries <= 0.5, no half-day gaps exist — '
+          + 'either Days Balance is not set on tasks, or it is not being read (check load_stats).',
+    };
+  }
+
+  res.json(payload);
 });
 
 // ── GET /availability/internalaudit?days=N ────────────────────────────────────
