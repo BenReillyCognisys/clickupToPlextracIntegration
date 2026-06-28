@@ -41,17 +41,19 @@ cache.availability = {
   window:       { start: '2026-06-22', end: '2026-07-17', weeks: 4 },
   roster:       ['Chahat Mundra', 'Akshay Dandekar', 'Siddharth Johri', 'Jane Doe'],
   days: [
-    // Within 2 weeks
-    day('2026-06-29', 'Monday',    { 'Jane Doe': 0,   'Chahat Mundra': 1, 'Akshay Dandekar': 1, 'Siddharth Johri': 1 }), // only Jane half-free
-    day('2026-06-30', 'Tuesday',   { 'Chahat Mundra': 0.5, 'Akshay Dandekar': 1, 'Siddharth Johri': 1, 'Jane Doe': 1 }), // only Chahat half-free
-    // After 2 weeks (> 2026-07-12)
+    // Within 2 weeks. Only a partial booking (0 < load <= 0.5) counts; a fully
+    // free consultant (load 0) or a (near-)full day (load > 0.5) does not.
+    day('2026-06-29', 'Monday',    { 'Chahat Mundra': 0.5, 'Jane Doe': 0, 'Akshay Dandekar': 0, 'Siddharth Johri': 1 }),   // only Chahat (half-booked)
+    day('2026-06-30', 'Tuesday',   { 'Akshay Dandekar': 0.5, 'Chahat Mundra': 0, 'Siddharth Johri': 0, 'Jane Doe': 1 }),   // only Akshay (half-booked)
+    day('2026-07-01', 'Wednesday', { 'Chahat Mundra': 0, 'Akshay Dandekar': 0, 'Siddharth Johri': 0, 'Jane Doe': 0 }),     // everyone fully free → excluded
+    // After 2 weeks (> 2026-07-12), priority consultants only.
     day('2026-07-13', 'Monday',    { 'Akshay Dandekar': 0.5 }),
-    day('2026-07-14', 'Tuesday',   { 'Siddharth Johri': 0 }),
+    day('2026-07-14', 'Tuesday',   { 'Siddharth Johri': 0.5 }),
     day('2026-07-15', 'Wednesday', { 'Chahat Mundra': 0.5 }),
-    day('2026-07-16', 'Thursday',  { 'Jane Doe': 0, 'Chahat Mundra': 1, 'Akshay Dandekar': 1, 'Siddharth Johri': 1 }), // only Jane → excluded after-window
-    day('2026-07-17', 'Friday',    { 'Akshay Dandekar': 0 }),
-    day('2026-07-20', 'Monday',    { 'Siddharth Johri': 0 }),
-    day('2026-07-21', 'Tuesday',   { 'Chahat Mundra': 0 }),
+    day('2026-07-16', 'Thursday',  { 'Chahat Mundra': 0, 'Akshay Dandekar': 0, 'Siddharth Johri': 0 }),                    // all free → excluded
+    day('2026-07-17', 'Friday',    { 'Akshay Dandekar': 0.5 }),
+    day('2026-07-20', 'Monday',    { 'Siddharth Johri': 0.5 }),
+    day('2026-07-21', 'Tuesday',   { 'Chahat Mundra': 0.5 }),
   ],
 };
 
@@ -98,11 +100,16 @@ function get(path, headers) {
     assert.deepStrictEqual(json.priority_window, { start: '2026-06-28', end: '2026-07-12', days: 14 });
   });
 
-  test('within 2 weeks surfaces ANY qualified consultant with a half-day free', () => {
+  test('within 2 weeks surfaces only consultants with a half-day GAP (already half-booked)', () => {
     const dates = json.within_two_weeks.map((d) => d.date);
     assert.deepStrictEqual(dates, ['2026-06-29', '2026-06-30']);
-    assert.deepStrictEqual(json.within_two_weeks[0].consultants, ['Jane Doe']);   // Chahat busy that day
-    assert.deepStrictEqual(json.within_two_weeks[1].consultants, ['Chahat Mundra']);
+    assert.deepStrictEqual(json.within_two_weeks[0].consultants, ['Chahat Mundra']);
+    assert.deepStrictEqual(json.within_two_weeks[1].consultants, ['Akshay Dandekar']);
+  });
+
+  test('within 2 weeks excludes fully-free days (no work assigned)', () => {
+    const dates = json.within_two_weeks.map((d) => d.date);
+    assert.ok(!dates.includes('2026-07-01'), '2026-07-01 (everyone fully free) must be excluded');
   });
 
   test('after 2 weeks is capped at 5 distinct dates', () => {
@@ -111,9 +118,9 @@ function get(path, headers) {
     assert.deepStrictEqual(dates, ['2026-07-13', '2026-07-14', '2026-07-15', '2026-07-17', '2026-07-20']);
   });
 
-  test('after 2 weeks excludes dates where only a non-priority consultant is free', () => {
+  test('after 2 weeks excludes fully-free days', () => {
     const dates = json.after_two_weeks.options.map((o) => o.date);
-    assert.ok(!dates.includes('2026-07-16'), '2026-07-16 (Jane only) must be excluded');
+    assert.ok(!dates.includes('2026-07-16'), '2026-07-16 (all priority consultants fully free) must be excluded');
   });
 
   test('after 2 weeks only lists the 3 priority consultants', () => {
