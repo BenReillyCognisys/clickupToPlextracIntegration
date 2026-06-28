@@ -5,7 +5,7 @@ const express = require('express');
 // Endpoint requires this before the router is imported (middleware reads it).
 process.env.AVAILABILITY_API_KEY = 'test-key';
 
-const { cache } = require('../lib/availability-cache');
+const { cache, taskDaysBalance } = require('../lib/availability-cache');
 const availabilityRouter = require('../routes/availability');
 
 let passed = 0;
@@ -22,6 +22,32 @@ function test(description, fn) {
     failed++;
   }
 }
+
+// ── Effort-field resolution (taskDaysBalance) ─────────────────────────────────
+console.log('taskDaysBalance (Days / Days Balance field):');
+
+test('reads a "Days" custom field (half day)', () => {
+  assert.strictEqual(taskDaysBalance({ custom_fields: [{ name: 'Days', value: '0.5' }] }), 0.5);
+});
+
+test('tolerates surrounding whitespace in the field name', () => {
+  assert.strictEqual(taskDaysBalance({ custom_fields: [{ name: ' Days ', value: 1 }] }), 1);
+});
+
+test('falls back to "Days Balance" when "Days" is absent', () => {
+  assert.strictEqual(taskDaysBalance({ custom_fields: [{ name: 'Days Balance', value: '2' }] }), 2);
+});
+
+test('prefers "Days" over "Days Balance" when both present', () => {
+  assert.strictEqual(taskDaysBalance({
+    custom_fields: [{ name: 'Days Balance', value: '5' }, { name: 'Days', value: '0.5' }],
+  }), 0.5);
+});
+
+test('returns null when no effort field is set', () => {
+  assert.strictEqual(taskDaysBalance({ custom_fields: [{ name: 'R', value: '100' }] }), null);
+  assert.strictEqual(taskDaysBalance({}), null);
+});
 
 // ── Fake cache ────────────────────────────────────────────────────────────────
 // today = Sun 2026-06-28 → 2-week boundary = 2026-07-12.
