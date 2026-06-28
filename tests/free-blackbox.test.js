@@ -72,14 +72,15 @@ cache.availability = {
     day('2026-06-29', 'Monday',    { 'Chahat Mundra': 0.5, 'Jane Doe': 0, 'Akshay Dandekar': 0, 'Siddharth Johri': 1 }),   // only Chahat (half-booked)
     day('2026-06-30', 'Tuesday',   { 'Akshay Dandekar': 0.5, 'Chahat Mundra': 0, 'Siddharth Johri': 0, 'Jane Doe': 1 }),   // only Akshay (half-booked)
     day('2026-07-01', 'Wednesday', { 'Chahat Mundra': 0, 'Akshay Dandekar': 0, 'Siddharth Johri': 0, 'Jane Doe': 0 }),     // everyone fully free → excluded
-    // After 2 weeks (> 2026-07-12), priority consultants only.
-    day('2026-07-13', 'Monday',    { 'Akshay Dandekar': 0.5 }),
-    day('2026-07-14', 'Tuesday',   { 'Siddharth Johri': 0.5 }),
-    day('2026-07-15', 'Wednesday', { 'Chahat Mundra': 0.5 }),
-    day('2026-07-16', 'Thursday',  { 'Chahat Mundra': 0, 'Akshay Dandekar': 0, 'Siddharth Johri': 0 }),                    // all free → excluded
-    day('2026-07-17', 'Friday',    { 'Akshay Dandekar': 0.5 }),
-    day('2026-07-20', 'Monday',    { 'Siddharth Johri': 0.5 }),
-    day('2026-07-21', 'Tuesday',   { 'Chahat Mundra': 0.5 }),
+    // After 2 weeks (> 2026-07-12), priority consultants only. Here a fully free
+    // day OR a half-day gap counts (load <= 0.5); only fully-booked is excluded.
+    day('2026-07-13', 'Monday',    { 'Chahat Mundra': 1,   'Akshay Dandekar': 0.5, 'Siddharth Johri': 1 }),   // [Akshay]
+    day('2026-07-14', 'Tuesday',   { 'Chahat Mundra': 0,   'Akshay Dandekar': 1,   'Siddharth Johri': 1 }),   // [Chahat] (fully free)
+    day('2026-07-15', 'Wednesday', { 'Chahat Mundra': 1,   'Akshay Dandekar': 1,   'Siddharth Johri': 0.5 }), // [Siddharth]
+    day('2026-07-16', 'Thursday',  { 'Chahat Mundra': 1,   'Akshay Dandekar': 1,   'Siddharth Johri': 1 }),   // all booked → excluded
+    day('2026-07-17', 'Friday',    { 'Chahat Mundra': 0,   'Akshay Dandekar': 0,   'Siddharth Johri': 0 }),   // all fully free → all three
+    day('2026-07-20', 'Monday',    { 'Chahat Mundra': 0.5, 'Akshay Dandekar': 1,   'Siddharth Johri': 1 }),   // [Chahat]
+    day('2026-07-21', 'Tuesday',   { 'Chahat Mundra': 1,   'Akshay Dandekar': 0,   'Siddharth Johri': 1 }),   // [Akshay] (fully free)
   ],
 };
 
@@ -144,9 +145,15 @@ function get(path, headers) {
     assert.deepStrictEqual(dates, ['2026-07-13', '2026-07-14', '2026-07-15', '2026-07-17', '2026-07-20']);
   });
 
-  test('after 2 weeks excludes fully-free days', () => {
+  test('after 2 weeks allows fully free days (not just half-day gaps)', () => {
+    const opt = json.after_two_weeks.options.find((o) => o.date === '2026-07-17');
+    assert.ok(opt, '2026-07-17 (all three fully free) must be included');
+    assert.deepStrictEqual(opt.consultants, ['Chahat Mundra', 'Akshay Dandekar', 'Siddharth Johri']);
+  });
+
+  test('after 2 weeks excludes fully-booked days', () => {
     const dates = json.after_two_weeks.options.map((o) => o.date);
-    assert.ok(!dates.includes('2026-07-16'), '2026-07-16 (all priority consultants fully free) must be excluded');
+    assert.ok(!dates.includes('2026-07-16'), '2026-07-16 (all priority consultants fully booked) must be excluded');
   });
 
   test('after 2 weeks only lists the 3 priority consultants', () => {

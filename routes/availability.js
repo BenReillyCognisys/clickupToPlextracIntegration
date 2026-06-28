@@ -92,14 +92,15 @@ router.get('/pentest', requireApiKey, requireCache, (req, res) => {
 // is <= 0.5 still has >= 0.5 day free.
 //
 //   • Within the next 2 weeks: ANY Black Box-qualified consultant with a half-day
-//     GAP is surfaced (soonest first) — these are prioritised.
+//     GAP is surfaced (soonest first) — these are prioritised. A "gap" means the
+//     consultant is ALREADY booked for part of the day but has at least half a day
+//     free (0 < load <= 0.5). A completely free day does NOT count here — the point
+//     is to fill existing gaps, not consume a whole free day that could take a
+//     larger engagement.
 //   • After the 2-week window: up to 5 distinct dates, restricted to the priority
-//     consultants (Chahat Mundra, Akshay Dandekar, Siddharth Johri).
-//
-// A "half-day gap" means the consultant is ALREADY booked for part of the day but
-// has at least half a day still free (0 < load <= 0.5). A completely free day
-// (load == 0) does NOT count — the point is to fill existing gaps, not consume a
-// whole free day that could take a larger engagement.
+//     consultants (Chahat Mundra, Akshay Dandekar, Siddharth Johri). Here any day
+//     with at least half a day free counts — a fully free day OR a half-day gap
+//     (load <= 0.5).
 //
 // Requires the X-API-Key header. Booking still goes through POST /schedule/pentest
 // with testType "Black Box Web App" and days 0.5.
@@ -110,13 +111,16 @@ const HALF_DAY                   = 0.5;
 const AFTER_OPTION_COUNT         = 5;
 const EPS                        = 1e-9;
 
-// True when the consultant is partially booked that day with at least half a day
-// still free — i.e. an existing half-day gap the free test can slot into. A fully
-// free day (load 0) and a (near-)full day (load > 0.5) both return false.
+const loadOf = (day, name) => (day.load && day.load[name]) || 0;
+
+// Within 2 weeks: an existing half-day gap (partially booked, >= half still free).
 const hasHalfDayGap = (day, name) => {
-  const load = (day.load && day.load[name]) || 0;
+  const load = loadOf(day, name);
   return load > EPS && load <= HALF_DAY + EPS;
 };
+
+// After 2 weeks: at least half a day free — a fully free day or a half-day gap.
+const hasHalfDayFree = (day, name) => loadOf(day, name) <= HALF_DAY + EPS;
 
 router.get('/freeblackbox', requireApiKey, requireCache, (req, res) => {
   const lookup = matchServiceType(FREE_BLACKBOX_BASE_SERVICE, cache.serviceTypes);
@@ -161,12 +165,12 @@ router.get('/freeblackbox', requireApiKey, requireCache, (req, res) => {
     if (free.length) withinTwoWeeks.push({ date: day.date, weekday: day.weekday, consultants: free });
   }
 
-  // After 2 weeks: distinct dates where a priority consultant has a half-day gap,
-  // capped at 5 options.
+  // After 2 weeks: distinct dates where a priority consultant has at least half a
+  // day free (fully free day or half-day gap), capped at 5 options.
   const afterOptions = [];
   for (const day of days) {
     if (boundary && day.date <= boundary) continue;
-    const free = orderConsultants(priorityResolved.filter((c) => hasHalfDayGap(day, c)));
+    const free = orderConsultants(priorityResolved.filter((c) => hasHalfDayFree(day, c)));
     if (free.length) afterOptions.push({ date: day.date, weekday: day.weekday, consultants: free });
     if (afterOptions.length >= AFTER_OPTION_COUNT) break;
   }
