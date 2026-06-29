@@ -55,12 +55,15 @@ function checkboxChecked(task, fieldName) {
   return field ? isChecked(field.value) : false;
 }
 
-// A task needs chasing when it's a top-level task whose pre-recs are in but the
-// tester hasn't OK'd them yet. Once "Tester OKd Pre-Recs" is ticked (or the task
-// closes and drops out of the open-task list), it no longer qualifies — that's
-// the signal the 5-minute reconcile uses to strike its line through.
+// A task needs chasing when it's a top-level task with at least one assignee whose
+// pre-recs are in but the tester hasn't OK'd them yet. Tasks with no assignee are
+// skipped (there's no one to ping). Once "Tester OKd Pre-Recs" is ticked (or the
+// task closes and drops out of the open-task list, or its last assignee is
+// removed), it no longer qualifies — that's the signal the 5-minute reconcile uses
+// to strike its line through.
 function qualifies(task) {
   if (task.parent) return false; // skip subtasks
+  if (!(task.assignees || []).length) return false; // no one to chase
   return checkboxChecked(task, PRE_RECS_RECEIVED_FIELD) && !checkboxChecked(task, TESTER_OKD_FIELD);
 }
 
@@ -156,10 +159,9 @@ async function runAuthFormCheck() {
     const { client_name, testing_type } = parseTaskName(task.name);
     const engagement = `${client_name} | ${testing_type}`;
 
+    // qualifies() guarantees at least one assignee, so there's always someone to ping.
     const assignees = task.assignees || [];
-    const mentions = assignees.length
-      ? (await Promise.all(assignees.map(a => mentionFor(a, emailToId)))).join(' ')
-      : '_(unassigned)_';
+    const mentions = (await Promise.all(assignees.map(a => mentionFor(a, emailToId)))).join(' ');
 
     console.log(`[auth-form-check] MATCH: "${task.name}" — ${assignees.length} assignee(s) (task ${task.id}).`);
     entries.push({ taskId: task.id, line: `${mentions} - ${engagement}`, struck: false, startDate: task.start_date || null });
