@@ -53,8 +53,10 @@ const REPORTS_DUE_CHANNEL = process.env.SLACK_REPORTS_DUE_CHANNEL || 'C091H6MLS6
 // Phase" matches the ClickUp status "wash up phase".
 const EXCLUDED_STATUSES = new Set(['complete', 'wash up phase', 'rr awaiting payment']);
 
+// Lower-cases, strips decoration (e.g. the asterisks in "**RR Awaiting Payment**"),
+// and treats hyphens/spaces as equivalent so set matching is forgiving.
 function normalizeStatus(s) {
-  return (s || '').toLowerCase().replace(/[-\s]+/g, ' ').trim();
+  return (s || '').toLowerCase().replace(/\*/g, '').replace(/[-\s]+/g, ' ').trim();
 }
 
 // Assignees whose tasks should never appear in the report.
