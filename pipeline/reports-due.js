@@ -45,11 +45,17 @@ const MISSED_SLA_LOOKBACK_DAYS = Number(process.env.REPORTS_DUE_MISSED_LOOKBACK_
 
 // Channel the report is posted to (the bot must be a member). Use the channel ID,
 // not the name — chat.postMessage returns channel_not_found for names.
-const REPORTS_DUE_CHANNEL = process.env.SLACK_REPORTS_DUE_CHANNEL || '#qa-chat';
+const REPORTS_DUE_CHANNEL = process.env.SLACK_REPORTS_DUE_CHANNEL || 'C091H6MLS6A';
 
-// Statuses to exclude (all others are included). Tasks in a "closed" status type
-// are already dropped by include_closed=false at fetch time.
-const EXCLUDED_STATUSES = new Set(['scheduled', 'complete']);
+// Statuses to exclude — every other task (with a due date) is included. Tasks in a
+// "closed" status type are also dropped by include_closed=false at fetch time.
+// Matching is normalised (case-insensitive, hyphens/spaces equivalent) so "Wash-Up
+// Phase" matches the ClickUp status "wash up phase".
+const EXCLUDED_STATUSES = new Set(['complete', 'wash up phase']);
+
+function normalizeStatus(s) {
+  return (s || '').toLowerCase().replace(/[-\s]+/g, ' ').trim();
+}
 
 // Assignees whose tasks should never appear in the report.
 const EXCLUDED_ASSIGNEES = new Set([
@@ -60,11 +66,41 @@ const EXCLUDED_ASSIGNEES = new Set([
 // Tasks whose name looks like a "report deadline" placeholder are skipped.
 const REPORT_DEADLINE_PATTERN = /report.*deadline|deadline.*report/;
 
+// Leave / holiday / admin entries (not client reports) are skipped. Kept
+// deliberately narrow — whole-word, leave/admin-specific terms — so it can't catch
+// a real engagement name. Examples removed: "Annual Leave", "State Holiday",
+// "Birthday Leave!", "Sick leave", "Admin day", "Block out", "Onsite", "Upskill",
+// "Blog Writing", "Half day - working morning".
+const EXCLUDED_NAME_PATTERN =
+  /\bleave\b|\bholiday\b|\bsick\b|\bblog\b|\bupskill\b|\bonsite\b|\bblock out\b|\bhalf day\b|\badmin day\b/;
+
 // Lists to exclude from the search.
 const EXCLUDED_LIST_IDS = ['901502418560'];
 
-// Only report tasks with at least this many days on the "Days" custom field.
-const MIN_DAYS = 0.5;
+// A task only counts as a real report if at least one of these number custom
+// fields is populated with a value above 0 — a positive "this is a billable
+// engagement" signal that replaces relying on the task name alone. The OR is
+// deliberate: any one field can be blank on a given task (the old Days-only check
+// dropped reports whenever Days was missing), so we accept a value in any of them.
+const VALUE_FIELDS = ['Revenue', 'Days', 'Days Balance'];
+
+// Reads a number custom field by name (case-insensitive) and returns it as a
+// Number, or NaN if the field is absent/empty/non-numeric.
+function numberField(task, fieldName) {
+  const target = fieldName.trim().toLowerCase();
+  const field = (task.custom_fields || []).find(
+    (f) => (f.name || '').trim().toLowerCase() === target
+  );
+  if (!field || field.value === null || field.value === undefined || field.value === '') {
+    return NaN;
+  }
+  return Number(field.value);
+}
+
+// True if any of VALUE_FIELDS holds a value above 0.
+function hasReportValue(task) {
+  return VALUE_FIELDS.some((name) => numberField(task, name) > 0);
+}
 
 // ── Date helpers (Europe/London calendar dates as UTC-midnight anchors) ───────
 // Every date below is represented as a Date at 00:00:00 UTC standing for a London
@@ -134,7 +170,7 @@ function collectFromTasks(tasks) {
   const collected = [];
   for (const task of tasks) {
     const status = task.status && task.status.status;
-    if (EXCLUDED_STATUSES.has(status)) continue;
+    if (EXCLUDED_STATUSES.has(normalizeStatus(status))) continue;
     if (task.due_date === null || task.due_date === undefined) continue;
 
     const assignee = (task.assignees && task.assignees.length > 0)
@@ -142,11 +178,12 @@ function collectFromTasks(tasks) {
       : 'No Assignee';
     if (EXCLUDED_ASSIGNEES.has(assignee)) continue;
 
-    if (REPORT_DEADLINE_PATTERN.test((task.name || '').toLowerCase())) continue;
+    const lowerName = (task.name || '').toLowerCase();
+    if (REPORT_DEADLINE_PATTERN.test(lowerName)) continue;
+    if (EXCLUDED_NAME_PATTERN.test(lowerName)) continue;
 
-    const daysField = (task.custom_fields || []).find((f) => f.name === 'Days');
-    const days = parseFloat(daysField && daysField.value);
-    if (!(days >= MIN_DAYS)) continue;
+    // Must look like a billable engagement: Revenue, Days or Days Balance > 0.
+    if (!hasReportValue(task)) continue;
 
     collected.push({ name: task.name, status, due_date: task.due_date, assignee });
   }
@@ -255,5 +292,7 @@ async function runReportsDueCheck() {
 module.exports = {
   runReportsDueCheck,
   // exported for tests / reuse
-  addBusinessDays, getWeekCommencing, formatDate, toTzDate, bucketTasks, buildReport,
+  addBusinessDays, getWeekCommencing, formatDate, toTzDate,
+  collectFromTasks, dedupeAndSort, bucketTasks, buildReport,
+  numberField, hasReportValue,
 };
