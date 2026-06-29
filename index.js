@@ -4,6 +4,7 @@ const rateLimit = require('express-rate-limit');
 const cron = require('node-cron');
 const { validateToken } = require('./lib/clickup-api');
 const { runAuthFormCheck, reconcileAuthFormMessage } = require('./pipeline/auth-form-check');
+const { runReportsDueCheck } = require('./pipeline/reports-due');
 const { startAvailabilityCache } = require('./lib/availability-cache');
 const log = require('./lib/logger');
 const app = express();
@@ -90,6 +91,14 @@ app.post('/jobs/auth-form-reconcile', (req, res) => {
   reconcileAuthFormMessage().catch(err => log.error('Auth-form reconcile failed', { reason: err.message }));
 });
 
+// Manual trigger for the weekly reports-due check (also runs on the optional cron
+// below if REPORTS_DUE_CRON is set). Posts the "Missed SLA / Week Commencing"
+// report to Slack. Always responds with a blank 200; the outcome goes to the logs.
+app.post('/jobs/reports-due', (req, res) => {
+  res.status(200).end();
+  runReportsDueCheck().catch(err => log.error('Reports-due check failed', { reason: err.message }));
+});
+
 // Daily auth-form check at 14:00 (server timezone unless AUTH_FORM_CHECK_TZ set).
 // Override the schedule with AUTH_FORM_CHECK_CRON (standard cron expression).
 const AUTH_FORM_CHECK_CRON = process.env.AUTH_FORM_CHECK_CRON || '0 14 * * *';
@@ -105,6 +114,18 @@ const AUTH_FORM_RECONCILE_CRON = process.env.AUTH_FORM_RECONCILE_CRON || '*/5 * 
 cron.schedule(AUTH_FORM_RECONCILE_CRON, () => {
   reconcileAuthFormMessage().catch(err => log.error('Auth-form reconcile failed', { reason: err.message }));
 }, { timezone: AUTH_FORM_CHECK_TZ });
+
+// Weekly reports-due check — Mondays at 06:00 by default. Override with
+// REPORTS_DUE_CRON (standard cron) or set it blank to disable the schedule and
+// run manually via POST /jobs/reports-due.
+const REPORTS_DUE_CRON = process.env.REPORTS_DUE_CRON ?? '0 6 * * 1';
+const REPORTS_DUE_TZ = process.env.REPORTS_DUE_TZ || 'Europe/London';
+if (REPORTS_DUE_CRON) {
+  cron.schedule(REPORTS_DUE_CRON, () => {
+    console.log('[cron] Triggering weekly reports-due check…');
+    runReportsDueCheck().catch(err => log.error('Reports-due check failed', { reason: err.message }));
+  }, { timezone: REPORTS_DUE_TZ });
+}
 
 app.listen(PORT, async () => {
   console.log(`Server listening on port ${PORT}`);
