@@ -61,7 +61,7 @@ async function handler(req, res) {
 
   const { event, targetCuid, targetType, text } = payload;
 
-  if (event !== 'ReportStatusChanged' || targetType !== 'report' || !targetCuid) {
+  if (event !== 'ReportStatusChanged' || targetType !== 'report' || typeof targetCuid !== 'string' || !targetCuid) {
     return;
   }
 

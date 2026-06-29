@@ -5,7 +5,7 @@ const cron = require('node-cron');
 const { validateToken } = require('./lib/clickup-api');
 const { runAuthFormCheck, reconcileAuthFormMessage } = require('./pipeline/auth-form-check');
 const { runReportsDueCheck } = require('./pipeline/reports-due');
-const { startAvailabilityCache } = require('./lib/availability-cache');
+const { startAvailabilityCache, requireApiKey } = require('./lib/availability-cache');
 const log = require('./lib/logger');
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -16,6 +16,18 @@ const PORT = process.env.PORT || 4000;
 app.set('trust proxy', 1);
 
 const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Rate limiter for the manual job-trigger endpoints (/jobs/*). Mounted BEFORE the
+// X-API-Key check so failed-auth attempts (e.g. brute-forcing the key) are throttled
+// too. The scheduling API (/availability, /schedule) is intentionally NOT limited
+// here: the frontend calls it frequently and many users share one API key, so an
+// IP-based limit would throttle legitimate traffic.
+const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
   standardHeaders: true,
@@ -77,24 +89,27 @@ app.use('/availability', schedulingCors, require('./routes/availability'));
 app.use('/schedule', schedulingCors, require('./routes/schedule'));
 
 // Manual trigger for the daily auth-form check (also runs on a 14:00 cron below).
-// Always responds with a blank 200 and discloses nothing; the check runs
-// fire-and-forget with its outcome written to the logs.
-app.post('/jobs/auth-form-check', (req, res) => {
+// Requires the X-API-Key header (AVAILABILITY_API_KEY) and is rate-limited. Always
+// responds with a blank 200 and discloses nothing; the check runs fire-and-forget
+// with its outcome written to the logs.
+app.post('/jobs/auth-form-check', apiLimiter, requireApiKey, (req, res) => {
   res.status(200).end();
   runAuthFormCheck().catch(err => log.error('Auth-form check failed', { reason: err.message }));
 });
 
 // Manual trigger for the auth-form reconcile (also runs on a 5-minute cron below).
-// Re-scans the space and strikes through any listed task that's since been actioned.
-app.post('/jobs/auth-form-reconcile', (req, res) => {
+// Requires the X-API-Key header and is rate-limited. Re-scans the space and strikes
+// through any listed task that's since been actioned.
+app.post('/jobs/auth-form-reconcile', apiLimiter, requireApiKey, (req, res) => {
   res.status(200).end();
   reconcileAuthFormMessage().catch(err => log.error('Auth-form reconcile failed', { reason: err.message }));
 });
 
 // Manual trigger for the weekly reports-due check (also runs on the optional cron
-// below if REPORTS_DUE_CRON is set). Posts the "Missed SLA / Week Commencing"
-// report to Slack. Always responds with a blank 200; the outcome goes to the logs.
-app.post('/jobs/reports-due', (req, res) => {
+// below if REPORTS_DUE_CRON is set). Requires the X-API-Key header and is
+// rate-limited. Posts the "Missed SLA / Week Commencing" report to Slack. Always
+// responds with a blank 200; the outcome goes to the logs.
+app.post('/jobs/reports-due', apiLimiter, requireApiKey, (req, res) => {
   res.status(200).end();
   runReportsDueCheck().catch(err => log.error('Reports-due check failed', { reason: err.message }));
 });
