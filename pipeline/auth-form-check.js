@@ -38,6 +38,10 @@ const TESTER_OKD_FIELD = 'Tester OKd Pre-Recs';
 // Timezone the start-date labels are formatted in (kept in step with the cron tz).
 const AUTH_FORM_TZ = process.env.AUTH_FORM_CHECK_TZ || 'Europe/London';
 
+// Only chase jobs starting within this many days from today (inclusive of today).
+// 7 calendar days ≈ the coming 5 business days. Override via AUTH_FORM_WINDOW_DAYS.
+const AUTH_FORM_WINDOW_DAYS = Number(process.env.AUTH_FORM_WINDOW_DAYS) || 7;
+
 // qa-chat channel the bot is a member of (override via env). MUST be a channel
 // ID (e.g. C0123ABCD) — chat.postMessage returns channel_not_found for names.
 const AUTH_FORM_CHANNEL = process.env.SLACK_AUTH_FORM_CHANNEL || '#qa-chat';
@@ -55,15 +59,36 @@ function checkboxChecked(task, fieldName) {
   return field ? isChecked(field.value) : false;
 }
 
-// A task needs chasing when it's a top-level task with at least one assignee whose
-// pre-recs are in but the tester hasn't OK'd them yet. Tasks with no assignee are
-// skipped (there's no one to ping). Once "Tester OKd Pre-Recs" is ticked (or the
-// task closes and drops out of the open-task list, or its last assignee is
-// removed), it no longer qualifies — that's the signal the 5-minute reconcile uses
-// to strike its line through.
+// Whole days from today (in AUTH_FORM_TZ) to the given start_date (ms since epoch):
+// 0 = starts today, 7 = starts a week today, negative = already started. Compares
+// calendar dates (not raw ms) so the time of day and DST don't skew the count.
+// Returns null when there's no usable date.
+function daysUntilStart(ms, now = new Date()) {
+  if (ms === null || ms === undefined || ms === '') return null;
+  const d = new Date(Number(ms));
+  if (Number.isNaN(d.getTime())) return null;
+  const ymd = (date) => {
+    const p = new Intl.DateTimeFormat('en-CA', {
+      timeZone: AUTH_FORM_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(date);
+    const get = (t) => Number(p.find(x => x.type === t).value);
+    return Date.UTC(get('year'), get('month') - 1, get('day'));
+  };
+  return Math.round((ymd(d) - ymd(now)) / 86400000);
+}
+
+// A task needs chasing when it's a top-level task with at least one assignee, whose
+// pre-recs are in but the tester hasn't OK'd them yet, AND which starts within the
+// next AUTH_FORM_WINDOW_DAYS days. Tasks with no assignee (no one to ping), no start
+// date, or a start date outside the window are skipped. Once "Tester OKd Pre-Recs"
+// is ticked (or the task closes / its last assignee is removed / it drops out of the
+// window), it no longer qualifies — that's the signal the 5-minute reconcile uses to
+// strike its line through.
 function qualifies(task) {
   if (task.parent) return false; // skip subtasks
   if (!(task.assignees || []).length) return false; // no one to chase
+  const days = daysUntilStart(task.start_date);
+  if (days === null || days < 0 || days > AUTH_FORM_WINDOW_DAYS) return false; // outside the window
   return checkboxChecked(task, PRE_RECS_RECEIVED_FIELD) && !checkboxChecked(task, TESTER_OKD_FIELD);
 }
 
