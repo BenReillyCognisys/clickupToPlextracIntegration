@@ -5,10 +5,13 @@
 // the task's assignee(s) are collected (i.e. we chase the testers who still need
 // to check the auth form). A SINGLE message is then posted to the qa-chat
 // channel (SLACK_AUTH_FORM_CHANNEL, via the bot token), @-mentioning the assigned
-// users so they're pinged to check the authorisation form:
+// users so they're pinged to check the authorisation form. Tasks are grouped under
+// their start date (chronological; undated tasks last):
 //
 //   *Check Auth Form*
+//   *[23rd July]*
 //   <@U012ABC> - ClientA | Blackbox
+//   *[24th July]*
 //   <@U345DEF> - ClientB | Greybox
 //
 // No DMs are sent and the SLACK_WEBHOOK_URL summary is no longer used.
@@ -31,6 +34,9 @@ const { parseTaskName } = require('./parse-task');
 
 const PRE_RECS_RECEIVED_FIELD = 'Pre Recs Received?';
 const TESTER_OKD_FIELD = 'Tester OKd Pre-Recs';
+
+// Timezone the start-date labels are formatted in (kept in step with the cron tz).
+const AUTH_FORM_TZ = process.env.AUTH_FORM_CHECK_TZ || 'Europe/London';
 
 // qa-chat channel the bot is a member of (override via env). MUST be a channel
 // ID (e.g. C0123ABCD) — chat.postMessage returns channel_not_found for names.
@@ -58,11 +64,48 @@ function qualifies(task) {
   return checkboxChecked(task, PRE_RECS_RECEIVED_FIELD) && !checkboxChecked(task, TESTER_OKD_FIELD);
 }
 
-// Renders the Slack message from the persisted entries: the header followed by
-// one line per task, struck-through (~…~) when the task has been actioned.
+// "23rd July" from a ClickUp start_date (ms since epoch, as a string or number),
+// formatted in AUTH_FORM_TZ. Returns null when there's no usable date.
+function ordinalSuffix(n) {
+  const s = ['th', 'st', 'nd', 'rd'];
+  const v = n % 100;
+  return s[(v - 20) % 10] || s[v] || s[0];
+}
+
+function formatStartDate(ms) {
+  if (ms === null || ms === undefined || ms === '') return null;
+  const d = new Date(Number(ms));
+  if (Number.isNaN(d.getTime())) return null;
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: AUTH_FORM_TZ,
+    day: 'numeric',
+    month: 'long',
+  }).formatToParts(d);
+  const day = Number(parts.find(p => p.type === 'day').value);
+  const month = parts.find(p => p.type === 'month').value;
+  return `${day}${ordinalSuffix(day)} ${month}`;
+}
+
+// Renders the Slack message from the persisted entries: the header, then the
+// tasks grouped under a "[23rd July]" start-date heading (chronological, undated
+// last). Each task line is struck-through (~…~) when it's been actioned.
 function renderMessage(entries) {
-  const lines = entries.map(e => (e.struck ? `~${e.line}~` : e.line));
-  return ['*Check Auth Form*', ...lines].join('\n');
+  const groups = new Map(); // label -> { sortKey, lines: [] }
+  for (const e of entries) {
+    const label = formatStartDate(e.startDate) || 'No start date';
+    const sortKey = e.startDate ? Number(e.startDate) : Number.POSITIVE_INFINITY;
+    if (!groups.has(label)) groups.set(label, { sortKey, lines: [] });
+    const g = groups.get(label);
+    g.sortKey = Math.min(g.sortKey, sortKey);
+    g.lines.push(e.struck ? `~${e.line}~` : e.line);
+  }
+
+  const out = ['*Check Auth Form*'];
+  for (const [label, g] of [...groups.entries()].sort((a, b) => a[1].sortKey - b[1].sortKey)) {
+    out.push(`*[${label}]*`);
+    out.push(...g.lines);
+  }
+  return out.join('\n');
 }
 
 // Turns a ClickUp assignee into a Slack @-mention by resolving their Slack id
@@ -119,7 +162,7 @@ async function runAuthFormCheck() {
       : '_(unassigned)_';
 
     console.log(`[auth-form-check] MATCH: "${task.name}" — ${assignees.length} assignee(s) (task ${task.id}).`);
-    entries.push({ taskId: task.id, line: `${mentions} - ${engagement}`, struck: false });
+    entries.push({ taskId: task.id, line: `${mentions} - ${engagement}`, struck: false, startDate: task.start_date || null });
   }
 
   if (!entries.length) {
