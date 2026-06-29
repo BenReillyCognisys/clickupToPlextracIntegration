@@ -51,7 +51,7 @@ const REPORTS_DUE_CHANNEL = process.env.SLACK_REPORTS_DUE_CHANNEL || 'C091H6MLS6
 // "closed" status type are also dropped by include_closed=false at fetch time.
 // Matching is normalised (case-insensitive, hyphens/spaces equivalent) so "Wash-Up
 // Phase" matches the ClickUp status "wash up phase".
-const EXCLUDED_STATUSES = new Set(['complete', 'wash up phase']);
+const EXCLUDED_STATUSES = new Set(['complete', 'wash up phase', 'rr awaiting payment']);
 
 function normalizeStatus(s) {
   return (s || '').toLowerCase().replace(/[-\s]+/g, ' ').trim();
