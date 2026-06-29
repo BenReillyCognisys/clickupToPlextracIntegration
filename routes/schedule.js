@@ -22,9 +22,10 @@ router.post('/pentest', requireApiKey, requireCache, async (req, res) => {
       error: 'testType, days, consultant, startDate, and endDate are required',
     });
   }
+  // Allow fractional days: the Free Black Box Test books a half-day (days = 0.5).
   const daysNum = Number(days);
-  if (!Number.isFinite(daysNum) || daysNum < 1) {
-    return res.status(400).json({ error: 'days must be a positive integer' });
+  if (!Number.isFinite(daysNum) || daysNum <= 0) {
+    return res.status(400).json({ error: 'days must be a positive number' });
   }
 
   const lookup = matchServiceType(testType, cache.serviceTypes);
