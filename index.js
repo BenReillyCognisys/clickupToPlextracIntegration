@@ -3,7 +3,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const cron = require('node-cron');
 const { validateToken } = require('./lib/clickup-api');
-const { runAuthFormCheck } = require('./pipeline/auth-form-check');
+const { runAuthFormCheck, reconcileAuthFormMessage } = require('./pipeline/auth-form-check');
 const { startAvailabilityCache } = require('./lib/availability-cache');
 const log = require('./lib/logger');
 const app = express();
@@ -83,6 +83,13 @@ app.post('/jobs/auth-form-check', (req, res) => {
   runAuthFormCheck().catch(err => log.error('Auth-form check failed', { reason: err.message }));
 });
 
+// Manual trigger for the auth-form reconcile (also runs on a 5-minute cron below).
+// Re-scans the space and strikes through any listed task that's since been actioned.
+app.post('/jobs/auth-form-reconcile', (req, res) => {
+  res.status(200).end();
+  reconcileAuthFormMessage().catch(err => log.error('Auth-form reconcile failed', { reason: err.message }));
+});
+
 // Daily auth-form check at 14:00 (server timezone unless AUTH_FORM_CHECK_TZ set).
 // Override the schedule with AUTH_FORM_CHECK_CRON (standard cron expression).
 const AUTH_FORM_CHECK_CRON = process.env.AUTH_FORM_CHECK_CRON || '0 14 * * *';
@@ -90,6 +97,13 @@ const AUTH_FORM_CHECK_TZ = process.env.AUTH_FORM_CHECK_TZ || 'Europe/London';
 cron.schedule(AUTH_FORM_CHECK_CRON, () => {
   console.log('[cron] Triggering daily auth-form check…');
   runAuthFormCheck().catch(err => log.error('Auth-form check failed', { reason: err.message }));
+}, { timezone: AUTH_FORM_CHECK_TZ });
+
+// Every 5 minutes, reconcile the posted message: strike through tasks that have
+// been actioned since it went out. Override with AUTH_FORM_RECONCILE_CRON.
+const AUTH_FORM_RECONCILE_CRON = process.env.AUTH_FORM_RECONCILE_CRON || '*/5 * * * *';
+cron.schedule(AUTH_FORM_RECONCILE_CRON, () => {
+  reconcileAuthFormMessage().catch(err => log.error('Auth-form reconcile failed', { reason: err.message }));
 }, { timezone: AUTH_FORM_CHECK_TZ });
 
 app.listen(PORT, async () => {
