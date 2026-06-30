@@ -135,13 +135,28 @@ async function createReport(clientId, task, testingType) {
 
   // Store the ClickUp task → Plextrac report mapping so the reverse webhook
   // (Plextrac → ClickUp) can look up which task to update later.
+  //
+  // When the task had no start_date, the report name above was built from a
+  // fallback (current month/year). Flag it as start_date_pending and record the
+  // testing type so the start-date watcher (pipeline/start-date-watch.js) can
+  // rename the report once a start date is set in ClickUp.
+  const startDatePending = !task.start_date;
   await store.saveMapping({
     clickupTaskId:      task.id,
     plextracClientId:   clientId,
     plextracReportId:   result.report_id,
     plextracReportCuid: reportCuid,
     taskName:           task.name,
+    testingType,
+    startDatePending,
   });
+  if (startDatePending) {
+    log.info('Report created without a start date — will watch ClickUp for one', {
+      report: name,
+      report_id: result.report_id,
+      clickup_task_id: task.id,
+    });
+  }
 
   log.info('Plextrac Report created', {
     report: name,
@@ -152,4 +167,4 @@ async function createReport(clientId, task, testingType) {
   return { name, reportId: result.report_id };
 }
 
-module.exports = { createReport };
+module.exports = { createReport, buildReportName, epochToISO };

@@ -5,6 +5,7 @@ const cron = require('node-cron');
 const { validateToken } = require('./lib/clickup-api');
 const { runAuthFormCheck, reconcileAuthFormMessage } = require('./pipeline/auth-form-check');
 const { runReportsDueCheck } = require('./pipeline/reports-due');
+const { runStartDateWatch } = require('./pipeline/start-date-watch');
 const { startAvailabilityCache, requireApiKey } = require('./lib/availability-cache');
 const log = require('./lib/logger');
 const app = express();
@@ -114,6 +115,15 @@ app.post('/jobs/reports-due', apiLimiter, requireApiKey, (req, res) => {
   runReportsDueCheck().catch(err => log.error('Reports-due check failed', { reason: err.message }));
 });
 
+// Manual trigger for the start-date watcher (also runs on the 8-hour cron below).
+// Re-checks every Plextrac report created without a ClickUp start date and renames
+// it once a start date appears. Requires the X-API-Key header and is rate-limited;
+// always responds with a blank 200, with the outcome written to the logs.
+app.post('/jobs/start-date-watch', apiLimiter, requireApiKey, (req, res) => {
+  res.status(200).end();
+  runStartDateWatch().catch(err => log.error('Start-date watch failed', { reason: err.message }));
+});
+
 // Daily auth-form check at 14:00 (server timezone unless AUTH_FORM_CHECK_TZ set).
 // Override the schedule with AUTH_FORM_CHECK_CRON (standard cron expression).
 const AUTH_FORM_CHECK_CRON = process.env.AUTH_FORM_CHECK_CRON || '0 14 * * *';
@@ -140,6 +150,19 @@ if (REPORTS_DUE_CRON) {
     console.log('[cron] Triggering weekly reports-due check…');
     runReportsDueCheck().catch(err => log.error('Reports-due check failed', { reason: err.message }));
   }, { timezone: REPORTS_DUE_TZ });
+}
+
+// Every 8 hours, re-check reports created without a ClickUp start date and rename
+// them once a start date is set. Override the schedule with START_DATE_WATCH_CRON
+// (standard cron) or set it blank to disable and run manually via
+// POST /jobs/start-date-watch.
+const START_DATE_WATCH_CRON = process.env.START_DATE_WATCH_CRON ?? '0 */8 * * *';
+const START_DATE_WATCH_TZ = process.env.START_DATE_WATCH_TZ || 'Europe/London';
+if (START_DATE_WATCH_CRON) {
+  cron.schedule(START_DATE_WATCH_CRON, () => {
+    console.log('[cron] Triggering start-date watch…');
+    runStartDateWatch().catch(err => log.error('Start-date watch failed', { reason: err.message }));
+  }, { timezone: START_DATE_WATCH_TZ });
 }
 
 app.listen(PORT, async () => {
