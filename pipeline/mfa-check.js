@@ -69,16 +69,25 @@ async function runMfaCheck() {
   const admin = await directoryClient();
   const users = await listAllUsers(admin);
 
-  // "Without MFA enforced" — 2-Step Verification is not enforced for the user.
+  // "Without MFA" — the account has no active second factor right now.
+  // isEnrolledIn2Sv reflects whether the user has actually completed setup;
+  // isEnforcedIn2Sv only reflects whether the admin *policy* requires it,
+  // which can be true for users who are still in a grace period or simply
+  // haven't complied yet — those users still have zero protection, so
+  // enrollment (not enforcement) is the field that determines risk here.
   // Suspended and archived accounts are exempt; they can't sign in anyway.
   const withoutMfa = users.filter(u =>
-    !u.suspended && !u.archived && u.isEnforcedIn2Sv !== true);
+    !u.suspended && !u.archived && u.isEnrolledIn2Sv !== true);
 
-  console.log(`[mfa-check] ${withoutMfa.length} of ${users.length} user(s) do not have MFA enforced:`);
+  console.log(`[mfa-check] ${withoutMfa.length} of ${users.length} user(s) do not have MFA enrolled:`);
   for (const u of withoutMfa) {
     const name = u.name && u.name.fullName ? u.name.fullName : '';
-    const enrolled = u.isEnrolledIn2Sv ? 'enrolled-not-enforced' : 'not-enrolled';
-    console.log(`[mfa-check]  - ${u.primaryEmail}${name ? ` (${name})` : ''} [${enrolled}]`);
+    // Distinguish *why* they're unprotected: no policy requiring it at all
+    // (a config gap) vs. policy requires it but they haven't complied yet
+    // (a user/grace-period gap). Both are flagged, but they need different
+    // follow-up (fix the OU policy vs. chase the individual).
+    const reason = u.isEnforcedIn2Sv ? 'enforced-but-not-enrolled' : 'not-enforced-not-enrolled';
+    console.log(`[mfa-check]  - ${u.primaryEmail}${name ? ` (${name})` : ''} [${reason}]`);
   }
 
   await postToSlack(withoutMfa, users.length);
@@ -91,12 +100,12 @@ async function runMfaCheck() {
 // the check itself has already succeeded and printed to the console/logs.
 async function postToSlack(withoutMfa, total) {
   const header = withoutMfa.length === 0
-    ? `:white_check_mark: MFA check: all ${total} user(s) have MFA enforced.`
-    : `:warning: MFA check: ${withoutMfa.length} of ${total} user(s) do *not* have MFA enforced:`;
+    ? `:white_check_mark: MFA check: all ${total} user(s) have MFA enrolled.`
+    : `:warning: MFA check: ${withoutMfa.length} of ${total} user(s) do *not* have MFA enrolled:`;
   const lines = withoutMfa.map(u => {
     const name = u.name && u.name.fullName ? u.name.fullName : '';
-    const enrolled = u.isEnrolledIn2Sv ? 'enrolled, not enforced' : 'not enrolled';
-    return `• ${u.primaryEmail}${name ? ` (${name})` : ''} — ${enrolled}`;
+    const reason = u.isEnforcedIn2Sv ? 'policy enforced, user has not completed setup' : 'not enforced by policy, and not enrolled';
+    return `• ${u.primaryEmail}${name ? ` (${name})` : ''} — ${reason}`;
   });
   const text = [header, ...lines].join('\n');
   try {
