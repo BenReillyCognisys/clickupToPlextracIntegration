@@ -54,7 +54,7 @@ async function listAllUsers(admin) {
       maxResults: 500,
       orderBy: 'email',
       // Only fields we need; keeps the response small.
-      fields: 'nextPageToken,users(primaryEmail,name/fullName,suspended,isEnforcedIn2Sv,isEnrolledIn2Sv)',
+      fields: 'nextPageToken,users(primaryEmail,name/fullName,suspended,archived,isEnforcedIn2Sv,isEnrolledIn2Sv)',
       pageToken,
     });
     if (res.data.users) users.push(...res.data.users);
@@ -70,8 +70,9 @@ async function runMfaCheck() {
   const users = await listAllUsers(admin);
 
   // "Without MFA enforced" — 2-Step Verification is not enforced for the user.
-  // Suspended accounts are excluded; they can't sign in anyway.
-  const withoutMfa = users.filter(u => !u.suspended && u.isEnforcedIn2Sv !== true);
+  // Suspended and archived accounts are exempt; they can't sign in anyway.
+  const withoutMfa = users.filter(u =>
+    !u.suspended && !u.archived && u.isEnforcedIn2Sv !== true);
 
   console.log(`[mfa-check] ${withoutMfa.length} of ${users.length} user(s) do not have MFA enforced:`);
   for (const u of withoutMfa) {
