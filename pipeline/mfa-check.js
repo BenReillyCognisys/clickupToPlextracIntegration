@@ -25,7 +25,7 @@ const ADMIN_SUBJECT = process.env.GOOGLE_ADMIN_SUBJECT || 'ben.reilly@cognisys.g
 
 // Slack channel the results are posted to. Requires SLACK_BOT_TOKEN (see
 // lib/slack.js) and the bot to be a member of the channel.
-const SLACK_CHANNEL = process.env.MFA_SLACK_CHANNEL || 'C08PPV2D2TY';
+const SLACK_CHANNEL = process.env.MFA_SLACK_CHANNEL || 'C0BGHRNU22X';
 
 // Read-only Directory scope is enough to list users and read their 2SV status.
 const SCOPES = ['https://www.googleapis.com/auth/admin.directory.user.readonly'];
