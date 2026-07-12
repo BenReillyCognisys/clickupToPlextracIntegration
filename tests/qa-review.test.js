@@ -253,7 +253,7 @@ test('lists applied changes and flags', () => {
     [{ label: 'exec_summary: Overview', type: 'dejargon', before: 'TLS', after: 'encryption' }],
     [{ label: 'exec_summary: Roadmap', issue: 'placeholder text', sentence: 'Lorem Ipsum' }],
     'https://x/report/1');
-  eq(body.includes('1 change(s) applied, 1 item(s) flagged.'), true);
+  eq(body.includes('1 change(s) suggested, 1 item(s) flagged.'), true);
   eq(body.includes('_dejargon_: "TLS" → "encryption"'), true);
   eq(body.includes('Lorem Ipsum'), true);
 });

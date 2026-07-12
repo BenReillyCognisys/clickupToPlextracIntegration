@@ -1,21 +1,23 @@
 // QA-review pipeline: triggered when a Plextrac report moves to "ready for QA".
 //
+// First-round QA is REPORT-ONLY: it never mutates the Plextrac report. It reviews
+// the content, collects the changes it *would* make, and posts them to Slack for a
+// human to apply. A later round is responsible for writing corrections back.
+//
 // Flow:
 //   1. Post the "ready for first round of QA" parent message to #pt-first-round-qa
 //      up front (so the channel is notified the moment review begins).
-//   2. Enable Plextrac change-tracking (best-effort; see change-tracking.js).
-//   3. Review + correct the executive summary (formatting, client name,
-//      de-jargon, flag incomplete sentences).
-//   4. Review + correct each finding (formatting, client name, flag incomplete
-//      sentences — NOT de-jargon: findings are for a technical audience).
-//   5. Log every change to the log file, then reply IN THE PARENT'S THREAD with
-//      the AI QA feedback (the changes + flags) once the review has fully
+//   2. Review the executive summary (formatting, client name, de-jargon, flag
+//      incomplete sentences) — collecting suggestions, WITHOUT writing them back.
+//   3. Review each finding (formatting, client name, flag incomplete sentences —
+//      NOT de-jargon: findings are for a technical audience) — suggestions only.
+//   4. Log every suggestion to the log file, then reply IN THE PARENT'S THREAD with
+//      the AI QA feedback (the suggested changes + flags) once the review has fully
 //      completed.
 
 const api = require('../../lib/plextrac-api');
 const log = require('../../lib/logger');
 const slack = require('../../lib/slack');
-const tracking = require('./change-tracking');
 const { runChecks } = require('./checks');
 const fields = require('./report-fields');
 
@@ -44,8 +46,7 @@ async function runQaReview(mapping) {
 
   log.info('QA review started', { client_id: clientId, report_id: reportId, task: mapping.task_name });
 
-  // Fetch the report up front so we can gate on status BEFORE enabling tracking
-  // or spending any AI calls.
+  // Fetch the report up front so we can gate on status BEFORE spending any AI calls.
   const report = await api.getReport(clientId, reportId);
 
   // Optional status gate: only run when the report is in the configured QA status.
@@ -76,14 +77,11 @@ async function runQaReview(mapping) {
   const reportName = report?.name || mapping.task_name || `Report ${reportId}`;
   const threadTs = await postFirstRoundParent({ clientName, clientUrl, reportName, reportUrl });
 
-  await tracking.enable(clientId, reportId);
-
   try {
     // ── Executive summary ─────────────────────────────────────────────────────
+    // Report-only: run the checks to collect suggestions, but never write back.
     const execSegments = fields.getExecutiveSummarySegments(report);
     if (execSegments.length) {
-      let updatedReport = report;
-      const changedRoots = new Set();
       for (const seg of execSegments) {
         const result = await runChecks(seg.text, {
           label: seg.label, clientName, isExecutiveSummary: true,
@@ -91,23 +89,6 @@ async function runQaReview(mapping) {
         });
         applied.push(...result.applied);
         flags.push(...result.flags);
-        if (result.changed) {
-          updatedReport = fields.setByPath(updatedReport, seg.path, result.finalText);
-          changedRoots.add(seg.path.split(/[.[]/)[0]); // e.g. "exec_summary"
-        }
-      }
-      if (changedRoots.size) {
-        // Partial update — send only the changed top-level field(s). This avoids
-        // clobbering other report fields (notably isTrackChanges, which the
-        // tracking toggle just set) by PUT-ing the whole report object.
-        const payload = {};
-        for (const root of changedRoots) payload[root] = updatedReport[root];
-        try {
-          await api.updateReport(clientId, reportId, payload);
-          log.info('Executive summary updated in Plextrac', { report_id: reportId, fields: [...changedRoots] });
-        } catch (err) {
-          log.error('Failed to write executive summary changes', { reason: err.message, report_id: reportId });
-        }
       }
     } else {
       log.warn('No executive-summary segment found — skipping exec summary checks', { report_id: reportId });
@@ -140,9 +121,8 @@ async function runQaReview(mapping) {
         finding = item; // fall back to the list item if the detail fetch fails
       }
 
+      // Report-only: collect suggestions per finding, but never write back.
       const segments = fields.getFindingSegments(finding);
-      let updatedFinding = finding;
-      let dirty = false;
       for (const seg of segments) {
         const result = await runChecks(seg.text, {
           label: `finding:${id}:${seg.label}`,
@@ -151,30 +131,15 @@ async function runQaReview(mapping) {
         });
         applied.push(...result.applied);
         flags.push(...result.flags);
-        if (result.changed) {
-          updatedFinding = fields.setByPath(updatedFinding, seg.path, result.finalText);
-          dirty = true;
-        }
-      }
-
-      if (dirty) {
-        try {
-          await api.updateFinding(clientId, reportId, id, updatedFinding);
-          log.info('Finding updated in Plextrac', { report_id: reportId, finding_id: id });
-        } catch (err) {
-          log.error('Failed to write finding changes', { reason: err.message, report_id: reportId, finding_id: id });
-        }
       }
     }
   } catch (err) {
-    // Change tracking is intentionally left ON after the run — we never toggle it
-    // off, so the report keeps tracking subsequent edits too.
     log.error('QA review encountered an error mid-run', { reason: err.message, report_id: reportId });
   }
 
-  // ── Audit: log every change + post a Slack summary ──────────────────────────
+  // ── Audit: log every suggestion + post a Slack summary ──────────────────────
   for (const c of applied) {
-    log.info('QA change applied', {
+    log.info('QA change suggested', {
       type: c.type, field: c.label, before: truncate(c.before, 120), after: truncate(c.after, 120),
     });
   }
@@ -236,11 +201,11 @@ async function postFirstRoundReply({ threadTs, reportUrl, applied, flags }) {
 function buildThreadBody(applied, flags, url) {
   const lines = [
     `*AI QA feedback* — <${url}|open report>`,
-    `${applied.length} change(s) applied, ${flags.length} item(s) flagged.`,
+    `${applied.length} change(s) suggested, ${flags.length} item(s) flagged. _Nothing has been applied to Plextrac — please review and apply manually._`,
   ];
 
   if (applied.length) {
-    lines.push('', '*Changes applied:*');
+    lines.push('', '*Suggested changes (not applied to Plextrac):*');
     for (const c of applied.slice(0, 50)) {
       lines.push(`• [${c.label}] _${c.type}_: "${truncate(c.before)}" → "${truncate(c.after)}"`);
     }
@@ -248,7 +213,7 @@ function buildThreadBody(applied, flags, url) {
   }
 
   if (flags.length) {
-    lines.push('', '*Flagged for author (not auto-changed):*');
+    lines.push('', '*Flagged for author:*');
     for (const f of flags.slice(0, 30)) {
       lines.push(`• [${f.label}] ${f.issue}: "${truncate(f.sentence)}"`);
     }

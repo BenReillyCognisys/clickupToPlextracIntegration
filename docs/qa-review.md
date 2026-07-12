@@ -3,8 +3,12 @@
 When a Plextrac report moves to **ready for QA**, Plextrac calls the existing
 `/webhook/plextrac` endpoint. That single handler does two things: it syncs the
 ClickUp task status (its original job) **and** kicks off the AI QA review. The
-review corrects the report's **executive summary** and **findings**, writes
-changes back to Plextrac, and logs every change to a log file and a Slack channel.
+review reads the report's **executive summary** and **findings** and reports the
+changes it recommends to a log file and a Slack channel.
+
+> **First-round QA is report-only.** It does **not** write anything back to
+> Plextrac — no field edits and no change-tracking toggle. It surfaces the
+> suggested changes (and flags) in **#pt-first-round-qa** for a human to apply.
 
 There is **no separate QA webhook** — it is integrated into the existing Plextrac
 webhook, so only one webhook needs to be configured in Plextrac.
@@ -25,11 +29,10 @@ routes/plextrac-webhook.js          verify signature → ack 200 → look up map
           3. post parent msg "Client: {client} - {report} ready for first round of
              QA" to #pt-first-round-qa FIRST (client + report names hyperlinked);
              keep its thread anchor
-          4. enable change tracking (best-effort — see below)
-          5. executive summary:  strip formatting → client-name → de-jargon → flag incomplete sentences
-          6. findings:           strip formatting → client-name → flag incomplete sentences
-          7. log every change to LOG_FILE; once QA is fully complete, reply in the
-             parent's thread with the AI QA feedback (changes + flags)
+          4. executive summary:  strip formatting → client-name → de-jargon → flag incomplete sentences  (suggestions only — no write-back)
+          5. findings:           strip formatting → client-name → flag incomplete sentences               (suggestions only — no write-back)
+          6. log every suggestion to LOG_FILE; once QA is fully complete, reply in the
+             parent's thread with the AI QA feedback (suggested changes + flags)
 ```
 
 The QA review runs **fire-and-forget** so the (slower, billable) review never
@@ -70,6 +73,10 @@ to an ID, the handler logs a warning and stops.
 | **Correct client name** | exec summary + findings | Claude API — replaces wrong org names with the real client name. **Protected names** (the testing provider — Cognisys / Cognisys Group / Cognisys Group Limited, configurable via `QA_PROTECTED_NAMES` / `config/protected-names.js`) are never changed. | Yes |
 | **De-jargon** (no TLS/SMB/etc.) | **exec summary only** | Claude API — rewrites for a non-technical audience | Yes |
 | **Incomplete sentences** | exec summary + findings | Claude API — **detection only** | **No — flagged to Slack** |
+
+> The **"Auto-applied?"** column describes each check's *intent*. In the current
+> **report-only** first round, nothing is written to Plextrac — every "Yes" is
+> instead reported to Slack as a **suggested** change for a human to apply.
 
 **Placeholder guard.** Plextrac template variables (`%%CLIENT_SHORTNAME%%`,
 `%%REPORT_START_DATE%%`, `%%Author_01%%`, …) must never be altered — Plextrac
@@ -144,22 +151,14 @@ If you need higher edit quality, raise `ANTHROPIC_MODEL` (e.g.
 
 ## Change tracking
 
-Plextrac tracks changes at the report level via the boolean `isTrackChanges`
-field on the report object (`true` = track changes across all rich-text fields).
-The pipeline sets it `true` before editing via the standard report update
-endpoint (`pipeline/qa-review/change-tracking.js`). It is **on by default**; set
-`PLEXTRAC_CHANGE_TRACKING_ENABLED=false` to opt out.
+First-round QA no longer touches Plextrac's `isTrackChanges` flag: because the
+pipeline is **report-only** (it never writes edits back), there is nothing to
+track, so the change-tracking toggle is not invoked. The
+`pipeline/qa-review/change-tracking.js` helper remains in the tree for a future
+apply-changes round but is not wired into the first-round flow.
 
-Tracking is **intentionally left ON after the run** — the pipeline does not turn
-it off, so the report keeps tracking any subsequent edits a reviewer makes.
-
-The executive-summary write uses a **partial update** (only the changed
-top-level fields) precisely so it doesn't reset `isTrackChanges` mid-edit by
-PUT-ing back a stale full report object.
-
-A failure to toggle tracking never aborts the review — the **internal audit
-trail** (every change written to `LOG_FILE` and posted to Slack) always works and
-does not depend on Plextrac.
+The **audit trail** — every suggested change written to `LOG_FILE` and posted to
+Slack — is the sole output of first-round QA and does not depend on Plextrac.
 
 ## ⚠️ Assumptions to confirm against the live Plextrac instance
 
@@ -173,10 +172,8 @@ These were coded defensively but could not be validated against the real API:
    (`{title, text|value|custom_field|...}`). Confirm with
    `node scripts/inspect-report.js`; if a field isn't picked up it is logged as
    "No executive-summary segment found".
-3. **Write-back.** The exec summary is written by PUT-ing the full (edited)
-   report object; findings by PUT-ing the full (edited) finding object. If your
-   instance rejects round-tripped fields, adjust `updateReport`/`updateFinding`
-   payloads.
+
+(Write-back is not applicable in first-round QA — it is report-only.)
 
 ## Setup
 
