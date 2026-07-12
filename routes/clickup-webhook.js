@@ -1,7 +1,16 @@
 const crypto = require('crypto');
 const axios = require('axios');
 const { runPipeline } = require('../pipeline');
+const { crossOffReport } = require('../pipeline/reports-due');
 const log = require('../lib/logger');
+
+// Pulls the new status name out of a taskStatusUpdated payload's history_items
+// (ClickUp records the change as { field: 'status', after: { status } }). Returns
+// null when there's no status change item.
+function newStatusFromPayload(payload) {
+  const item = (payload.history_items || []).find((h) => h.field === 'status');
+  return item?.after?.status ?? null;
+}
 
 async function fetchTaskDetails(taskId) {
   try {
@@ -43,6 +52,24 @@ async function handler(req, res) {
 
   // Acknowledge immediately so ClickUp doesn't retry
   res.status(200).end();
+
+  // A report reaching a done status crosses it off the weekly reports-due message.
+  // Handled straight from the payload (no task fetch needed — crossOffReport only
+  // acts when the id is already on the posted message, i.e. in the monitored space).
+  if (payload.event === 'taskStatusUpdated') {
+    const status = newStatusFromPayload(payload);
+    try {
+      const { updated } = await crossOffReport(payload.task_id, status);
+      if (updated) {
+        log.info('Report crossed off reports-due message', { task_id: payload.task_id, status });
+      }
+    } catch (err) {
+      log.error('Failed to cross off report on status change', {
+        reason: err.message, task_id: payload.task_id, status,
+      });
+    }
+    return;
+  }
 
   if (payload.event !== 'taskCreated') return;
 

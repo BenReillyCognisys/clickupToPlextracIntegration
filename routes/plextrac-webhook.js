@@ -4,6 +4,7 @@ const { updateTaskStatus } = require('../lib/clickup-api');
 const { getReport } = require('../lib/plextrac-api');
 const lookup = require('../lib/plextrac-lookup');
 const { runQaReview } = require('../pipeline/qa-review');
+const { crossOffReport } = require('../pipeline/reports-due');
 const log = require('../lib/logger');
 
 // Pre-integration reports carry their client/report names in the webhook `text`
@@ -185,6 +186,22 @@ async function handler(req, res) {
       reason:          err.message,
       clickup_task_id: mapping.clickup_task_id,
       report_id:       mapping.plextrac_report_id,
+    });
+  }
+
+  // Cross the report off the weekly reports-due message once it's Completed. Runs
+  // even if the status sync above failed (the report is done regardless), and
+  // self-filters via isDoneStatus, so non-done statuses (e.g. QA / Reviewing) no-op.
+  try {
+    const { updated } = await crossOffReport(mapping.clickup_task_id, clickupStatus);
+    if (updated) {
+      log.info('Report crossed off reports-due message from Plextrac', {
+        clickup_task_id: mapping.clickup_task_id, clickup_status: clickupStatus,
+      });
+    }
+  } catch (err) {
+    log.error('Failed to cross off report from Plextrac status change', {
+      reason: err.message, clickup_task_id: mapping.clickup_task_id,
     });
   }
 }

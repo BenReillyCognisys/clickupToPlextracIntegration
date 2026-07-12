@@ -21,6 +21,11 @@
 // All date maths is done against Europe/London calendar dates so the result is the
 // same whatever timezone the server runs in.
 //
+// After posting, the message (channel, ts and its per-task entries) is persisted in
+// MongoDB. When a report later moves into a "done" status (Completed / Ready For
+// Release), the ClickUp status-change webhook calls crossOffReport(), which strikes
+// through (~…~) that report's line and edits the original message in place.
+//
 // Merged from the standalone clickup-automation/main.js. Fixes vs. the original:
 //   • getWeekCommencing returned the *upcoming* Monday on any non-Monday run, so
 //     running mid-week dumped the whole week into "Missed SLA" — now Mon–Fri use
@@ -33,6 +38,7 @@
 
 const { getSpaceListIds, listListTasks } = require('../lib/clickup-api');
 const slack = require('../lib/slack');
+const store = require('../lib/reports-due-store');
 
 const TZ = process.env.REPORTS_DUE_TZ || 'Europe/London';
 
@@ -57,6 +63,22 @@ const EXCLUDED_STATUSES = new Set(['complete', 'wash up phase', 'rr awaiting pay
 // and treats hyphens/spaces as equivalent so set matching is forgiving.
 function normalizeStatus(s) {
   return (s || '').toLowerCase().replace(/\*/g, '').replace(/[-\s]+/g, ' ').trim();
+}
+
+// Statuses that "finish" a report: once a listed report reaches one of these it's
+// struck through on the posted message. Defaults to Completed + Ready For Release;
+// override the comma-separated list via REPORTS_DUE_DONE_STATUSES. Matched with the
+// same normalisation as EXCLUDED_STATUSES so casing/hyphens/spacing don't matter.
+const DONE_STATUSES = new Set(
+  (process.env.REPORTS_DUE_DONE_STATUSES || 'Completed,Ready For Release')
+    .split(',')
+    .map(normalizeStatus)
+    .filter(Boolean)
+);
+
+// True when a status name counts as "done" (should cross the report off).
+function isDoneStatus(status) {
+  return DONE_STATUSES.has(normalizeStatus(status));
 }
 
 // Assignees whose tasks should never appear in the report.
@@ -187,7 +209,7 @@ function collectFromTasks(tasks) {
     // Must look like a billable engagement: Revenue, Days or Days Balance > 0.
     if (!hasReportValue(task)) continue;
 
-    collected.push({ name: task.name, status, due_date: task.due_date, assignee });
+    collected.push({ id: task.id, name: task.name, status, due_date: task.due_date, assignee });
   }
   return collected;
 }
@@ -200,46 +222,60 @@ function dedupeAndSort(tasks) {
     .sort((a, b) => a.due_date - b.due_date);
 }
 
-// Buckets tasks into missed-SLA and the current week (grouped by deadline day).
-function bucketTasks(tasks, weekCommencing, weekEnd) {
-  const missedSLA = [];
-  const currentWeek = new Map(); // dayTimestamp -> { date, labels: [] }
-
+// Turns the collected tasks into a flat list of persistable entries: one per report
+// that lands in the missed-SLA window or the current week. Each entry carries its
+// ClickUp task id (so a status webhook can find it later), its rendered label, the
+// section it belongs to, and — for the week section — the deadline day it groups
+// under. Reports due later than this week are dropped. `struck` starts false.
+function buildEntries(tasks, weekCommencing, weekEnd) {
   const missedCutoff = new Date(weekCommencing.getTime());
   missedCutoff.setUTCDate(missedCutoff.getUTCDate() - MISSED_SLA_LOOKBACK_DAYS);
 
+  const entries = [];
   for (const item of tasks) {
     const deadline = addBusinessDays(toTzDate(item.due_date), EXTERNAL_SLA);
     const label = `@${item.assignee} - ${item.name}`;
 
     if (deadline < weekCommencing) {
-      if (deadline >= missedCutoff) missedSLA.push(label); // older misses are dropped
+      if (deadline >= missedCutoff) { // older misses are dropped
+        entries.push({ taskId: item.id, label, struck: false, section: 'missed', dayKey: null, dayLabel: null });
+      }
     } else if (deadline <= weekEnd) {
-      const key = deadline.getTime();
-      if (!currentWeek.has(key)) currentWeek.set(key, { date: deadline, labels: [] });
-      currentWeek.get(key).labels.push(label);
+      entries.push({
+        taskId: item.id, label, struck: false,
+        section: 'week', dayKey: deadline.getTime(), dayLabel: formatDate(deadline),
+      });
     }
     // else: due later than this week — skip
   }
 
-  return { missedSLA, currentWeek };
+  return entries;
 }
 
-// Builds the Slack message from the buckets.
-function buildReport(missedSLA, currentWeek, weekCommencing) {
-  const days = [...currentWeek.values()].sort((a, b) => a.date - b.date);
-  const weekHeader = formatWeekCommencing(weekCommencing);
+// Renders the Slack message from the persisted entries: the Missed SLA section, then
+// the week-commencing header, then the week's reports grouped under their deadline
+// day (chronological). A struck entry's label is wrapped in ~…~ so it shows crossed
+// off. Produces byte-identical output to the original builder when nothing is struck.
+function renderReport(entries, weekHeader) {
+  const decorate = (e) => (e.struck ? `~${e.label}~` : e.label);
 
   let message = '';
   if (SHOW_MISSED_SLA) {
     message += '*Missed SLA:*\n';
-    message += missedSLA.map((l) => `${l}\n`).join('');
+    message += entries.filter((e) => e.section === 'missed').map((e) => `${decorate(e)}\n`).join('');
     message += '\n';
   }
+
   message += `*Week Commencing ${weekHeader}:*\n`;
-  for (const { date, labels } of days) {
-    message += `\n*${formatDate(date)}*\n`;
-    message += labels.map((l) => `${l}\n`).join('');
+
+  const byDay = new Map(); // dayKey -> { dayLabel, items: [] }
+  for (const e of entries.filter((e) => e.section === 'week')) {
+    if (!byDay.has(e.dayKey)) byDay.set(e.dayKey, { dayLabel: e.dayLabel, items: [] });
+    byDay.get(e.dayKey).items.push(e);
+  }
+  for (const [, { dayLabel, items }] of [...byDay.entries()].sort((a, b) => a[0] - b[0])) {
+    message += `\n*${dayLabel}*\n`;
+    message += items.map((e) => `${decorate(e)}\n`).join('');
   }
 
   return message;
@@ -277,24 +313,77 @@ async function runReportsDueCheck() {
   weekEnd.setUTCDate(weekEnd.getUTCDate() + 4); // Friday
 
   const tasks = dedupeAndSort(collectFromTasks(allTasks));
-  const { missedSLA, currentWeek } = bucketTasks(tasks, weekCommencing, weekEnd);
-  const message = buildReport(missedSLA, currentWeek, weekCommencing);
-  const thisWeek = [...currentWeek.values()].reduce((n, d) => n + d.labels.length, 0);
+  const entries = buildEntries(tasks, weekCommencing, weekEnd);
+  const weekHeader = formatWeekCommencing(weekCommencing);
+  const message = renderReport(entries, weekHeader);
+  const missed = entries.filter((e) => e.section === 'missed').length;
+  const thisWeek = entries.filter((e) => e.section === 'week').length;
 
+  let ts;
   try {
-    await slack.postMessage(REPORTS_DUE_CHANNEL, message);
-    console.log(`[reports-due] Posted to ${REPORTS_DUE_CHANNEL}: ${missedSLA.length} missed, ${thisWeek} due this week.`);
-    return { posted: true, missed: missedSLA.length, thisWeek };
+    ts = await slack.postMessage(REPORTS_DUE_CHANNEL, message);
+    console.log(`[reports-due] Posted to ${REPORTS_DUE_CHANNEL}: ${missed} missed, ${thisWeek} due this week.`);
   } catch (err) {
     console.log(`[reports-due] Failed to post to ${REPORTS_DUE_CHANNEL}: ${err.message}`);
-    return { posted: false, missed: missedSLA.length, thisWeek };
+    return { posted: false, missed, thisWeek };
   }
+
+  // Record the message + entries so the status webhook can cross reports off later.
+  // Best-effort: a persistence failure just means cross-offs won't work this week.
+  try {
+    await store.setMessage(REPORTS_DUE_CHANNEL, ts, weekHeader, entries);
+  } catch (err) {
+    console.log(`[reports-due] Failed to record posted message (cross-offs disabled this week): ${err.message}`);
+  }
+
+  return { posted: true, missed, thisWeek };
+}
+
+// Crosses a report off the current week's message when it reaches a done status
+// (Completed / Ready For Release). Called by the ClickUp status-change webhook with
+// the task id and its new status. No-ops (returns { updated: false }) when the status
+// isn't a done one, the task isn't on the current message, or it's already struck.
+// Best-effort throughout: any failure is logged and swallowed.
+async function crossOffReport(taskId, newStatus) {
+  if (!isDoneStatus(newStatus)) return { updated: false };
+
+  let state;
+  try {
+    state = await store.getMessage();
+  } catch (err) {
+    console.log(`[reports-due] Cross-off: could not read stored message — skipping: ${err.message}`);
+    return { updated: false };
+  }
+  if (!state?.ts || !state.entries?.length) return { updated: false };
+
+  const idx = state.entries.findIndex((e) => String(e.taskId) === String(taskId));
+  if (idx === -1) return { updated: false };      // not on this week's message
+  if (state.entries[idx].struck) return { updated: false }; // already crossed off
+
+  const entries = state.entries.map((e, i) => (i === idx ? { ...e, struck: true } : e));
+
+  try {
+    await slack.updateMessage(state.channel, state.ts, renderReport(entries, state.weekHeader));
+    console.log(`[reports-due] Cross-off: struck "${state.entries[idx].label}" (task ${taskId}, status "${newStatus}").`);
+  } catch (err) {
+    console.log(`[reports-due] Cross-off: failed to edit message (ts ${state.ts}) — leaving as-is: ${err.message}`);
+    return { updated: false };
+  }
+
+  try {
+    await store.updateEntries(entries);
+  } catch (err) {
+    console.log(`[reports-due] Cross-off: failed to persist struck entry: ${err.message}`);
+  }
+
+  return { updated: true };
 }
 
 module.exports = {
   runReportsDueCheck,
+  crossOffReport,
   // exported for tests / reuse
   addBusinessDays, getWeekCommencing, formatDate, toTzDate,
-  collectFromTasks, dedupeAndSort, bucketTasks, buildReport,
-  numberField, hasReportValue,
+  collectFromTasks, dedupeAndSort, buildEntries, renderReport,
+  numberField, hasReportValue, isDoneStatus,
 };
