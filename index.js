@@ -134,18 +134,19 @@ app.post('/jobs/mfa-check', apiLimiter, requireApiKey, (req, res) => {
   runMfaCheck().catch(err => log.error('MFA check failed', { reason: err.message }));
 });
 
-// Daily auth-form check at 14:00 (server timezone unless AUTH_FORM_CHECK_TZ set).
-// Override the schedule with AUTH_FORM_CHECK_CRON (standard cron expression).
-const AUTH_FORM_CHECK_CRON = process.env.AUTH_FORM_CHECK_CRON || '0 14 * * *';
+// Auth-form check at 14:00 on working days (Mon–Fri; server timezone unless
+// AUTH_FORM_CHECK_TZ set). Override the schedule with AUTH_FORM_CHECK_CRON.
+const AUTH_FORM_CHECK_CRON = process.env.AUTH_FORM_CHECK_CRON || '0 14 * * 1-5';
 const AUTH_FORM_CHECK_TZ = process.env.AUTH_FORM_CHECK_TZ || 'Europe/London';
 cron.schedule(AUTH_FORM_CHECK_CRON, () => {
   console.log('[cron] Triggering daily auth-form check…');
   runAuthFormCheck().catch(err => log.error('Auth-form check failed', { reason: err.message }));
 }, { timezone: AUTH_FORM_CHECK_TZ });
 
-// Every 5 minutes, reconcile the posted message: strike through tasks that have
-// been actioned since it went out. Override with AUTH_FORM_RECONCILE_CRON.
-const AUTH_FORM_RECONCILE_CRON = process.env.AUTH_FORM_RECONCILE_CRON || '*/5 * * * *';
+// Every 5 minutes on working days (Mon–Fri), reconcile the posted message: strike
+// through actioned tasks, add newly-qualifying ones, and post the first message if
+// the 14:00 run had nothing. Override with AUTH_FORM_RECONCILE_CRON.
+const AUTH_FORM_RECONCILE_CRON = process.env.AUTH_FORM_RECONCILE_CRON || '*/5 * * * 1-5';
 cron.schedule(AUTH_FORM_RECONCILE_CRON, () => {
   reconcileAuthFormMessage().catch(err => log.error('Auth-form reconcile failed', { reason: err.message }));
 }, { timezone: AUTH_FORM_CHECK_TZ });
@@ -175,10 +176,10 @@ if (START_DATE_WATCH_CRON) {
   }, { timezone: START_DATE_WATCH_TZ });
 }
 
-// Daily MFA-enforcement check at 14:00 (2pm). Override the schedule with
-// MFA_CHECK_CRON (standard cron) or the timezone with MFA_CHECK_TZ. Prints the
-// users who do not have MFA enforced to the console/logs.
-const MFA_CHECK_CRON = process.env.MFA_CHECK_CRON || '0 14 * * *';
+// MFA-enforcement check at 14:00 (2pm) on working days (Mon–Fri). Override the
+// schedule with MFA_CHECK_CRON (standard cron) or the timezone with MFA_CHECK_TZ.
+// Posts the users who do not have MFA enforced to Slack.
+const MFA_CHECK_CRON = process.env.MFA_CHECK_CRON || '0 14 * * 1-5';
 const MFA_CHECK_TZ = process.env.MFA_CHECK_TZ || 'Europe/London';
 cron.schedule(MFA_CHECK_CRON, () => {
   console.log('[cron] Triggering daily MFA-enforcement check…');

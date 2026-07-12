@@ -1,6 +1,7 @@
 // Daily auth-form check (runs at 14:00 — see index.js).
 //
-// Scans every task in the Penetration Test space. For each task that has the
+// Scans every task in the Penetration Test space (regardless of start date). For
+// each task that has the
 // "Pre Recs Received?" checkbox ticked but "Tester OKd Pre-Recs" NOT yet ticked,
 // the task's assignee(s) are collected (i.e. we chase the testers who still need
 // to check the auth form). A SINGLE message is then posted to the qa-chat
@@ -38,10 +39,6 @@ const TESTER_OKD_FIELD = 'Tester OKd Pre-Recs';
 // Timezone the start-date labels are formatted in (kept in step with the cron tz).
 const AUTH_FORM_TZ = process.env.AUTH_FORM_CHECK_TZ || 'Europe/London';
 
-// Only chase jobs starting within this many days from today (inclusive of today).
-// 7 calendar days ≈ the coming 5 business days. Override via AUTH_FORM_WINDOW_DAYS.
-const AUTH_FORM_WINDOW_DAYS = Number(process.env.AUTH_FORM_WINDOW_DAYS) || 7;
-
 // qa-chat channel the bot is a member of (override via env). MUST be a channel
 // ID (e.g. C0123ABCD) — chat.postMessage returns channel_not_found for names.
 const AUTH_FORM_CHANNEL = process.env.SLACK_AUTH_FORM_CHANNEL || '#qa-chat';
@@ -59,36 +56,15 @@ function checkboxChecked(task, fieldName) {
   return field ? isChecked(field.value) : false;
 }
 
-// Whole days from today (in AUTH_FORM_TZ) to the given start_date (ms since epoch):
-// 0 = starts today, 7 = starts a week today, negative = already started. Compares
-// calendar dates (not raw ms) so the time of day and DST don't skew the count.
-// Returns null when there's no usable date.
-function daysUntilStart(ms, now = new Date()) {
-  if (ms === null || ms === undefined || ms === '') return null;
-  const d = new Date(Number(ms));
-  if (Number.isNaN(d.getTime())) return null;
-  const ymd = (date) => {
-    const p = new Intl.DateTimeFormat('en-CA', {
-      timeZone: AUTH_FORM_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
-    }).formatToParts(date);
-    const get = (t) => Number(p.find(x => x.type === t).value);
-    return Date.UTC(get('year'), get('month') - 1, get('day'));
-  };
-  return Math.round((ymd(d) - ymd(now)) / 86400000);
-}
-
 // A task needs chasing when it's a top-level task with at least one assignee, whose
-// pre-recs are in but the tester hasn't OK'd them yet, AND which starts within the
-// next AUTH_FORM_WINDOW_DAYS days. Tasks with no assignee (no one to ping), no start
-// date, or a start date outside the window are skipped. Once "Tester OKd Pre-Recs"
-// is ticked (or the task closes / its last assignee is removed / it drops out of the
-// window), it no longer qualifies — that's the signal the 5-minute reconcile uses to
-// strike its line through.
+// pre-recs are in but the tester hasn't OK'd them yet — regardless of its start date
+// (all such tasks are chased, not just those starting in the coming week). Tasks with
+// no assignee (no one to ping) are skipped. Once "Tester OKd Pre-Recs" is ticked (or
+// the task closes / its last assignee is removed), it no longer qualifies — that's
+// the signal the 5-minute reconcile uses to strike its line through.
 function qualifies(task) {
   if (task.parent) return false; // skip subtasks
   if (!(task.assignees || []).length) return false; // no one to chase
-  const days = daysUntilStart(task.start_date);
-  if (days === null || days < 0 || days > AUTH_FORM_WINDOW_DAYS) return false; // outside the window
   return checkboxChecked(task, PRE_RECS_RECEIVED_FIELD) && !checkboxChecked(task, TESTER_OKD_FIELD);
 }
 
@@ -112,6 +88,15 @@ function formatStartDate(ms) {
   const day = Number(parts.find(p => p.type === 'day').value);
   const month = parts.find(p => p.type === 'month').value;
   return `${day}${ordinalSuffix(day)} ${month}`;
+}
+
+// The current calendar date (YYYY-MM-DD) in AUTH_FORM_TZ, used to stamp/compare the
+// day a message was posted for so the reconcile can tell "already handled today"
+// from "no message yet today".
+function todayStr(now = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: AUTH_FORM_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(now);
 }
 
 // Renders the Slack message from the persisted entries: the header, then the
@@ -156,6 +141,20 @@ async function mentionFor(assignee, cache) {
   return id ? `<@${id}>` : `@${name}`;
 }
 
+// Builds the persisted entry for a qualifying task: resolves its assignees to Slack
+// @-mentions and formats the "mentions - Client | Type" line. `cache` maps email ->
+// Slack id so lookups are shared across tasks in a single run.
+async function buildEntry(task, cache) {
+  const { client_name, testing_type } = parseTaskName(task.name);
+  const engagement = `${client_name} | ${testing_type}`;
+
+  // qualifies() guarantees at least one assignee, so there's always someone to ping.
+  const assignees = task.assignees || [];
+  const mentions = (await Promise.all(assignees.map(a => mentionFor(a, cache)))).join(' ');
+
+  return { taskId: task.id, line: `${mentions} - ${engagement}`, struck: false, startDate: task.start_date || null };
+}
+
 async function runAuthFormCheck() {
   const spaceId = process.env.CLICKUP_SPACE_ID;
   if (!spaceId) {
@@ -181,19 +180,16 @@ async function runAuthFormCheck() {
   for (const task of tasks) {
     if (!qualifies(task)) continue;
 
-    const { client_name, testing_type } = parseTaskName(task.name);
-    const engagement = `${client_name} | ${testing_type}`;
-
-    // qualifies() guarantees at least one assignee, so there's always someone to ping.
-    const assignees = task.assignees || [];
-    const mentions = (await Promise.all(assignees.map(a => mentionFor(a, emailToId)))).join(' ');
-
-    console.log(`[auth-form-check] MATCH: "${task.name}" — ${assignees.length} assignee(s) (task ${task.id}).`);
-    entries.push({ taskId: task.id, line: `${mentions} - ${engagement}`, struck: false, startDate: task.start_date || null });
+    console.log(`[auth-form-check] MATCH: "${task.name}" — ${(task.assignees || []).length} assignee(s) (task ${task.id}).`);
+    entries.push(await buildEntry(task, emailToId));
   }
 
   if (!entries.length) {
+    // Nothing to post — but still delete any previous message and stamp today's date
+    // (with a null ts) so the reconcile knows the run happened and can post the first
+    // message itself if a task starts qualifying later today.
     console.log('[auth-form-check] No matching tasks — nothing to post.');
+    await replacePreviousMessage(AUTH_FORM_CHANNEL, null, []);
     return { checked: tasks.length, matched: 0 };
   }
 
@@ -216,11 +212,15 @@ async function runAuthFormCheck() {
   return { checked: tasks.length, matched: entries.length };
 }
 
-// Re-scans the space every few minutes and strikes through any line whose task no
-// longer qualifies (the tester has since OK'd the pre-recs, or the task closed).
-// A line that qualifies again (e.g. the box was un-ticked) is un-struck. Only
-// edits Slack when something actually changed. Best-effort throughout: any failure
-// is logged and ignored so it never disrupts the daily post.
+// Re-scans the space every few minutes and reconciles the posted message against
+// what currently qualifies: any line whose task no longer qualifies (the tester has
+// since OK'd the pre-recs, or the task closed) is struck through, a line that
+// qualifies again (e.g. the box was un-ticked) is un-struck, and any task that has
+// newly started qualifying since the daily post is appended as a fresh line. If the
+// 14:00 run found nothing (so no message went out) but a task has since started
+// qualifying, it posts the first message itself. Only edits Slack when something
+// actually changed. Best-effort throughout: any failure is logged and ignored so it
+// never disrupts the daily post.
 async function reconcileAuthFormMessage() {
   const spaceId = process.env.CLICKUP_SPACE_ID;
   if (!spaceId) return { updated: false };
@@ -232,7 +232,10 @@ async function reconcileAuthFormMessage() {
     console.log(`[auth-form-check] Reconcile: could not read last message — skipping: ${err.message}`);
     return { updated: false };
   }
-  if (!state?.ts || !state.entries?.length) return { updated: false };
+
+  // Only act once the daily run has stamped today's date — before that (or on a day
+  // it hasn't run) there's no message anchor and we leave posting to the 14:00 run.
+  if (!state || state.postedDate !== todayStr()) return { updated: false };
 
   let tasks;
   try {
@@ -242,9 +245,19 @@ async function reconcileAuthFormMessage() {
     return { updated: false };
   }
 
-  // Task ids that still need chasing. Anything listed but absent here is done
-  // (OK'd, closed, or pre-recs removed) and should be struck through.
-  const stillQualifying = new Set(tasks.filter(qualifies).map(t => t.id));
+  const qualifyingTasks = tasks.filter(qualifies);
+
+  // No message was posted today (the 14:00 run found nothing) but tasks have since
+  // started qualifying — post the first message ourselves instead of just editing.
+  if (!state.ts) {
+    if (!qualifyingTasks.length) return { updated: false };
+    return await postReconcileMessage(qualifyingTasks);
+  }
+
+  // A message exists for today: reconcile it. Anything already listed but no longer
+  // qualifying is done (OK'd, closed, or pre-recs removed) and should be struck
+  // through; anything qualifying but not yet listed has newly started and is appended.
+  const stillQualifying = new Set(qualifyingTasks.map(t => t.id));
 
   let changed = false;
   const entries = state.entries.map((e) => {
@@ -252,6 +265,18 @@ async function reconcileAuthFormMessage() {
     if (struck !== !!e.struck) changed = true;
     return { ...e, struck };
   });
+
+  // Append any newly-qualifying tasks that aren't already on the message.
+  const listedIds = new Set(state.entries.map(e => e.taskId));
+  const newTasks = qualifyingTasks.filter(t => !listedIds.has(t.id));
+  if (newTasks.length) {
+    const emailToId = new Map();
+    for (const task of newTasks) {
+      console.log(`[auth-form-check] Reconcile: adding newly-qualifying "${task.name}" (task ${task.id}).`);
+      entries.push(await buildEntry(task, emailToId));
+    }
+    changed = true;
+  }
 
   if (!changed) return { updated: false };
 
@@ -269,6 +294,30 @@ async function reconcileAuthFormMessage() {
     console.log(`[auth-form-check] Reconcile: failed to persist updated entries: ${err.message}`);
   }
 
+  return { updated: true };
+}
+
+// Posts the first "Check Auth Form" message of the day from the reconcile, for the
+// case where the 14:00 run found nothing but tasks have since started qualifying.
+// Records it (with today's stamp) so subsequent reconciles edit it in place.
+async function postReconcileMessage(qualifyingTasks) {
+  const emailToId = new Map();
+  const entries = [];
+  for (const task of qualifyingTasks) {
+    console.log(`[auth-form-check] Reconcile: posting first message — including "${task.name}" (task ${task.id}).`);
+    entries.push(await buildEntry(task, emailToId));
+  }
+
+  let newTs;
+  try {
+    newTs = await slack.postMessage(AUTH_FORM_CHANNEL, renderMessage(entries));
+    console.log(`[auth-form-check] Reconcile: posted first auth-form message for ${entries.length} engagement(s) to ${AUTH_FORM_CHANNEL}.`);
+  } catch (err) {
+    console.log(`[auth-form-check] Reconcile: failed to post first message to ${AUTH_FORM_CHANNEL}: ${err.message}`);
+    return { updated: false };
+  }
+
+  await replacePreviousMessage(AUTH_FORM_CHANNEL, newTs, entries);
   return { updated: true };
 }
 
@@ -295,7 +344,9 @@ async function replacePreviousMessage(channel, newTs, entries) {
   }
 
   try {
-    await store.setLastMessage(channel, newTs, entries);
+    // Stamp today's date so the reconcile can tell this run already happened, even
+    // when newTs is null (nothing posted). `entries` is [] in that case.
+    await store.setLastMessage(channel, newTs, entries, todayStr());
   } catch (err) {
     console.log(`[auth-form-check] Failed to record new message id (next run won't delete this one): ${err.message}`);
   }
