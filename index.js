@@ -7,6 +7,7 @@ const { runAuthFormCheck, reconcileAuthFormMessage } = require('./pipeline/auth-
 const { runReportsDueCheck } = require('./pipeline/reports-due');
 const { runStartDateWatch } = require('./pipeline/start-date-watch');
 const { runMfaCheck } = require('./pipeline/mfa-check');
+const { seedQaQueue } = require('./pipeline/qa-queue-seed');
 const { startAvailabilityCache, requireApiKey } = require('./lib/availability-cache');
 const log = require('./lib/logger');
 const app = express();
@@ -49,6 +50,14 @@ app.post('/webhook/plextrac',
   webhookLimiter,
   express.raw({ type: 'application/json', limit: '100kb' }),
   require('./routes/plextrac-webhook')
+);
+
+// Slack slash commands (/reportqueue, /reportqueueall). Needs the raw urlencoded body
+// for Slack signing-secret verification, so it's mounted before express.json().
+app.post('/slack/commands',
+  webhookLimiter,
+  express.raw({ type: 'application/x-www-form-urlencoded', limit: '16kb' }),
+  require('./routes/slack-command')
 );
 
 app.use(express.json());
@@ -132,6 +141,17 @@ app.post('/jobs/start-date-watch', apiLimiter, requireApiKey, (req, res) => {
 app.post('/jobs/mfa-check', apiLimiter, requireApiKey, (req, res) => {
   res.status(200).end();
   runMfaCheck().catch(err => log.error('MFA check failed', { reason: err.message }));
+});
+
+// One-shot backfill for the QA queue (the /reportqueue Slack commands). Walks the
+// whole Plextrac tenant and seeds any report currently in first- or second-round QA,
+// for reports that were already in QA before the webhook-driven queue existed.
+// Requires the X-API-Key header, is rate-limited, responds with a blank 200, and runs
+// fire-and-forget with the scanned/seeded counts written to the logs. Idempotent —
+// safe to re-run.
+app.post('/jobs/qa-queue-seed', apiLimiter, requireApiKey, (req, res) => {
+  res.status(200).end();
+  seedQaQueue().catch(err => log.error('QA queue seed failed', { reason: err.message }));
 });
 
 // Auth-form check at 14:00 on working days (Mon–Fri; server timezone unless

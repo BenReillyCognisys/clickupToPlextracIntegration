@@ -5,6 +5,7 @@ const { getReport } = require('../lib/plextrac-api');
 const lookup = require('../lib/plextrac-lookup');
 const { runQaReview } = require('../pipeline/qa-review');
 const { crossOffReport } = require('../pipeline/reports-due');
+const qaQueue = require('../lib/qa-queue-store');
 const log = require('../lib/logger');
 
 // Pre-integration reports carry their client/report names in the webhook `text`
@@ -22,6 +23,35 @@ function parsePreIntegrationText(text) {
 
 // Status that triggers the automated AI QA review (defaults to the QA status).
 const QA_TRIGGER_STATUS = process.env.PLEXTRAC_QA_STATUS || 'Ready For Review';
+
+// QA-queue statuses (drive the /reportqueue Slack commands). A report enters the
+// queue at first-round QA, moves to the second-round list when it reaches the
+// second-round status, and drops off entirely once released (Published).
+const QA_FIRST_STATUS  = process.env.PLEXTRAC_QA_FIRST_STATUS  || QA_TRIGGER_STATUS;
+const QA_SECOND_STATUS = process.env.PLEXTRAC_QA_SECOND_STATUS || 'In Review';
+const QA_RELEASED_STATUS = process.env.PLEXTRAC_RELEASED_STATUS || 'Published';
+
+// Base Plextrac instance URL for building report links shown in the queue.
+const PLEXTRAC_BASE = `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}`;
+
+// Maintains the QA queue from a report's current status: add/move it for the two QA
+// rounds, remove it on release, and ignore every other status. Best-effort — any
+// failure is logged and swallowed so it never disrupts the rest of the webhook.
+async function updateQaQueue(reportStatus, { reportId, cuid, clientId, clientName, reportName }) {
+  const reportUrl = `${PLEXTRAC_BASE}/client/${clientId}/report/${reportId}`;
+  const base = { reportId, cuid, clientId, clientName, reportName, reportUrl };
+  try {
+    if (reportStatus === QA_FIRST_STATUS) {
+      await qaQueue.upsert({ ...base, stage: 'first' });
+    } else if (reportStatus === QA_SECOND_STATUS) {
+      await qaQueue.upsert({ ...base, stage: 'second' });
+    } else if (reportStatus === QA_RELEASED_STATUS) {
+      await qaQueue.remove(reportId);
+    }
+  } catch (err) {
+    log.error('Failed to update QA queue', { reason: err.message, report_id: reportId, status: reportStatus });
+  }
+}
 
 // Plextrac signature: HMAC-SHA256(secret, rawBody), header: X-Authorization-HMAC-256
 function verifySignature(secret, rawBody, header) {
@@ -139,6 +169,17 @@ async function handler(req, res) {
     });
     return;
   }
+
+  // Keep the QA queue (the /reportqueue Slack commands) in step with the report's
+  // status. Runs for mapped and pre-integration reports alike, before the mapped-only
+  // ClickUp sync below, so both show up in the queue.
+  await updateQaQueue(reportStatus, {
+    reportId:   mapping.plextrac_report_id,
+    cuid:       targetCuid,
+    clientId:   mapping.plextrac_client_id,
+    clientName: mapping.client_name,
+    reportName: report?.name || mapping.task_name,
+  });
 
   // When the report enters the QA status, kick off the automated AI QA review.
   // Fire-and-forget so the (fast) ClickUp status sync below isn't blocked by the
