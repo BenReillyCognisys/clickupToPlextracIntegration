@@ -6,6 +6,12 @@
 // logger). It runs on a daily 14:00 cron and can be triggered early via
 // POST /jobs/mfa-check.
 //
+// Each run posts a single Slack message and then deletes the one from the
+// previous run (best-effort), so the channel only ever shows the latest status.
+// We persist the previous run's flagged users (in MongoDB), so any user who was
+// flagged last run but has since enrolled is called out in a ":white_check_mark:
+// Fixed since last run" section — making it obvious at a glance who's resolved.
+//
 // The Directory API only exposes 2SV status to a domain admin, so the service
 // account must have domain-wide delegation and impersonate an admin user
 // (GOOGLE_ADMIN_SUBJECT). The service-account key defaults to the production
@@ -14,6 +20,7 @@
 const { google } = require('googleapis');
 const log = require('../lib/logger');
 const slack = require('../lib/slack');
+const store = require('../lib/mfa-check-store');
 
 // Path to the service-account JSON key. Defaults to the production location.
 const KEY_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_KEY
@@ -90,15 +97,69 @@ async function runMfaCheck() {
     console.log(`[mfa-check]  - ${u.primaryEmail}${name ? ` (${name})` : ''} [${reason}]`);
   }
 
-  await postToSlack(withoutMfa, users.length);
+  await postToSlack(withoutMfa, users);
 
   log.info('MFA check complete', { total: users.length, without_mfa: withoutMfa.length });
   return withoutMfa;
 }
 
-// Posts the results to Slack. A Slack failure is logged but never propagated —
-// the check itself has already succeeded and printed to the console/logs.
-async function postToSlack(withoutMfa, total) {
+// Posts the results to Slack, deletes the previous run's message, and records the
+// new one so the next run can delete it in turn and work out who's since been
+// fixed. A Slack/store failure is logged but never propagated — the check itself
+// has already succeeded and printed to the console/logs.
+async function postToSlack(withoutMfa, users) {
+  const total = users.length;
+
+  // Read the previous run's state up front: we need its flagged-user list to
+  // work out the "fixed" set, and its message ts to delete after we repost.
+  let previous = null;
+  try {
+    previous = await store.getLastMessage();
+  } catch (err) {
+    log.error('MFA check: could not read previous run state', { reason: err.message });
+  }
+
+  // "Fixed" = users who were flagged last run and, in this run, are present and
+  // now enrolled in 2SV. Requiring enrollment (rather than merely dropping off
+  // the flagged list) means a user who was suspended/archived/deleted since last
+  // run isn't miscounted as having fixed their MFA.
+  const byEmail = new Map(users.map(u => [u.primaryEmail, u]));
+  const fixed = (previous?.users || [])
+    .map(email => byEmail.get(email))
+    .filter(u => u && u.isEnrolledIn2Sv === true);
+
+  const text = renderMessage(withoutMfa, fixed, total);
+
+  let newTs;
+  try {
+    newTs = await slack.postMessage(SLACK_CHANNEL, text);
+  } catch (err) {
+    log.error('MFA check: Slack post failed', { reason: err.message });
+    return;
+  }
+
+  // New message is up — delete the previous run's one (exactly one, best-effort).
+  if (previous?.ts && previous.ts !== newTs) {
+    try {
+      await slack.deleteMessage(previous.channel || SLACK_CHANNEL, previous.ts);
+    } catch (err) {
+      log.error('MFA check: failed to delete previous message', { reason: err.message, ts: previous.ts });
+    }
+  }
+
+  // Record this run's message + flagged users so the next run can delete it and
+  // compute its own "fixed" list.
+  try {
+    await store.setLastMessage(SLACK_CHANNEL, newTs, withoutMfa.map(u => u.primaryEmail));
+  } catch (err) {
+    log.error('MFA check: failed to record new message id (next run may leave it in place)', { reason: err.message });
+  }
+}
+
+// Renders the Slack message: the warning/all-clear header and the flagged users,
+// followed (when any) by a green-tick "Fixed since last run" section so resolved
+// users are easy to spot at a glance.
+function renderMessage(withoutMfa, fixed, total) {
   const header = withoutMfa.length === 0
     ? `:white_check_mark: MFA check: all ${total} user(s) have MFA enrolled.`
     : `:warning: MFA check: ${withoutMfa.length} of ${total} user(s) do *not* have MFA enrolled:`;
@@ -107,12 +168,19 @@ async function postToSlack(withoutMfa, total) {
     const reason = u.isEnforcedIn2Sv ? 'policy enforced, user has not completed setup' : 'not enforced by policy, and not enrolled';
     return `• ${u.primaryEmail}${name ? ` (${name})` : ''} — ${reason}`;
   });
-  const text = [header, ...lines].join('\n');
-  try {
-    await slack.postMessage(SLACK_CHANNEL, text);
-  } catch (err) {
-    log.error('MFA check: Slack post failed', { reason: err.message });
+
+  const out = [header, ...lines];
+
+  if (fixed.length) {
+    out.push('');
+    out.push(`:white_check_mark: *Fixed since last run — ${fixed.length} user(s) now have MFA enrolled:*`);
+    for (const u of fixed) {
+      const name = u.name && u.name.fullName ? u.name.fullName : '';
+      out.push(`• :white_check_mark: ${u.primaryEmail}${name ? ` (${name})` : ''}`);
+    }
   }
+
+  return out.join('\n');
 }
 
 module.exports = { runMfaCheck };
