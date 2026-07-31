@@ -1,11 +1,14 @@
 const crypto = require('crypto');
 const { findByCuid } = require('../lib/task-store');
-const { updateTaskStatus } = require('../lib/clickup-api');
-const { getReport } = require('../lib/plextrac-api');
+const { updateTaskStatus, getTask } = require('../lib/clickup-api');
+const { getReport, listReportFindings } = require('../lib/plextrac-api');
 const lookup = require('../lib/plextrac-lookup');
 const { runQaReview } = require('../pipeline/qa-review');
 const { crossOffReport } = require('../pipeline/reports-due');
 const qaQueue = require('../lib/qa-queue-store');
+const kpiStore = require('../lib/qa-kpi-store');
+const submissionStore = require('../lib/qa-submission-store');
+const { hoursLate, trackingStartMs } = require('../lib/report-lateness');
 const log = require('../lib/logger');
 
 // Pre-integration reports carry their client/report names in the webhook `text`
@@ -33,6 +36,120 @@ const QA_RELEASED_STATUS = process.env.PLEXTRAC_RELEASED_STATUS || 'Published';
 
 // Base Plextrac instance URL for building report links shown in the queue.
 const PLEXTRAC_BASE = `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}`;
+
+// Report statuses that do NOT earn a QA KPI credit (see /report-kpis). The initial
+// "Ready For Review" is the author submitting their OWN report for QA — not a QA
+// performed on someone else's work — so it never counts. Every other status change
+// counts (deduped to one credit per consultant per report in lib/qa-kpi-store.js).
+// Override/extend with PLEXTRAC_KPI_EXCLUDED_STATUSES (comma-separated status names).
+const KPI_EXCLUDED_STATUSES = new Set(
+  (process.env.PLEXTRAC_KPI_EXCLUDED_STATUSES || QA_FIRST_STATUS)
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean)
+);
+
+function isKpiExcludedStatus(status) {
+  return KPI_EXCLUDED_STATUSES.has(String(status || '').trim().toLowerCase());
+}
+
+// Number of findings in a report, or null if it can't be determined. Matches the
+// shape handling the QA-review pipeline uses for the same endpoint (array or
+// { data: [...] }). Best-effort — the count is context, never worth failing over.
+async function countReportFindings(clientId, reportId) {
+  try {
+    const raw = await listReportFindings(clientId, reportId);
+    const list = Array.isArray(raw) ? raw : (raw?.data || []);
+    return list.length;
+  } catch (err) {
+    log.warn('Could not count report findings for QA KPI', {
+      reason: err.message, client_id: clientId, report_id: reportId,
+    });
+    return null;
+  }
+}
+
+// Credits the actor who moved a report into `reportStatus` with one QA (for the
+// /report-kpis leaderboard) — unless the actor is unknown or the status is excluded
+// (the initial "Ready For Review"). The store dedups to one credit per consultant
+// per report, so repeatedly flipping a report's status never inflates the count. We
+// also record the report's findings count (report size) so the leaderboard can tell
+// apart consultants QA'ing large vs short reports; it's only fetched for a genuinely
+// new credit (has() guard), so duplicate flips cost no extra Plextrac call.
+// Best-effort: any failure is logged and swallowed so it never disrupts the webhook.
+async function recordQaKpi(reportStatus, actorCuid, ctx) {
+  if (typeof actorCuid !== 'string' || !actorCuid) return;
+  if (isKpiExcludedStatus(reportStatus)) return;
+  try {
+    if (await kpiStore.has(ctx.reportId, actorCuid)) return; // already credited
+
+    const findingsCount = await countReportFindings(ctx.clientId, ctx.reportId);
+    const counted = await kpiStore.record({ ...ctx, actorCuid, status: reportStatus, findingsCount });
+    if (counted) {
+      log.info('QA KPI credit recorded', {
+        actor_cuid: actorCuid, report_id: ctx.reportId, status: reportStatus, findings: findingsCount,
+      });
+    }
+  } catch (err) {
+    log.error('Failed to record QA KPI', {
+      reason: err.message, report_id: ctx.reportId, actor_cuid: actorCuid, status: reportStatus,
+    });
+  }
+}
+
+// The status a report reaches when its author submits it for QA. Reaching it is the
+// "report submitted" event whose lateness the /report-kpis @user view reports. Same
+// as the initial "Ready For Review" by default; override with PLEXTRAC_SUBMIT_STATUS.
+const SUBMIT_STATUS = (process.env.PLEXTRAC_SUBMIT_STATUS || QA_FIRST_STATUS).trim().toLowerCase();
+
+function isSubmitStatus(status) {
+  return String(status || '').trim().toLowerCase() === SUBMIT_STATUS;
+}
+
+// Records a report's first submission (author → "Ready For Review") with how late it
+// was vs the ClickUp due date, for the /report-kpis @user lateness stats. Only runs
+// for mapped reports (a ClickUp task is needed for the due date) and only once per
+// report (submissionStore dedups), so the due date is fetched at most once. Lateness
+// starts at 09:00 the next working day after the due date (report-lateness.js).
+// Best-effort: any failure is logged and swallowed so it never disrupts the webhook.
+async function recordSubmission(reportStatus, actorCuid, ctx) {
+  if (!isSubmitStatus(reportStatus)) return;
+  if (typeof actorCuid !== 'string' || !actorCuid) return;
+  if (!ctx.clickupTaskId) return; // pre-integration report: no ClickUp due date to measure
+  try {
+    if (await submissionStore.has(ctx.reportId)) return; // already recorded the first submission
+
+    const submittedAt = new Date();
+    let dueDate = null, trackingStart = null, lateHours = null;
+    try {
+      const task = await getTask(ctx.clickupTaskId);
+      const due = task?.due_date != null ? Number(task.due_date) : null;
+      if (due) {
+        dueDate = due;
+        trackingStart = trackingStartMs(due);
+        lateHours = hoursLate(due, submittedAt.getTime());
+      }
+    } catch (err) {
+      log.warn('Could not fetch ClickUp due date for submission lateness (recording submission without it)', {
+        reason: err.message, clickup_task_id: ctx.clickupTaskId, report_id: ctx.reportId,
+      });
+    }
+
+    const counted = await submissionStore.record({
+      reportId: ctx.reportId, actorCuid, clickupTaskId: ctx.clickupTaskId,
+      dueDate, trackingStart, submittedAt, hoursLate: lateHours,
+    });
+    if (counted) {
+      log.info('QA submission recorded', {
+        actor_cuid: actorCuid, report_id: ctx.reportId, hours_late: lateHours,
+      });
+    }
+  } catch (err) {
+    log.error('Failed to record QA submission', {
+      reason: err.message, report_id: ctx.reportId, actor_cuid: actorCuid,
+    });
+  }
+}
 
 // Maintains the QA queue from a report's current status: add/move it for the two QA
 // rounds, remove it on release, and ignore every other status. Best-effort — any
@@ -90,7 +207,9 @@ async function handler(req, res) {
     return;
   }
 
-  const { event, targetCuid, targetType, text } = payload;
+  // `actorCuid` identifies the user who triggered the status change (per Plextrac
+  // support). It is not on every legacy payload, so all downstream use is optional.
+  const { event, targetCuid, targetType, text, actorCuid } = payload;
 
   if (event !== 'ReportStatusChanged' || targetType !== 'report' || typeof targetCuid !== 'string' || !targetCuid) {
     return;
@@ -179,6 +298,24 @@ async function handler(req, res) {
     clientId:   mapping.plextrac_client_id,
     clientName: mapping.client_name,
     reportName: report?.name || mapping.task_name,
+  });
+
+  // Credit the consultant who made this status change on the QA leaderboard
+  // (/report-kpis). Runs for mapped and pre-integration reports alike.
+  await recordQaKpi(reportStatus, actorCuid, {
+    reportId:   mapping.plextrac_report_id,
+    clientId:   mapping.plextrac_client_id,
+    reportCuid: targetCuid,
+    clientName: mapping.client_name,
+    reportName: report?.name || mapping.task_name,
+  });
+
+  // Record report-submission lateness (author → "Ready For Review") for the
+  // /report-kpis @user view. No-ops for non-submit statuses and pre-integration
+  // reports (no ClickUp task).
+  await recordSubmission(reportStatus, actorCuid, {
+    reportId:      mapping.plextrac_report_id,
+    clickupTaskId: mapping.clickup_task_id,
   });
 
   // When the report enters the QA status, kick off the automated AI QA review.
