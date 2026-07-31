@@ -99,6 +99,16 @@ function pmUserIds() {
 // been sent). Best-effort — a failure is reported back to the user, not thrown.
 async function deliverKpis(responseUrl, window) {
   if (!responseUrl) return;
+  // Post the "crunching…" note over response_url (not as the slash reply) so the
+  // result below can replace_original it — an ephemeral slash reply can't be.
+  try {
+    await slack.postToResponseUrl(responseUrl, {
+      response_type: 'ephemeral',
+      text: `:bar_chart: Crunching QA KPIs for ${window.label}…`,
+    });
+  } catch (err) {
+    log.error('Failed to post QA KPIs ack to Slack response_url', { reason: err.message });
+  }
   let text;
   try {
     text = renderKpis(await buildKpiEntries(window), window && window.label);
@@ -107,7 +117,7 @@ async function deliverKpis(responseUrl, window) {
     text = 'Sorry — could not compute QA KPIs right now. Please try again shortly.';
   }
   try {
-    // replace_original overwrites the "crunching…" ack message with the result.
+    // replace_original overwrites the "crunching…" note with the result.
     await slack.postToResponseUrl(responseUrl, {
       response_type: 'ephemeral',
       replace_original: true,
@@ -124,6 +134,15 @@ async function deliverKpis(responseUrl, window) {
 // resolve returns a specific, actionable message instead of throwing.
 async function deliverUserKpis(responseUrl, slackUserId) {
   if (!responseUrl) return;
+  // Transient note over response_url so the result below can replace_original it.
+  try {
+    await slack.postToResponseUrl(responseUrl, {
+      response_type: 'ephemeral',
+      text: `:bar_chart: Looking up <@${slackUserId}>'s QA stats…`,
+    });
+  } catch (err) {
+    log.error('Failed to post user QA KPIs ack to Slack response_url', { reason: err.message });
+  }
   let text;
   try {
     const slackUser = await slack.lookupUserById(slackUserId);
@@ -197,7 +216,9 @@ async function handler(req, res) {
     // @user lookup — that person's stats for the last 30 & 90 days.
     const mentionId = parseUserMention(arg);
     if (mentionId) {
-      res.json({ response_type: 'ephemeral', text: `:bar_chart: Looking up <@${mentionId}>'s QA stats…` });
+      // Ack with an empty 200; the note + result are delivered over response_url
+      // (see deliverUserKpis) so the result can replace the note.
+      res.status(200).end();
       deliverUserKpis(String(params.response_url || ''), mentionId).catch(err =>
         log.error('QA KPIs user command failed', { reason: err.message }));
       return;
@@ -218,7 +239,9 @@ async function handler(req, res) {
         text: `:warning: Didn't recognise \`${slackEscape(arg)}\`.\n\n${KPI_USAGE}`,
       });
     }
-    res.json({ response_type: 'ephemeral', text: `:bar_chart: Crunching QA KPIs for ${window.label}…` });
+    // Ack with an empty 200; the note + result are delivered over response_url
+    // (see deliverKpis) so the result can replace the note.
+    res.status(200).end();
     deliverKpis(String(params.response_url || ''), window).catch(err =>
       log.error('QA KPIs command failed', { reason: err.message }));
     return;
