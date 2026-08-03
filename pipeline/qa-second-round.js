@@ -9,10 +9,12 @@
 
 const slack = require('../lib/slack');
 const users = require('../lib/plextrac-users');
+const api = require('../lib/plextrac-api');
+const fields = require('./qa-review/report-fields');
 const log = require('../lib/logger');
 
 // #pt-second-round-qa channel id (override via env).
-const SECOND_ROUND_QA_CHANNEL = process.env.SLACK_SECOND_ROUND_QA_CHANNEL || 'C09GDNG20JFC';
+const SECOND_ROUND_QA_CHANNEL = process.env.SLACK_SECOND_ROUND_QA_CHANNEL || 'C09GDNG20JF';
 
 // Slack user ids @-mentioned on a second-round announcement (the second-round QA
 // reviewers). Override with SLACK_SECOND_ROUND_QA_MENTIONS (comma/space-separated ids);
@@ -54,11 +56,29 @@ async function resolveFirstQaName(actorCuid) {
   }
 }
 
+// Resolves the canonical client name from the Plextrac client record, degrading to the
+// mapping-derived fallback if the fetch fails. The webhook mapping's client_name can be
+// missing (e.g. pre-integration reports), so — like the first-round pipeline — we fetch
+// the real name rather than trust the fallback alone (which rendered "Client: undefined").
+async function resolveClientName(clientId, fallback) {
+  if (!clientId) return fallback;
+  try {
+    const clientRecord = await api.getClient(clientId);
+    return fields.clientNameFromRecord(clientRecord, fallback);
+  } catch (err) {
+    log.warn('Could not fetch client record for second-round message — using fallback name', {
+      reason: err.message, client_id: clientId,
+    });
+    return fallback;
+  }
+}
+
 // Posts the second-round QA announcement to #pt-second-round-qa. Best-effort — any
 // failure is logged and swallowed so it never disrupts the rest of the webhook.
-async function postSecondRoundQa({ clientName, clientUrl, reportName, reportUrl, actorCuid, reportId }) {
+async function postSecondRoundQa({ clientId, clientName, clientUrl, reportName, reportUrl, actorCuid, reportId }) {
   const firstQaName = await resolveFirstQaName(actorCuid);
-  const text = buildSecondRoundMessage({ clientName, clientUrl, reportName, reportUrl, firstQaName });
+  const resolvedClientName = await resolveClientName(clientId, clientName);
+  const text = buildSecondRoundMessage({ clientName: resolvedClientName, clientUrl, reportName, reportUrl, firstQaName });
   try {
     await slack.postMessage(SECOND_ROUND_QA_CHANNEL, text);
     log.info('Second-round QA message posted', { report_id: reportId, first_qa: firstQaName });

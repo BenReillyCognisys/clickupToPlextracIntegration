@@ -10,10 +10,12 @@
 
 const slack = require('../lib/slack');
 const users = require('../lib/plextrac-users');
+const api = require('../lib/plextrac-api');
+const fields = require('./qa-review/report-fields');
 const log = require('../lib/logger');
 
 // Channel for the release announcement (shares #pt-second-round-qa by default; override).
-const RELEASED_QA_CHANNEL = process.env.SLACK_RELEASED_QA_CHANNEL || 'C09GDNG20JFC';
+const RELEASED_QA_CHANNEL = process.env.SLACK_RELEASED_QA_CHANNEL || 'C09GDNG20JF';
 
 // Slack user ids @-mentioned on a release announcement. Override with
 // SLACK_RELEASED_QA_MENTIONS (comma/space-separated ids); falls back to the built-in list.
@@ -54,11 +56,29 @@ async function resolveReleaseQaName(actorCuid) {
   }
 }
 
+// Resolves the canonical client name from the Plextrac client record, degrading to the
+// mapping-derived fallback if the fetch fails. The webhook mapping's client_name can be
+// missing (e.g. pre-integration reports), so — like the first-round pipeline — we fetch
+// the real name rather than trust the fallback alone (which rendered "Client: undefined").
+async function resolveClientName(clientId, fallback) {
+  if (!clientId) return fallback;
+  try {
+    const clientRecord = await api.getClient(clientId);
+    return fields.clientNameFromRecord(clientRecord, fallback);
+  } catch (err) {
+    log.warn('Could not fetch client record for release message — using fallback name', {
+      reason: err.message, client_id: clientId,
+    });
+    return fallback;
+  }
+}
+
 // Posts the release announcement to the release channel. Best-effort — any failure is
 // logged and swallowed so it never disrupts the rest of the webhook.
-async function postReleaseAnnouncement({ clientName, clientUrl, reportName, reportUrl, actorCuid, reportId }) {
+async function postReleaseAnnouncement({ clientId, clientName, clientUrl, reportName, reportUrl, actorCuid, reportId }) {
   const releaseQaName = await resolveReleaseQaName(actorCuid);
-  const text = buildReleaseMessage({ clientName, clientUrl, reportName, reportUrl, releaseQaName });
+  const resolvedClientName = await resolveClientName(clientId, clientName);
+  const text = buildReleaseMessage({ clientName: resolvedClientName, clientUrl, reportName, reportUrl, releaseQaName });
   try {
     await slack.postMessage(RELEASED_QA_CHANNEL, text);
     log.info('Release announcement posted', { report_id: reportId, release_qa: releaseQaName });

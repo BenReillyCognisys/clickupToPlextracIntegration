@@ -339,6 +339,7 @@ async function handler(req, res) {
   // the ClickUp sync below isn't blocked by the cuid→name resolution; it logs its own errors.
   if (reportStatus === QA_SECOND_STATUS) {
     postSecondRoundQa({
+      clientId:   mapping.plextrac_client_id,
       clientName: mapping.client_name,
       clientUrl:  `${PLEXTRAC_BASE}/client/${mapping.plextrac_client_id}`,
       reportName: report?.name || mapping.task_name,
@@ -358,6 +359,7 @@ async function handler(req, res) {
   // blocked by the cuid→name resolution; it logs its own errors.
   if (reportStatus === QA_RELEASED_STATUS) {
     postReleaseAnnouncement({
+      clientId:   mapping.plextrac_client_id,
       clientName: mapping.client_name,
       clientUrl:  `${PLEXTRAC_BASE}/client/${mapping.plextrac_client_id}`,
       reportName: report?.name || mapping.task_name,
