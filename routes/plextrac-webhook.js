@@ -4,6 +4,8 @@ const { updateTaskStatus, getTask } = require('../lib/clickup-api');
 const { getReport, listReportFindings } = require('../lib/plextrac-api');
 const lookup = require('../lib/plextrac-lookup');
 const { runQaReview } = require('../pipeline/qa-review');
+const { postSecondRoundQa } = require('../pipeline/qa-second-round');
+const { postReleaseAnnouncement } = require('../pipeline/qa-released');
 const { crossOffReport } = require('../pipeline/reports-due');
 const qaQueue = require('../lib/qa-queue-store');
 const kpiStore = require('../lib/qa-kpi-store');
@@ -327,6 +329,44 @@ async function handler(req, res) {
         reason: err.message,
         cuid: targetCuid,
         report_id: mapping.plextrac_report_id,
+      });
+    });
+  }
+
+  // When the report reaches the second-round QA status, the first round is complete:
+  // announce it to #pt-second-round-qa, pinging the second-round reviewers and crediting
+  // whoever did the first QA (the actor who made this status change). Fire-and-forget so
+  // the ClickUp sync below isn't blocked by the cuid→name resolution; it logs its own errors.
+  if (reportStatus === QA_SECOND_STATUS) {
+    postSecondRoundQa({
+      clientName: mapping.client_name,
+      clientUrl:  `${PLEXTRAC_BASE}/client/${mapping.plextrac_client_id}`,
+      reportName: report?.name || mapping.task_name,
+      reportUrl:  `${PLEXTRAC_BASE}/client/${mapping.plextrac_client_id}/report/${mapping.plextrac_report_id}`,
+      actorCuid,
+      reportId:   mapping.plextrac_report_id,
+    }).catch(err => {
+      log.error('Second-round QA announcement threw', {
+        reason: err.message, cuid: targetCuid, report_id: mapping.plextrac_report_id,
+      });
+    });
+  }
+
+  // When the report reaches the released status, it has cleared release QA and gone out:
+  // announce it, pinging the release reviewers and crediting whoever released it (the
+  // actor who made this status change). Fire-and-forget so the ClickUp sync below isn't
+  // blocked by the cuid→name resolution; it logs its own errors.
+  if (reportStatus === QA_RELEASED_STATUS) {
+    postReleaseAnnouncement({
+      clientName: mapping.client_name,
+      clientUrl:  `${PLEXTRAC_BASE}/client/${mapping.plextrac_client_id}`,
+      reportName: report?.name || mapping.task_name,
+      reportUrl:  `${PLEXTRAC_BASE}/client/${mapping.plextrac_client_id}/report/${mapping.plextrac_report_id}`,
+      actorCuid,
+      reportId:   mapping.plextrac_report_id,
+    }).catch(err => {
+      log.error('Release announcement threw', {
+        reason: err.message, cuid: targetCuid, report_id: mapping.plextrac_report_id,
       });
     });
   }

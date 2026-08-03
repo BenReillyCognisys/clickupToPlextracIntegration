@@ -7,6 +7,8 @@ const {
 const { extractPlaceholders, placeholdersPreserved } = require('../lib/placeholders');
 const { namesPreserved, countOccurrences } = require('../lib/protected-names');
 const { buildThreadBody, buildFirstRoundMessage } = require('../pipeline/qa-review');
+const { buildSecondRoundMessage } = require('../pipeline/qa-second-round');
+const { buildReleaseMessage } = require('../pipeline/qa-released');
 
 let passed = 0;
 let failed = 0;
@@ -291,6 +293,92 @@ test('falls back to plain text when a url is missing', () => {
   eq(
     buildFirstRoundMessage({ clientName: 'Acme', reportName: 'Report 5' }),
     'Client: Acme - Report 5 ready for first round of QA',
+  );
+});
+
+console.log('\nbuildSecondRoundMessage:');
+
+test('hyperlinks names, pings reviewers, and credits the first QA', () => {
+  eq(
+    buildSecondRoundMessage({
+      clientName: 'Acme Corp',
+      clientUrl: 'https://x/client/1',
+      reportName: 'Web App Pentest',
+      reportUrl: 'https://x/client/1/report/2',
+      firstQaName: 'Ben Reilly',
+      mentions: ['U111', 'U222'],
+    }),
+    'Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> ready for second round of QA <@U111> <@U222>. First QA done by Ben Reilly',
+  );
+});
+
+test('uses the built-in reviewer list when mentions are omitted', () => {
+  const msg = buildSecondRoundMessage({
+    clientName: 'Acme', reportName: 'Report 5', firstQaName: 'Ada Lovelace',
+  });
+  eq(msg.includes('<@U0811891NTU> <@U07R28NJ0KS> <@U07LSK8F8DN> <@U07PYU23RN3>'), true);
+  eq(msg.includes('First QA done by Ada Lovelace'), true);
+});
+
+test('escapes mrkdwn-special characters in names and the first-QA name', () => {
+  const msg = buildSecondRoundMessage({
+    clientName: 'A & B <Ltd>',
+    reportName: 'Q1 <draft>',
+    firstQaName: 'A<b>',
+    mentions: [],
+  });
+  eq(msg.includes('A &amp; B &lt;Ltd&gt;'), true);
+  eq(msg.includes('Q1 &lt;draft&gt;'), true);
+  eq(msg.includes('First QA done by A&lt;b&gt;'), true);
+});
+
+test('omits the mention block when the reviewer list is empty', () => {
+  eq(
+    buildSecondRoundMessage({ clientName: 'Acme', reportName: 'Report 5', firstQaName: 'Grace', mentions: [] }),
+    'Client: Acme - Report 5 ready for second round of QA. First QA done by Grace',
+  );
+});
+
+console.log('\nbuildReleaseMessage:');
+
+test('hyperlinks names, pings reviewers, credits release QA, and bookends with a check', () => {
+  eq(
+    buildReleaseMessage({
+      clientName: 'Acme Corp',
+      clientUrl: 'https://x/client/1',
+      reportName: 'Web App Pentest',
+      reportUrl: 'https://x/client/1/report/2',
+      releaseQaName: 'Ben Reilly',
+      mentions: ['U111', 'U222'],
+    }),
+    ':white_check_mark: Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> released <@U111> <@U222>. Release QA done by Ben Reilly :white_check_mark:',
+  );
+});
+
+test('uses the built-in release reviewer list when mentions are omitted', () => {
+  const msg = buildReleaseMessage({
+    clientName: 'Acme', reportName: 'Report 5', releaseQaName: 'Ada Lovelace',
+  });
+  eq(msg.includes('<@U09CF6MLUF3> <@U06NJCD93RT> <@U06V88B1MEK>'), true);
+  eq(msg.includes('Release QA done by Ada Lovelace'), true);
+});
+
+test('escapes mrkdwn-special characters in names and the release-QA name', () => {
+  const msg = buildReleaseMessage({
+    clientName: 'A & B <Ltd>',
+    reportName: 'Q1 <draft>',
+    releaseQaName: 'A<b>',
+    mentions: [],
+  });
+  eq(msg.includes('A &amp; B &lt;Ltd&gt;'), true);
+  eq(msg.includes('Q1 &lt;draft&gt;'), true);
+  eq(msg.includes('Release QA done by A&lt;b&gt;'), true);
+});
+
+test('omits the mention block when the release reviewer list is empty', () => {
+  eq(
+    buildReleaseMessage({ clientName: 'Acme', reportName: 'Report 5', releaseQaName: 'Grace', mentions: [] }),
+    ':white_check_mark: Client: Acme - Report 5 released. Release QA done by Grace :white_check_mark:',
   );
 });
 

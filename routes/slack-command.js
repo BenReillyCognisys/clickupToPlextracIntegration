@@ -104,7 +104,7 @@ async function deliverKpis(responseUrl, window) {
   try {
     await slack.postToResponseUrl(responseUrl, {
       response_type: 'ephemeral',
-      text: `:bar_chart: Crunching QA KPIs for ${window.label}…`,
+      text: `:bar_chart: Crunching QA KPIs for the ${window.label}…`,
     });
   } catch (err) {
     log.error('Failed to post QA KPIs ack to Slack response_url', { reason: err.message });

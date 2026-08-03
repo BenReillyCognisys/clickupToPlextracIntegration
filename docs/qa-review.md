@@ -21,19 +21,39 @@ Plextrac (status → QA)
    ▼
 routes/plextrac-webhook.js          verify signature → ack 200 → look up mapping by CUID → fetch report
    ├─ sync ClickUp task status (existing behaviour)
-   └─ if report status === PLEXTRAC_QA_STATUS → runQaReview(mapping)  [fire-and-forget]
+   ├─ if report status === PLEXTRAC_QA_STATUS → runQaReview(mapping)  [fire-and-forget]
+   │    ▼
+   │    pipeline/qa-review/index.js
+   │      1. fetch report; status gate (PLEXTRAC_QA_STATUS)
+   │      2. resolve canonical client name (Plextrac client record)
+   │      3. post parent msg "Client: {client} - {report} ready for first round of
+   │         QA" to #pt-first-round-qa FIRST (client + report names hyperlinked);
+   │         keep its thread anchor
+   │      4. executive summary:  strip formatting → client-name → de-jargon → flag incomplete sentences  (suggestions only — no write-back)
+   │      5. findings:           strip formatting → client-name → flag incomplete sentences               (suggestions only — no write-back)
+   │      6. log every suggestion to LOG_FILE; once QA is fully complete, reply in the
+   │         parent's thread with the AI QA feedback (suggested changes + flags)
+   ├─ if report status === PLEXTRAC_QA_SECOND_STATUS → postSecondRoundQa(...)  [fire-and-forget]
+   │    ▼
+   │    pipeline/qa-second-round.js
+   │      post msg "Client: {client} - {report} ready for second round of QA
+   │      {@reviewers}. First QA done by {name}" to #pt-second-round-qa.
+   │      {name} = the actor who moved the report here (they did the first QA),
+   │      resolved cuid → name via lib/plextrac-users. No AI review, no write-back.
+   └─ if report status === PLEXTRAC_RELEASED_STATUS → postReleaseAnnouncement(...)  [fire-and-forget]
         ▼
-        pipeline/qa-review/index.js
-          1. fetch report; status gate (PLEXTRAC_QA_STATUS)
-          2. resolve canonical client name (Plextrac client record)
-          3. post parent msg "Client: {client} - {report} ready for first round of
-             QA" to #pt-first-round-qa FIRST (client + report names hyperlinked);
-             keep its thread anchor
-          4. executive summary:  strip formatting → client-name → de-jargon → flag incomplete sentences  (suggestions only — no write-back)
-          5. findings:           strip formatting → client-name → flag incomplete sentences               (suggestions only — no write-back)
-          6. log every suggestion to LOG_FILE; once QA is fully complete, reply in the
-             parent's thread with the AI QA feedback (suggested changes + flags)
+        pipeline/qa-released.js
+          post msg ":white_check_mark: Client: {client} - {report} released
+          {@reviewers}. Release QA done by {name} :white_check_mark:".
+          {name} = the actor who released it, resolved cuid → name. No write-back.
 ```
+
+Reaching the second-round status means the first round of QA is **done**, so that
+announcement pings the second-round reviewers (`SLACK_SECOND_ROUND_QA_MENTIONS`,
+default list in `pipeline/qa-second-round.js`) and credits whoever performed it.
+Likewise, reaching the released status posts the release announcement, pinging the
+release reviewers (`SLACK_RELEASED_QA_MENTIONS`, default in `pipeline/qa-released.js`)
+and crediting whoever released it. Both share the second-round channel by default.
 
 The QA review runs **fire-and-forget** so the (slower, billable) review never
 blocks the fast ClickUp status sync. The report CUID → `{clientId, reportId}`
@@ -195,9 +215,11 @@ These were coded defensively but could not be validated against the real API:
 
 ## Files
 
-- `routes/plextrac-webhook.js` — existing webhook; now also triggers `runQaReview` on the QA status
+- `routes/plextrac-webhook.js` — existing webhook; triggers `runQaReview` on the first-round QA status, `postSecondRoundQa` on the second-round status, and `postReleaseAnnouncement` on the released status
 - `lib/slack.js` — Slack Web API helper (parent message + threaded reply for first-round QA)
-- `pipeline/qa-review/index.js` — orchestrator
+- `pipeline/qa-review/index.js` — first-round orchestrator
+- `pipeline/qa-second-round.js` — second-round QA announcement to #pt-second-round-qa (pings reviewers, credits the first-QA actor); `buildSecondRoundMessage` is pure
+- `pipeline/qa-released.js` — report-released announcement (pings release reviewers, credits the releasing actor); `buildReleaseMessage` is pure
 - `pipeline/qa-review/checks.js` — per-segment check runner
 - `pipeline/qa-review/report-fields.js` — shape-tolerant field locate/read/write (tags reduced-review sections)
 - `config/excluded-sections.js` — exec-summary sections that get client-name-only review (Methodology, Issue Matrix, Limitations, …)

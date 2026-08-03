@@ -89,8 +89,8 @@ The leaderboard then shows, per consultant, total findings and the **average
 findings per report**:
 
 ```
-🥇 Alice — *8* QAs · 64 findings (avg 8/report)
-🥈 Bob   — *8* QAs · 12 findings (avg 1.5/report)
+1. Alice — *8* QAs · 64 findings (avg 8/report)
+2. Bob   — *8* QAs · 12 findings (avg 1.5/report)
 ```
 
 Same QA count, but Bob is clearly QA'ing much shorter reports. Reports whose

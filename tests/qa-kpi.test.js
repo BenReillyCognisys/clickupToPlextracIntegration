@@ -29,19 +29,20 @@ test('empty leaderboard shows the no-activity line', () => {
   ok(renderKpis(null).includes('No QA activity recorded in this period'));
 });
 
-test('ranks consultants with medals and pluralises QA', () => {
+test('numbers consultants and pluralises QA', () => {
   const out = renderKpis([
     { cuid: 'a', name: 'Alice', count: 3 },
     { cuid: 'b', name: 'Bob', count: 1 },
   ]);
-  ok(out.includes('🥇 Alice — *3* QAs'));
-  ok(out.includes('🥈 Bob — *1* QA'));  // singular
+  ok(out.includes('1. Alice — *3* QAs'));
+  ok(out.includes('2. Bob — *1* QA'));  // singular
 });
 
-test('numbers ranks beyond the top three', () => {
+test('lists every consultant with plain 1..N numbering', () => {
   const entries = ['A', 'B', 'C', 'D'].map((n, i) => ({ cuid: n, name: n, count: 4 - i }));
   const out = renderKpis(entries);
-  ok(out.includes('🥉 C — *2* QAs'));
+  ok(out.includes('1. A — *4* QAs'));
+  ok(out.includes('3. C — *2* QAs'));
   ok(out.includes('4. D — *1* QA'));
 });
 
@@ -58,8 +59,8 @@ test('shows findings total and average per report', () => {
     { cuid: 'a', name: 'Alice', count: 5, totalFindings: 42, reportsWithFindings: 5 },
     { cuid: 'b', name: 'Bob', count: 5, totalFindings: 10, reportsWithFindings: 5 },
   ]);
-  ok(out.includes('🥇 Alice — *5* QAs · 42 findings (avg 8.4/report)'));
-  ok(out.includes('🥈 Bob — *5* QAs · 10 findings (avg 2/report)')); // whole avg drops .0
+  ok(out.includes('1. Alice — *5* QAs · 42 findings (avg 8.4/report)'));
+  ok(out.includes('2. Bob — *5* QAs · 10 findings (avg 2/report)')); // whole avg drops .0
   ok(out.includes('Total: 10 QAs (52 findings) across 2 consultants'));
 });
 
@@ -70,7 +71,7 @@ test('singular finding and clean whole-number average', () => {
 
 test('omits findings suffix when no report had a known count', () => {
   const out = renderKpis([{ cuid: 'a', name: 'Alice', count: 3, totalFindings: 0, reportsWithFindings: 0 }]);
-  ok(out.includes('🥇 Alice — *3* QAs\n'));  // no " · ... findings" appended
+  ok(out.includes('1. Alice — *3* QAs\n'));  // no " · ... findings" appended
   ok(!out.includes('findings (avg'));
 });
 
