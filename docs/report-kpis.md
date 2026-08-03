@@ -168,7 +168,8 @@ See `.env.example` → "QA KPIs (/report-kpis)":
 - `PLEXTRAC_KPI_EXCLUDED_STATUSES` — statuses that earn no credit (default
   `Ready For Review`).
 - `PLEXTRAC_USERS_PATH` — tenant users endpoint (default
-  `/api/v1/tenant/{tenantId}/users`).
+  `/api/v1/tenant/{tenantId}/user/list`; requires the "View Users" RBAC
+  permission on the service account).
 - `PLEXTRAC_USERS_CACHE_MS` — user-list cache TTL (default 600000).
 
 ## ⚠️ Confirm against the live Plextrac instance

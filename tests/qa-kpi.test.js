@@ -271,6 +271,26 @@ test('unwraps a data-wrapped object', () => {
   eq(u.name, 'Wrapped User');
 });
 
+// The live v1 `user/list` shape: user nested under `data`, `name` an object with
+// stray/doubled spaces. Must build "Adam Dickinson", not "[object Object]".
+test('builds name from an object name {first,last} in the v1 user/list row', () => {
+  const u = normaliseUser({
+    id: 'a.dickinson@x.ac.uk',
+    doc_id: [0],
+    data: {
+      cuid: 'cmlqgfun703e40gp31ff486pn',
+      email: 'a.dickinson@x.ac.uk',
+      name: { first: 'Adam ', last: 'Dickinson' },
+      first: 'Adam ', last: 'Dickinson', fullName: 'Adam  Dickinson',
+      user_id: 669852625,
+    },
+  });
+  eq(u.cuid, 'cmlqgfun703e40gp31ff486pn');
+  eq(u.id, 669852625);
+  eq(u.name, 'Adam Dickinson');
+  eq(u.email, 'a.dickinson@x.ac.uk');
+});
+
 test('rows without a cuid are dropped', () => {
   eq(normaliseUser({ id: 1, name: 'No Cuid' }), null);
   eq(normaliseUser(null), null);
