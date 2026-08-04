@@ -1,17 +1,20 @@
-// Slack slash-command endpoint backing /reportqueue, /reportqueueall and /report-kpis.
+// Slack slash-command endpoint backing /reportqueue, /reportqueueall, /report-kpis
+// and /qa-logs.
 //
-// All three share one Request URL (POST /slack/commands) and are told apart by the
+// All share one Request URL (POST /slack/commands) and are told apart by the
 // `command` field:
 //   • /reportqueue    → ephemeral reply with the current QA queue (invoking user only)
 //   • /reportqueueall → posts the QA queue to the whole channel, PMs only
 //     (SLACK_PM_USER_IDS allowlist); non-PMs get an ephemeral "not authorised".
 //   • /report-kpis    → ephemeral leaderboard of QAs performed per consultant;
 //     PM-only (same SLACK_PM_USER_IDS allowlist as /reportqueueall).
+//   • /qa-logs @user  → ephemeral list of a consultant's most recent QAs (date/time,
+//     report title, client and findings count); PM-only (same allowlist).
 //
 // The queue commands render the QA queue (reports in first- and second-round QA,
 // maintained by the Plextrac webhook — see routes/plextrac-webhook.js). /report-kpis
-// aggregates the QA KPI store and resolves each consultant via the Plextrac users
-// API, which can be slow, so it acks within Slack's 3-second window and delivers the
+// and /qa-logs read the QA KPI store and resolve consultants via the Plextrac users
+// API, which can be slow, so they ack within Slack's 3-second window and deliver the
 // result over the command's response_url.
 //
 // Requests are verified with the Slack signing secret (SLACK_SIGNING_SECRET) over the
@@ -25,6 +28,7 @@ const ptUsers = require('../lib/plextrac-users');
 const {
   buildKpiEntries, renderKpis, parseWindow,
   parseUserMention, buildUserPeriods, renderUserStats,
+  buildUserLogs, renderUserLogs, DEFAULT_LOG_LIMIT,
 } = require('../lib/qa-kpi');
 const log = require('../lib/logger');
 
@@ -38,6 +42,14 @@ const KPI_USAGE =
   '• `/report-kpis q2 2025` — that quarter of a specific year\n' +
   '• `/report-kpis @user` — that person\'s stats for the last 30 & 90 days\n' +
   '• `/report-kpis help` — show this help';
+
+// Shown when /qa-logs is given no user (or an argument it doesn't understand).
+const QA_LOGS_USAGE =
+  ':information_source: *`/qa-logs` usage*\n' +
+  `• \`/qa-logs @user\` — that consultant's last ${DEFAULT_LOG_LIMIT} QAs ` +
+  '(date/time, report title, client & findings)\n' +
+  '• `/qa-logs @user 20` — limit to their last N QAs (1–100)\n' +
+  '• `/qa-logs help` — show this help';
 
 // Escapes the three characters that are special in Slack mrkdwn.
 function slackEscape(s) {
@@ -175,6 +187,52 @@ async function deliverUserKpis(responseUrl, slackUserId) {
   }
 }
 
+// Resolves an @-mentioned Slack user to their most recent QAs and delivers them over
+// the slash command's response_url. Same resolution chain as deliverUserKpis (Slack
+// id → email → Plextrac user → cuid), then lists that consultant's last `limit` QAs.
+async function deliverUserLogs(responseUrl, slackUserId, limit) {
+  if (!responseUrl) return;
+  // Transient note over response_url so the result below can replace_original it.
+  try {
+    await slack.postToResponseUrl(responseUrl, {
+      response_type: 'ephemeral',
+      text: `:page_facing_up: Fetching <@${slackUserId}>'s recent QA log…`,
+    });
+  } catch (err) {
+    log.error('Failed to post QA log ack to Slack response_url', { reason: err.message });
+  }
+  let text;
+  try {
+    const slackUser = await slack.lookupUserById(slackUserId);
+    if (!slackUser || !slackUser.email) {
+      text = `:warning: Couldn't read an email for <@${slackUserId}> — the bot needs the ` +
+        '`users:read.email` scope and the user must have a visible email address.';
+    } else {
+      const ptUser = await ptUsers.findByEmail(slackUser.email);
+      if (!ptUser) {
+        text = `:warning: No Plextrac user matches <@${slackUserId}> (\`${slackEscape(slackUser.email)}\`). ` +
+          'They may have no Plextrac account, or it uses a different email.';
+      } else {
+        const logs = await buildUserLogs(ptUser.cuid, limit);
+        const name = slackUser.name || ptUser.name || slackUser.email;
+        text = renderUserLogs(name, logs);
+      }
+    }
+  } catch (err) {
+    log.error('Failed to build QA log for user', { reason: err.message, slack_user: slackUserId });
+    text = 'Sorry — could not look up that user right now. Please try again shortly.';
+  }
+  try {
+    await slack.postToResponseUrl(responseUrl, {
+      response_type: 'ephemeral',
+      replace_original: true,
+      text,
+    });
+  } catch (err) {
+    log.error('Failed to post QA log to Slack response_url', { reason: err.message });
+  }
+}
+
 async function handler(req, res) {
   const signingSecret = process.env.SLACK_SIGNING_SECRET;
   if (!signingSecret) {
@@ -245,6 +303,48 @@ async function handler(req, res) {
     deliverKpis(String(params.response_url || ''), window).catch(err =>
       log.error('QA KPIs command failed', { reason: err.message }));
     return;
+  }
+
+  // /qa-logs @user [N] — that consultant's most recent QAs. Reading + resolving via
+  // the Plextrac users API can exceed Slack's 3-second window, so (like /report-kpis
+  // @user) ack immediately and deliver the result over response_url.
+  if (command === '/qa-logs') {
+    // Restricted to the same PM allowlist as /report-kpis / /reportqueueall.
+    if (!pmUserIds().includes(userId)) {
+      log.info('Rejected /qa-logs — user not a PM', { user_id: userId });
+      return res.json({
+        response_type: 'ephemeral',
+        text: ':lock: `/qa-logs` is restricted to PMs.',
+      });
+    }
+
+    const arg = String(params.text || '').trim();
+    if (/^(help|--help|-h|-\?|\/\?|\?)$/i.test(arg)) {
+      return res.json({ response_type: 'ephemeral', text: QA_LOGS_USAGE });
+    }
+
+    const mentionId = parseUserMention(arg);
+    if (mentionId) {
+      // Optional trailing count, e.g. "@user 20" — the store clamps it to 1..100.
+      const numMatch = arg.replace(/<@[^>]+>/, '').match(/\b(\d{1,3})\b/);
+      const limit = numMatch ? Number(numMatch[1]) : DEFAULT_LOG_LIMIT;
+      // Ack with an empty 200; note + result are delivered over response_url so the
+      // result can replace the note.
+      res.status(200).end();
+      deliverUserLogs(String(params.response_url || ''), mentionId, limit).catch(err =>
+        log.error('QA log command failed', { reason: err.message }));
+      return;
+    }
+    // A bare "@name" means Slack didn't escape the mention — resolution is impossible.
+    if (/(^|\s)@/.test(arg)) {
+      return res.json({
+        response_type: 'ephemeral',
+        text: ':warning: To look up a person, enable *Escape channels, users, and links sent to your app* on the ' +
+          '`/qa-logs` command (Slack app → Slash Commands), then `/qa-logs @Name` will resolve them.',
+      });
+    }
+    // No user given — show usage.
+    return res.json({ response_type: 'ephemeral', text: QA_LOGS_USAGE });
   }
 
   // Queue commands (/reportqueue, /reportqueueall) below.

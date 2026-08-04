@@ -68,6 +68,34 @@ The chosen window is shown in the leaderboard header.
 built-in default list). A non-PM gets an ephemeral `:lock:` message and no data. The
 check runs before any work, so unauthorised users never trigger a Plextrac lookup.
 
+## Per-report log (`/qa-logs @user`)
+
+Where `/report-kpis @user` gives a consultant's **aggregate** stats, `/qa-logs @user`
+lists their **individual** recent QAs — one line per report, newest first:
+
+```
+/qa-logs @user        the consultant's last 30 QAs   ── PM-only command
+/qa-logs @user 20     limit to their last N QAs (1–100)
+/qa-logs help         show usage
+```
+
+```
+*QA logs — Ben Reilly* — 2 most recent
+
+1. 4 Aug, 15:32 - Web App Pentest - Acme Corp - 12 findings
+2. 3 Aug, 11:04 - API Review - Globex - 1 finding
+```
+
+Each entry shows **when** the QA was performed (`counted_at`, formatted in UK local
+time), the report **title** and **client**, and the report's **findings count** at QA
+time. A report whose findings count wasn't recorded reads `findings unknown` (never a
+misleading `0 findings`). It draws from the same `qa_kpi_events` store as the
+leaderboard — so, like the KPIs, it only covers QAs recorded **from deployment
+onward**, and it uses the identical **Slack id → email → Plextrac user → cuid**
+resolution (and so needs the same "Escape…" option and `users:read` /
+`users:read.email` scopes). It's restricted to the **same PM allowlist** as the other
+commands.
+
 ## How a QA is attributed
 
 Every webhook payload carries an **`actorCuid`** — the user who triggered the
@@ -156,6 +184,8 @@ In the same Slack app that owns `/reportqueue`:
    - Short description: "QAs performed per consultant"
    - **Tick "Escape channels, users, and links sent to your app"** — required for
      the `/report-kpis @user` lookup (so mentions arrive as `<@U…>`, not `@Name`).
+   - Repeat for **`/qa-logs`** — same Request URL, short description "Recent QAs by a
+     consultant", and the **same "Escape…" tick** (it also takes an `@user`).
 2. **OAuth & Permissions → Bot Token Scopes** — add `users:read` and
    `users:read.email` (needed to resolve an `@user` mention to their email). The
    leaderboard commands themselves need no extra scopes.
@@ -188,13 +218,13 @@ have a usable `cuid`, adjust `PLEXTRAC_USERS_PATH` and/or `normaliseUser()` in
 ## Files
 
 - `routes/plextrac-webhook.js` — records the actor + findings count per QA, and report-submission lateness on "Ready For Review"
-- `lib/qa-kpi-store.js` — MongoDB store; unique `{report_id, actor_cuid}` (dedup); `aggregateByActor` / `statsForActor`
+- `lib/qa-kpi-store.js` — MongoDB store; unique `{report_id, actor_cuid}` (dedup); `aggregateByActor` / `statsForActor` / `recentByActor` (the /qa-logs feed)
 - `lib/qa-submission-store.js` — MongoDB store of first submissions + lateness; `lateStatsForActor`
 - `lib/report-lateness.js` — pure DST-safe lateness math (next-working-day 09:00 start)
 - `lib/plextrac-users.js` — enumerate users, cuid → name/email and `findByEmail` (cached)
 - `lib/plextrac-api.js` — added `listTenantUsers()`
-- `lib/qa-kpi.js` — aggregate, `parseWindow`, `renderKpis`, `parseUserMention` / `buildUserPeriods` / `renderUserStats` (pure)
-- `routes/slack-command.js` — `/report-kpis` handler: leaderboard, `@user` lookup, ack + `response_url` delivery
+- `lib/qa-kpi.js` — aggregate, `parseWindow`, `renderKpis`, `parseUserMention` / `buildUserPeriods` / `renderUserStats`, `buildUserLogs` / `renderUserLogs` (pure)
+- `routes/slack-command.js` — `/report-kpis` and `/qa-logs` handlers: leaderboard, `@user` lookup/log, ack + `response_url` delivery
 - `lib/slack.js` — added `postToResponseUrl` and `lookupUserById`
 - `scripts/inspect-users.js` — diagnostic for the users endpoint/shape
 - `tests/qa-kpi.test.js` — unit tests for the deterministic pieces

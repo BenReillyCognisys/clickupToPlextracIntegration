@@ -1,6 +1,7 @@
 const assert = require('assert');
 const {
   renderKpis, parseWindow, slackEscape, parseUserMention, renderUserStats,
+  renderUserLogs,
 } = require('../lib/qa-kpi');
 const { normaliseUser, rowsOf, displayName } = require('../lib/plextrac-users');
 
@@ -243,6 +244,59 @@ test('escapes special characters in the display name', () => {
     },
   ]);
   ok(out.includes('A &amp; B &lt;Ltd&gt;'));
+});
+
+// ── renderUserLogs ────────────────────────────────────────────────────────────
+console.log('\nrenderUserLogs:');
+
+// A fixed instant so the formatted date/time is deterministic. 14:32 UTC in August
+// is 15:32 UK (BST) — the renderer formats in Europe/London.
+const LOG_AT = new Date(Date.UTC(2026, 7, 4, 14, 32, 0)); // 2026-08-04 14:32 UTC
+
+test('empty log shows the no-activity line', () => {
+  ok(renderUserLogs('Ben Reilly', []).includes('No QA activity recorded for this consultant'));
+  ok(renderUserLogs('Ben Reilly', null).includes('No QA activity recorded for this consultant'));
+});
+
+test('renders each entry as a single "time - title - client - findings" line', () => {
+  const out = renderUserLogs('Ben Reilly', [
+    { reportId: 2, reportName: 'Web App Pentest', clientName: 'Acme Corp', findingsCount: 12, countedAt: LOG_AT },
+    { reportId: 3, reportName: 'API Review', clientName: 'Globex', findingsCount: 1, countedAt: LOG_AT },
+  ]);
+  ok(out.includes('*QA logs — Ben Reilly* — 2 most recent'));
+  ok(out.includes('1. 4 Aug, 15:32 - Web App Pentest - Acme Corp - 12 findings')); // UK local (BST), plural
+  ok(out.includes('2. 4 Aug, 15:32 - API Review - Globex - 1 finding')); // singular
+});
+
+test('unknown findings count reads "findings unknown", not "0 findings"', () => {
+  const out = renderUserLogs('Ben', [
+    { reportId: 9, reportName: 'R', clientName: 'C', findingsCount: null, countedAt: LOG_AT },
+  ]);
+  ok(out.includes('- findings unknown'));
+  ok(!out.includes('0 findings'));
+});
+
+test('a genuine zero-finding report shows "0 findings"', () => {
+  const out = renderUserLogs('Ben', [
+    { reportId: 9, reportName: 'R', clientName: 'C', findingsCount: 0, countedAt: LOG_AT },
+  ]);
+  ok(out.includes('- 0 findings'));
+});
+
+test('missing timestamp reads "unknown time"; missing client is omitted from the line', () => {
+  const out = renderUserLogs('Ben', [
+    { reportId: 42, reportName: null, clientName: null, findingsCount: 5, countedAt: null },
+  ]);
+  // Falls back to the report id, no client segment: "time - title - findings".
+  ok(out.includes('1. unknown time - Report 42 - 5 findings'));
+});
+
+test('escapes mrkdwn-special characters in the name, title and client', () => {
+  const out = renderUserLogs('A & B <Ltd>', [
+    { reportId: 1, reportName: 'X & Y', clientName: '<Z>', findingsCount: 1, countedAt: LOG_AT },
+  ]);
+  ok(out.includes('A &amp; B &lt;Ltd&gt;'));
+  ok(out.includes('X &amp; Y - &lt;Z&gt;'));
 });
 
 // ── plextrac-users normalisation ────────────────────────────────────────────
