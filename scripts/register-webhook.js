@@ -1,6 +1,11 @@
 /**
- * One-time setup: registers a ClickUp webhook for taskCreated events
- * scoped to the space defined by CLICKUP_SPACE_ID.
+ * One-time setup: registers a ClickUp webhook scoped to the space defined by
+ * CLICKUP_SPACE_ID, for the events the integration acts on:
+ *   • taskCreated       — create the Plextrac client + report
+ *   • taskUpdated        — sync a task rename into Plextrac (rename/move the report,
+ *                          or create it if the task was still the "Test Task"
+ *                          placeholder at creation)
+ *   • taskStatusUpdated  — cross a report off the weekly reports-due message
  *
  * Run once: node scripts/register-webhook.js
  * Then copy the printed secret into your .env as CLICKUP_WEBHOOK_SECRET.
@@ -21,7 +26,7 @@ if (!CLICKUP_API_TOKEN || !CLICKUP_TEAM_ID || !CLICKUP_SPACE_ID || !WEBHOOK_URL)
       `https://api.clickup.com/api/v2/team/${CLICKUP_TEAM_ID}/webhook`,
       {
         endpoint: `${WEBHOOK_URL}/webhook/clickup`,
-        events: ['taskCreated'],
+        events: ['taskCreated', 'taskUpdated', 'taskStatusUpdated'],
         space_id: Number(CLICKUP_SPACE_ID)
       },
       { headers: { Authorization: CLICKUP_API_TOKEN, 'Content-Type': 'application/json' } }

@@ -39,7 +39,7 @@ const target  = `${WEBHOOK_URL}/webhook/clickup`;
     `https://api.clickup.com/api/v2/team/${CLICKUP_TEAM_ID}/webhook`,
     {
       endpoint: target,
-      events: ['taskCreated'],
+      events: ['taskCreated', 'taskUpdated', 'taskStatusUpdated'],
       space_id: Number(CLICKUP_SPACE_ID),
     },
     { headers }

@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const axios = require('axios');
 const { runPipeline } = require('../pipeline');
+const { handleTaskRename } = require('../pipeline/task-rename');
 const { crossOffReport } = require('../pipeline/reports-due');
 const log = require('../lib/logger');
 
@@ -10,6 +11,13 @@ const log = require('../lib/logger');
 function newStatusFromPayload(payload) {
   const item = (payload.history_items || []).find((h) => h.field === 'status');
   return item?.after?.status ?? null;
+}
+
+// True when a taskUpdated payload includes a name change (ClickUp records it as a
+// history item with field 'name'). A taskUpdated fires for many field edits; we
+// only act on renames.
+function isNameChange(payload) {
+  return (payload.history_items || []).some((h) => h.field === 'name');
 }
 
 async function fetchTaskDetails(taskId) {
@@ -24,6 +32,34 @@ async function fetchTaskDetails(taskId) {
     }
     throw err;
   }
+}
+
+// Fetches a task and applies the monitored-space / not-a-subtask filters shared by
+// the taskCreated and taskUpdated paths. Returns the task, or null when it can't be
+// fetched or shouldn't be processed (the reason is logged).
+async function loadMonitoredTask(taskId) {
+  let task;
+  try {
+    task = await fetchTaskDetails(taskId);
+  } catch (err) {
+    log.error('Failed to fetch ClickUp task details', { reason: err.message, task_id: taskId });
+    return null;
+  }
+
+  const allowedSpaceId = process.env.CLICKUP_SPACE_ID;
+  if (allowedSpaceId && String(task.space?.id) !== String(allowedSpaceId)) {
+    log.info('Task ignored — outside monitored space', {
+      task: task.name, space: task.space?.name, space_id: task.space?.id,
+    });
+    return null;
+  }
+
+  if (task.parent) {
+    log.info('Task ignored — subtask skipped', { task: task.name, parent: task.parent });
+    return null;
+  }
+
+  return task;
 }
 
 async function handler(req, res) {
@@ -71,33 +107,24 @@ async function handler(req, res) {
     return;
   }
 
+  // A rename (taskUpdated with a name change) syncs the new name into Plextrac:
+  // for a project whose report doesn't exist yet (the task was still the template
+  // "Test Task" placeholder at taskCreated time) it creates the report now; for an
+  // existing project it renames/moves the report to match. Other field edits on a
+  // taskUpdated are ignored here.
+  if (payload.event === 'taskUpdated') {
+    if (!isNameChange(payload)) return;
+    const task = await loadMonitoredTask(payload.task_id);
+    if (!task) return;
+    log.info('ClickUp task renamed', { task: task.name, task_id: task.id });
+    await handleTaskRename(task);
+    return;
+  }
+
   if (payload.event !== 'taskCreated') return;
 
-  let task;
-  try {
-    task = await fetchTaskDetails(payload.task_id);
-  } catch (err) {
-    log.error('Failed to fetch ClickUp task details', {
-      reason: err.message,
-      task_id: payload.task_id,
-    });
-    return;
-  }
-
-  const allowedSpaceId = process.env.CLICKUP_SPACE_ID;
-  if (allowedSpaceId && String(task.space?.id) !== String(allowedSpaceId)) {
-    log.info('Task ignored — outside monitored space', {
-      task: task.name,
-      space: task.space?.name,
-      space_id: task.space?.id,
-    });
-    return;
-  }
-
-  if (task.parent) {
-    log.info('Task ignored — subtask skipped', { task: task.name, parent: task.parent });
-    return;
-  }
+  const task = await loadMonitoredTask(payload.task_id);
+  if (!task) return;
 
   log.info('ClickUp task received', { task: task.name, task_id: task.id });
 

@@ -3,6 +3,7 @@ const { findOrCreateClient } = require('./plextrac-client');
 const { createReport } = require('./plextrac-report');
 const log = require('../lib/logger');
 const BLACKLIST = require('../config/blacklist');
+const { isPlaceholderTaskName } = require('../config/placeholder-task-names');
 
 function findBlacklistedWord(text) {
   const lower = text.toLowerCase();
@@ -10,6 +11,19 @@ function findBlacklistedWord(text) {
 }
 
 async function runPipeline(task) {
+  // ── Phase 0: Skip template placeholders ──────────────────────────────────
+  // The ClickUp project template creates each task as a placeholder ("Test Task")
+  // which ClickBot then renames to the real "Client | Testing Type". Creating
+  // anything now would post a spurious Slack notice for a name that's about to
+  // change, so wait for the rename (handled by pipeline/task-rename.js) instead.
+  if (isPlaceholderTaskName(task.name)) {
+    log.info('Task still has its template placeholder name — waiting for rename before creating a report', {
+      task: task.name,
+      task_id: task.id,
+    });
+    return;
+  }
+
   // ── Phase 1: Parse task name ─────────────────────────────────────────────
   const { client_name, testing_type } = parseTaskName(task.name);
 
