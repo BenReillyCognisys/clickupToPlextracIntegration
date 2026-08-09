@@ -10,21 +10,28 @@
 //   • testing type changed (e.g. Black Box → Grey Box) — the Plextrac report is
 //     renamed to "<Testing Type> | Month Year" (name only; the existing template
 //     and its content are left untouched).
-//   • client name changed — the report is moved under the Plextrac client matching
-//     the new name (found or created), leaving the old client as-is.
+//   • client name changed — the Plextrac client is renamed in place, but ONLY when
+//     (a) this report is the only one under it and (b) no other client already has
+//     the new name. Plextrac has no move-report API, so renaming a shared client
+//     would rename it for every report it holds, and renaming onto a name that
+//     already exists would create a duplicate client (e.g. fixing a typo when the
+//     correctly-spelled client already exists). Either case is left alone with a
+//     Slack notice for manual handling instead.
 //
 // Every Plextrac call is best-effort: a failure is logged (and, where a human needs
 // to act, posted to Slack), never thrown, so one bad sync can't wedge the webhook.
 
 const { parseTaskName } = require('./parse-task');
-const { findOrCreateClient } = require('./plextrac-client');
 const { buildReportName } = require('./plextrac-report');
 const { runPipeline } = require('./index');
 const api = require('../lib/plextrac-api');
+const lookup = require('../lib/plextrac-lookup');
 const store = require('../lib/task-store');
 const log = require('../lib/logger');
 
 const PLEXTRAC_BASE = `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}`;
+
+const normalise = (s) => String(s || '').trim().toLowerCase();
 
 // Renames the Plextrac report to reflect the current testing type / start date.
 // Returns true if the report was renamed, false if it was already correct or the
@@ -63,46 +70,107 @@ async function syncReportName(clientId, reportId, testingType, startDateMs, task
   return true;
 }
 
-// Ensures the report lives under the Plextrac client matching the (possibly new)
-// client name. Resolves the target client (find or create); if it differs from the
-// report's current client, moves the report under it. Returns
-// { moved, clientId } — clientId is the client the report is under afterwards
-// (unchanged from `currentClientId` when nothing moved or the move failed).
-async function repointClient(currentClientId, reportId, newClientName, taskName) {
-  let target;
+// Counts the reports under a Plextrac client. Returns the count, or null if it
+// can't be determined (callers treat null conservatively — as "possibly shared").
+async function countClientReports(clientId) {
   try {
-    target = await findOrCreateClient(newClientName);
+    const reports = await api.listClientReports(clientId);
+    if (Array.isArray(reports)) return reports.length;
+    if (Array.isArray(reports?.data)) return reports.data.length;
+    return null;
   } catch (err) {
-    log.error('Task rename — failed to resolve target Plextrac client', {
-      reason: err.message, client: newClientName, report_id: reportId,
+    log.error('Task rename — failed to list client reports for sole-report check', {
+      reason: err.message, client_id: clientId,
     });
-    return { moved: false, clientId: currentClientId };
+    return null;
+  }
+}
+
+// Reflects a client-name change into Plextrac. Plextrac has no move-report API, so
+// the report can't be re-parented; instead we rename the client in place — but only
+// when this report is the only one under it, so a shared client is never renamed out
+// from under its other reports. Shared / unverifiable cases post a Slack notice for
+// manual handling. Returns true if the Plextrac client was renamed.
+async function syncClientName(mapping, newClientName, taskName) {
+  const oldClientName = parseTaskName(mapping.task_name || '').client_name;
+  if (normalise(oldClientName) === normalise(newClientName)) {
+    return false; // client portion unchanged — only the type (or nothing) changed
   }
 
-  if (String(target.clientId) === String(currentClientId)) {
-    return { moved: false, clientId: currentClientId }; // same client — nothing to move
-  }
+  const clientId = mapping.plextrac_client_id;
 
+  // Don't rename onto a name another client already uses — that would just create a
+  // duplicate (and we can't move this report onto the existing one: no move API).
+  // Common case: a typo fix where the correctly-spelled client already exists.
+  let clientsWithNewName;
   try {
-    await api.moveReport(currentClientId, reportId, target.clientId);
+    clientsWithNewName = await lookup.findClientIdsByName(newClientName);
   } catch (err) {
-    // Leave the mapping pointing at the old client so the reverse (Plextrac →
-    // ClickUp) webhook keeps working, and ask a human to move it.
-    log.error('Task rename — failed to move report to new Plextrac client (manual move needed)', {
-      reason: err.message, report_id: reportId, from_client: currentClientId, to_client: target.clientId,
+    log.error('Task rename — failed to check for an existing client with the new name', {
+      reason: err.message, new_client: newClientName,
+    });
+    clientsWithNewName = null;
+  }
+  const otherWithNewName = (clientsWithNewName || []).filter(id => String(id) !== String(clientId));
+  if (clientsWithNewName == null || otherWithNewName.length) {
+    const reason = clientsWithNewName == null
+      ? "couldn't verify whether a client with that name already exists"
+      : `a Plextrac client named "${newClientName}" already exists (id ${otherWithNewName.join(', ')})`;
+    log.warn('Task rename — skipping client rename to avoid a duplicate client', {
+      client_id: clientId, old_client: oldClientName, new_client: newClientName,
+      existing_ids: otherWithNewName, verified: clientsWithNewName != null,
     });
     log.notify(
-      `ClickUp client renamed to "${newClientName}" but the Plextrac report (id ${reportId}) ` +
-      `could not be moved automatically — please move it to the "${newClientName}" client manually.`
+      `ClickUp client renamed from "${oldClientName}" to "${newClientName}" for "${taskName}", but ` +
+      `${reason} — not renaming automatically to avoid a duplicate. Please move the report to the ` +
+      `correct client in Plextrac and tidy up the old one manually.`
     );
-    return { moved: false, clientId: currentClientId };
+    return false;
   }
 
-  log.info('Task rename — report moved to new Plextrac client', {
-    report_id: reportId, from_client: currentClientId, to_client: target.clientId, client: newClientName,
+  const reportCount = await countClientReports(clientId);
+
+  if (reportCount == null) {
+    log.warn('Task rename — could not verify the client is unshared; skipping rename to stay safe', {
+      client_id: clientId, old_client: oldClientName, new_client: newClientName,
+    });
+    log.notify(
+      `ClickUp client renamed to "${newClientName}" for "${taskName}", but the Plextrac client ` +
+      `(id ${clientId}) rename was skipped — couldn't confirm it isn't shared. Please check it manually.`
+    );
+    return false;
+  }
+
+  if (reportCount > 1) {
+    log.info('Task rename — client name changed but client is shared; skipping auto-rename', {
+      client_id: clientId, reports: reportCount, old_client: oldClientName, new_client: newClientName,
+    });
+    log.notify(
+      `ClickUp client renamed from "${oldClientName}" to "${newClientName}" for "${taskName}", but the ` +
+      `Plextrac client (id ${clientId}) has ${reportCount} reports under it — not renaming automatically. ` +
+      `Please update it in Plextrac if appropriate.`
+    );
+    return false;
+  }
+
+  try {
+    await api.updateClient(clientId, { name: newClientName });
+  } catch (err) {
+    log.error('Task rename — failed to rename Plextrac client', {
+      reason: err.message, client_id: clientId, new_client: newClientName,
+    });
+    log.notify(
+      `ClickUp client renamed to "${newClientName}" for "${taskName}" but the Plextrac client ` +
+      `(id ${clientId}) rename failed — please update it manually.`
+    );
+    return false;
+  }
+
+  log.info('Task rename — Plextrac client renamed', {
+    client_id: clientId, old_client: oldClientName, new_client: newClientName, task: taskName,
   });
-  log.notify(`ClickUp client renamed — report (id ${reportId}) moved to Plextrac client "${newClientName}".`);
-  return { moved: true, clientId: target.clientId };
+  log.notify(`ClickUp client rename synced — Plextrac client renamed from "${oldClientName}" to "${newClientName}".`);
+  return true;
 }
 
 // Entry point: handle a ClickUp task whose name has changed.
@@ -134,14 +202,12 @@ async function handleTaskRename(task) {
     return;
   }
 
-  // Re-point the client first so the report-name compare/rename below targets the
-  // correct client id after any move.
-  const repoint = await repointClient(
-    mapping.plextrac_client_id, mapping.plextrac_report_id, client_name, task.name
-  );
-  const clientId = repoint.clientId;
-
-  const renamed = await syncReportName(
+  // Reflect a client-name change (renames the Plextrac client in place when safe)
+  // and a testing-type change (renames the report). The report stays under the same
+  // client id throughout — Plextrac has no move-report API.
+  const clientId = mapping.plextrac_client_id;
+  const clientRenamed = await syncClientName(mapping, client_name, task.name);
+  const reportRenamed = await syncReportName(
     clientId, mapping.plextrac_report_id, testing_type, task.start_date, task.name
   );
 
@@ -149,7 +215,7 @@ async function handleTaskRename(task) {
   // step with what's now in Plextrac.
   try {
     await store.updateMappingDetails(mapping.plextrac_report_id, {
-      clientId, taskName: task.name, testingType: testing_type,
+      taskName: task.name, testingType: testing_type,
     });
   } catch (err) {
     log.error('Task rename — failed to persist updated mapping', {
@@ -157,7 +223,7 @@ async function handleTaskRename(task) {
     });
   }
 
-  if (!renamed && !repoint.moved) {
+  if (!clientRenamed && !reportRenamed) {
     log.info('Task rename — no Plextrac change required (name already in sync)', {
       task: task.name, report_id: mapping.plextrac_report_id,
     });
