@@ -7,8 +7,8 @@
  *
  *   POST /clickup/merged-auth-form  — comment a merged auth-form link onto every
  *                                     related ClickUp task (idempotent, see below).
- *   POST /clickup/extra-urls        — comment + Slack-alert a Free Black Box form
- *                                     that scoped more than one URL.
+ *   POST /clickup/extra-urls        — comment + alert SLACK_AUTH_FORM_CHANNEL for a
+ *                                     Free Black Box form that scoped more than one URL.
  *   POST /clickup/schedule-task     — write resolved start/due dates onto an
  *                                     existing ClickUp task.
  *
@@ -152,8 +152,8 @@ router.post('/extra-urls', async (req, res) => {
   // 2) Slack alert — always. Link the ClickUp task too when we have one.
   let slack = 'failed';
   try {
-    const channel = process.env.SLACK_SALES_CHANNEL;
-    if (!channel) throw new Error('SLACK_SALES_CHANNEL is not set');
+    const channel = process.env.SLACK_AUTH_FORM_CHANNEL;
+    if (!channel) throw new Error('SLACK_AUTH_FORM_CHANNEL is not set');
     const taskLink = clickupTaskId ? ` ClickUp task: ${clickupTaskUrl(clickupTaskId)}` : '';
     await postMessage(channel, `${summary}${taskLink}`);
     slack = 'sent';

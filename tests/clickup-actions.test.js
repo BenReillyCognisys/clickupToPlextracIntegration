@@ -4,7 +4,7 @@ const express = require('express');
 
 // The router's auth middleware reads this at request time.
 process.env.BREAK_SERVICES_API_KEY = 'test-key';
-process.env.SLACK_SALES_CHANNEL    = 'C0SALES';
+process.env.SLACK_AUTH_FORM_CHANNEL = 'C0AUTH';
 
 // ── Stub the outbound helpers BEFORE the router is required ────────────────────
 // routes/clickup-actions destructures these on import, so the fakes must be in
@@ -186,13 +186,13 @@ const KEY = { 'X-API-Key': 'test-key' };
   });
 
   await test('returns 502 when the only work (Slack) fails', async () => {
-    process.env.SLACK_SALES_CHANNEL = 'C0FAIL';
+    process.env.SLACK_AUTH_FORM_CHANNEL = 'C0FAIL';
     const r = await request('/clickup/extra-urls', {
       headers: KEY, body: { clientName: 'Acme', clickupTaskId: null, urls: ['https://a', 'https://b'] },
     });
     assert.strictEqual(r.status, 502);
     assert.deepStrictEqual({ ok: r.json.ok, clickup: r.json.clickup, slack: r.json.slack }, { ok: false, clickup: 'skipped', slack: 'failed' });
-    process.env.SLACK_SALES_CHANNEL = 'C0SALES';
+    process.env.SLACK_AUTH_FORM_CHANNEL = 'C0AUTH';
   });
 
   // ── schedule-task ─────────────────────────────────────────────────────────────
