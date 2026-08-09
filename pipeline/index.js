@@ -1,6 +1,7 @@
 const { parseTaskName } = require('./parse-task');
 const { findOrCreateClient } = require('./plextrac-client');
 const { createReport } = require('./plextrac-report');
+const { createAuthFormForTask } = require('./auth-form-create');
 const log = require('../lib/logger');
 const BLACKLIST = require('../config/blacklist');
 const { isPlaceholderTaskName } = require('../config/placeholder-task-names');
@@ -75,12 +76,25 @@ async function runPipeline(task) {
     return;
   }
 
+  // ── Phase 4: Generate the client authorisation form (SFE portal) ─────────
+  // For every testing type: ask the portal to create-or-return the individual auth
+  // form for this task and comment its link back onto the task. Best-effort — the
+  // portal is idempotent on the task id and any failure is logged without aborting
+  // (the report already exists). The SFE merges a client's multiple forms itself.
+  const authForm = await createAuthFormForTask(task, {
+    clientName: client_name,
+    testType: testing_type,
+    clientId,
+    reportId: reportName?.reportId ?? null,
+  });
+
   if (reportName) {
     const { name, reportId } = reportName;
     const base = `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}`;
     const url = `${base}/client/${clientId}/report/${reportId}`;
     const suffix = clientCreated ? 'Client was created.' : 'Client already exists.';
-    log.notify(`Report has been created for ${client_name} - <${url}|${name}>. ${suffix}`);
+    const authLine = authForm ? ` Auth form: <${authForm.formUrl}|link>.` : '';
+    log.notify(`Report has been created for ${client_name} - <${url}|${name}>. ${suffix}${authLine}`);
   }
 }
 
