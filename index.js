@@ -100,11 +100,13 @@ app.use('/availability', schedulingCors, require('./routes/availability'));
 app.use('/schedule', schedulingCors, require('./routes/schedule'));
 
 // SFE-portal → break.services action endpoints (X-API-Key: BREAK_SERVICES_API_KEY):
-//   POST /clickup/merged-auth-form — comment the merged auth-form link onto every
-//                                    related task (idempotent per merged-form token)
-//   POST /clickup/extra-urls       — comment + Slack-alert a Free Black Box form
-//                                    that scoped more than one URL
-//   POST /clickup/schedule-task    — write resolved start/due dates onto a task
+//   POST /clickup/merged-auth-form    — comment the merged auth-form link onto every
+//                                       related task (idempotent per merged-form token)
+//   POST /clickup/finalised-auth-form — prepend the signed form's Google Drive link to
+//                                       each related task's description
+//   POST /clickup/extra-urls          — comment + Slack-alert a Free Black Box form
+//                                       that scoped more than one URL
+//   POST /clickup/schedule-task       — write resolved start/due dates onto a task
 // These are server-to-server (not browser) calls, so they get no CORS. The key
 // check lives inside the router; apiLimiter throttles failed-auth attempts, matching
 // the /jobs/* endpoints.

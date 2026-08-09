@@ -5,12 +5,14 @@
  * intake. All three authenticate with the shared BREAK_SERVICES_API_KEY (usually
  * the same value as AVAILABILITY_API_KEY) via the X-API-Key header:
  *
- *   POST /clickup/merged-auth-form  — comment a merged auth-form link onto every
- *                                     related ClickUp task (idempotent, see below).
- *   POST /clickup/extra-urls        — comment + alert SLACK_AUTH_FORM_CHANNEL for a
- *                                     Free Black Box form that scoped more than one URL.
- *   POST /clickup/schedule-task     — write resolved start/due dates onto an
- *                                     existing ClickUp task.
+ *   POST /clickup/merged-auth-form   — comment a merged auth-form link onto every
+ *                                      related ClickUp task (idempotent, see below).
+ *   POST /clickup/finalised-auth-form — prepend the signed auth form's Google Drive
+ *                                      link to each related task's description.
+ *   POST /clickup/extra-urls         — comment + alert SLACK_AUTH_FORM_CHANNEL for a
+ *                                      Free Black Box form that scoped more than one URL.
+ *   POST /clickup/schedule-task      — write resolved start/due dates onto an
+ *                                      existing ClickUp task.
  *
  * Idempotent-comment strategy (endpoint 1): the portal re-sends the same merged
  * form every time a new task for that client arrives, so this endpoint is called
@@ -29,7 +31,10 @@ const {
   createTaskComment,
   updateComment,
   updateTaskSchedule,
+  getTaskDescription,
+  updateTaskDescription,
 } = require('../lib/clickup-api');
+const { prependFinalisedAuthForm } = require('../lib/auth-form-description');
 const { cache, getMembersMap, findUserInMap } = require('../lib/availability-cache');
 const { postMessage } = require('../lib/slack');
 const log = require('../lib/logger');
@@ -102,6 +107,42 @@ router.post('/merged-auth-form', async (req, res) => {
       }
     } catch (err) {
       log.error('Merged auth-form comment failed', { taskId, reason: err.message });
+      results.push({ taskId, action: 'failed', error: err.message });
+    }
+  }
+
+  const allFailed = results.every((r) => r.action === 'failed');
+  res.status(allFailed ? 502 : 200).json({ ok: !allFailed, results });
+});
+
+// ─── POST /clickup/finalised-auth-form ────────────────────────────────────────
+// The SFE has finalised the client's authorisation form and uploaded it to Google
+// Drive. Prepend a link to that Drive file at the top of each related ClickUp task's
+// description (keeping the original text below), so the consultant has the signed
+// form to hand. Accepts a single clickupTaskId or a clickupTaskIds array (a merged
+// form covers several tasks). Idempotent: a re-send replaces the block in place.
+router.post('/finalised-auth-form', async (req, res) => {
+  const { clientName, driveUrl, clickupTaskIds, clickupTaskId } = req.body || {};
+
+  const taskIds = Array.isArray(clickupTaskIds) && clickupTaskIds.length
+    ? clickupTaskIds
+    : (clickupTaskId ? [clickupTaskId] : []);
+
+  if (!driveUrl || taskIds.length === 0) {
+    return res.status(400).json({
+      error: 'driveUrl and at least one of clickupTaskId / clickupTaskIds are required',
+    });
+  }
+
+  const results = [];
+  for (const taskId of taskIds) {
+    try {
+      const existing = await getTaskDescription(taskId);
+      const updated = prependFinalisedAuthForm(existing, driveUrl, clientName);
+      await updateTaskDescription(taskId, updated);
+      results.push({ taskId, action: 'updated' });
+    } catch (err) {
+      log.error('Finalised auth-form description update failed', { taskId, reason: err.message });
       results.push({ taskId, action: 'failed', error: err.message });
     }
   }

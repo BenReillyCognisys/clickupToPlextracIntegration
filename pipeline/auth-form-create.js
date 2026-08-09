@@ -1,12 +1,11 @@
 // Phase 4 of the create pipeline: ask the secure portal (SFE) to generate the
-// client authorisation form for a ClickUp delivery task, then comment the returned
-// form link back onto the task so the PM/client can find it.
+// client authorisation form for a ClickUp delivery task, then store the returned
+// form link in the task's "authformlink" custom field so the PM/client can find it.
 //
 // The portal is idempotent on clickupTaskId (a taskCreated event and a later
 // rename both drive the create pipeline), so this can run more than once for the
-// same task and just gets the same form back. The comment is likewise made
-// idempotent with a stable [auth-form:<token>] marker — one comment per form,
-// refreshed in place — mirroring the marker strategy in routes/clickup-actions.js.
+// same task and just gets the same form back; re-setting the custom field to the
+// same value is harmless.
 //
 // Auth forms are generated for every testing type. When a client has several
 // ClickUp tasks the SFE merges their individual forms into one link separately
@@ -16,28 +15,44 @@
 // never blocks report creation. Returns { formUrl, created } on success, or null.
 
 const { createAuthForm } = require('../lib/secure-portal-api');
-const { listTaskComments, createTaskComment, updateComment } = require('../lib/clickup-api');
+const { setTaskCustomField } = require('../lib/clickup-api');
 const log = require('../lib/logger');
 
 const clickupTaskUrl = (taskId) => `https://app.clickup.com/t/${taskId}`;
 
-// Comments the auth-form link onto the task idempotently: a stable marker keyed on
-// the form token means a repeat run updates the existing comment instead of stacking
-// a new one. Best-effort — a comment failure never fails the step.
-async function commentAuthForm(taskId, clientName, testType, formUrl, formToken) {
-  const marker = `[auth-form:${formToken || formUrl}]`;
-  const commentText = `${marker} Authorisation form for ${clientName} (${testType}): ${formUrl}`;
+// Name of the ClickUp custom field the auth-form link is written to. Override with
+// CLICKUP_AUTH_FORM_FIELD_NAME if the field is named differently.
+const AUTH_FORM_FIELD_NAME = process.env.CLICKUP_AUTH_FORM_FIELD_NAME || 'authformlink';
+
+// Resolves a custom field id from the task's custom_fields by name (case-insensitive,
+// trimmed). The field appears on every task in its list even when unset, so this is
+// available at create time. Returns null if the field isn't on the task.
+function findCustomFieldId(task, name) {
+  const target = name.trim().toLowerCase();
+  const field = (task.custom_fields || []).find(
+    (f) => (f.name || '').trim().toLowerCase() === target
+  );
+  return field ? field.id : null;
+}
+
+// Writes the form URL into the task's authformlink custom field. Best-effort — a
+// missing field or API failure is logged, never thrown.
+async function setAuthFormLink(task, formUrl) {
+  const fieldId = findCustomFieldId(task, AUTH_FORM_FIELD_NAME);
+  if (!fieldId) {
+    log.warn('Auth form — custom field not found on task; cannot store link', {
+      field: AUTH_FORM_FIELD_NAME, task_id: task.id,
+    });
+    return;
+  }
   try {
-    const comments = await listTaskComments(taskId);
-    const existing = comments.find((c) => (c.comment_text || '').includes(marker));
-    if (existing) {
-      await updateComment(existing.id, commentText);
-    } else {
-      await createTaskComment(taskId, commentText);
-    }
+    await setTaskCustomField(task.id, fieldId, formUrl);
+    log.info('Auth form — link written to custom field', {
+      field: AUTH_FORM_FIELD_NAME, task_id: task.id,
+    });
   } catch (err) {
-    log.error('Auth form — failed to comment link onto ClickUp task', {
-      reason: err.message, task_id: taskId,
+    log.error('Auth form — failed to set custom field with link', {
+      reason: err.message, task_id: task.id, field: AUTH_FORM_FIELD_NAME,
     });
   }
 }
@@ -80,7 +95,7 @@ async function createAuthFormForTask(task, { clientName, testType, clientId, rep
     task: task.name, task_id: task.id, form_url: result.formUrl, created,
   });
 
-  await commentAuthForm(task.id, clientName, testType, result.formUrl, result.formToken);
+  await setAuthFormLink(task, result.formUrl);
 
   return { formUrl: result.formUrl, created };
 }
