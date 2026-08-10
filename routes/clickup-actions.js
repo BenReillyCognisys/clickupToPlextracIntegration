@@ -8,8 +8,8 @@
  *   POST /clickup/merged-auth-form   — comment a merged auth-form link onto every
  *                                      related ClickUp task (idempotent, see below).
  *   POST /clickup/finalised-auth-form — download the signed auth form from Google
- *                                      Drive and upload it to each related task's
- *                                      Attachments (the "Authorisation Forms" file).
+ *                                      Drive and store it on each related task's
+ *                                      "Authorisation Forms" File custom field.
  *   POST /clickup/extra-urls         — comment + alert SLACK_AUTH_FORM_CHANNEL for a
  *                                      Free Black Box form that scoped more than one URL.
  *   POST /clickup/schedule-task      — write resolved start/due dates onto an
@@ -33,7 +33,8 @@ const {
   createTaskComment,
   updateComment,
   updateTaskSchedule,
-  uploadTaskAttachment,
+  uploadCustomFieldAttachment,
+  setTaskCustomField,
   getTask,
 } = require('../lib/clickup-api');
 const { downloadDriveFile } = require('../lib/google-drive');
@@ -68,6 +69,22 @@ router.use(requireBreakServicesKey);
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const clickupTaskUrl = (taskId) => `https://app.clickup.com/t/${taskId}`;
+
+// Name of the File-type ClickUp custom field the finalised auth form is stored in.
+// Override with CLICKUP_AUTH_FORM_FILE_FIELD_NAME if it's named differently. (This is
+// the file field, distinct from the auth-form *link* field CLICKUP_AUTH_FORM_FIELD_NAME.)
+const AUTH_FORM_FILE_FIELD_NAME = process.env.CLICKUP_AUTH_FORM_FILE_FIELD_NAME || 'Authorisation Forms';
+
+// Resolves a custom field id from a task's custom_fields by name (case-insensitive,
+// trimmed). The field appears on every task in its list even when unset. Returns null
+// when the field isn't on the task.
+function findCustomFieldId(task, name) {
+  const target = name.trim().toLowerCase();
+  const field = (task.custom_fields || []).find(
+    (f) => (f.name || '').trim().toLowerCase() === target,
+  );
+  return field ? field.id : null;
+}
 
 // A Free Black Box lets the client (re)submit their auth form; identify it from the
 // test type so a repeat submission can be treated as a no-op for scheduling.
@@ -132,10 +149,10 @@ router.post('/merged-auth-form', async (req, res) => {
 
 // ─── POST /clickup/finalised-auth-form ────────────────────────────────────────
 // The SFE has finalised the client's authorisation form and uploaded it to Google
-// Drive. Download that file and upload it to each related task's Attachments (the
-// "Authorisation Forms" file), so the consultant has the signed form to hand.
-// Accepts a single clickupTaskId or a clickupTaskIds array (a merged form covers
-// several tasks). The file is fetched once and attached to every task.
+// Drive. Download that file and store it on each related task's "Authorisation Forms"
+// File custom field, so the consultant has the signed form to hand. Accepts a single
+// clickupTaskId or a clickupTaskIds array (a merged form covers several tasks). The
+// file is fetched once and uploaded to each task's field.
 router.post('/finalised-auth-form', async (req, res) => {
   const { clientName, driveUrl, clickupTaskIds, clickupTaskId } = req.body || {};
 
@@ -161,10 +178,25 @@ router.post('/finalised-auth-form', async (req, res) => {
 
   const filename = authFormFilename(file.filename, clientName);
 
+  const workspaceId = process.env.CLICKUP_TEAM_ID;
+  if (!workspaceId) {
+    log.error('Finalised auth-form cannot upload — CLICKUP_TEAM_ID is not set');
+    return res.status(500).json({ ok: false, error: 'CLICKUP_TEAM_ID is not set' });
+  }
+
+  // For each task: resolve the "Authorisation Forms" File custom field, upload the
+  // file to that field (V3), then associate the resulting attachment with the task.
+  // Uploading per task keeps each task's field pointing at its own attachment.
   const results = [];
   for (const taskId of taskIds) {
     try {
-      await uploadTaskAttachment(taskId, file.buffer, filename);
+      const task = await getTask(taskId);
+      const fieldId = findCustomFieldId(task, AUTH_FORM_FILE_FIELD_NAME);
+      if (!fieldId) {
+        throw new Error(`custom field "${AUTH_FORM_FILE_FIELD_NAME}" not found on task`);
+      }
+      const attachment = await uploadCustomFieldAttachment(workspaceId, fieldId, file.buffer, filename);
+      await setTaskCustomField(taskId, fieldId, { add: [attachment.id], rem: [] });
       results.push({ taskId, action: 'attached' });
     } catch (err) {
       log.error('Finalised auth-form attachment failed', { taskId, reason: err.message });

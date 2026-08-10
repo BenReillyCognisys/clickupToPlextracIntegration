@@ -5,6 +5,7 @@ const express = require('express');
 // The router's auth middleware reads this at request time.
 process.env.BREAK_SERVICES_API_KEY = 'test-key';
 process.env.SLACK_AUTH_FORM_CHANNEL = 'C0AUTH';
+process.env.CLICKUP_TEAM_ID = 'team-1'; // workspace id for the V3 custom-field upload
 
 // ── Stub the outbound helpers BEFORE the router is required ────────────────────
 // routes/clickup-actions destructures these on import, so the fakes must be in
@@ -19,8 +20,14 @@ const comments = {};   // taskId -> [{ id, comment_text }]
 let nextCommentId = 1;
 const scheduled = [];  // recorded updateTaskSchedule calls
 const slackPosts = []; // recorded postMessage calls
-const attachments = {}; // taskId -> [{ filename, size }]
-let taskState = {};     // taskId -> { start_date, due_date } returned by getTask
+const attachments = {}; // taskId -> [{ filename, size, fieldId }]
+const fieldValues = {}; // taskId -> { [fieldId]: value } from setTaskCustomField
+let nextAttachmentId = 1;
+let taskState = {};     // taskId -> { start_date, due_date, custom_fields } returned by getTask
+
+// The "Authorisation Forms" File custom field, present on every task by default so
+// the finalised-auth-form flow can resolve it. taskState may override per task.
+const AUTH_FORM_FILE_FIELD = { id: 'cf-authforms', name: 'Authorisation Forms', type: 'attachment' };
 
 clickupApi.listTaskComments = async (taskId) => {
   if (taskId === 'FAIL') throw new Error('boom (list)');
@@ -43,14 +50,29 @@ clickupApi.updateTaskSchedule = async (taskId, opts) => {
   if (taskId === 'FAIL') throw new Error('boom (schedule)');
   scheduled.push({ taskId, ...opts });
 };
-clickupApi.uploadTaskAttachment = async (taskId, buffer, filename) => {
-  if (taskId === 'FAIL') throw new Error('boom (attach)');
-  (attachments[taskId] ||= []).push({ filename, size: buffer.length });
-  return { id: `att-${taskId}`, title: filename };
+// Uploads to a File custom field entity (V3) and returns a fresh attachment id.
+let lastUpload = null;
+clickupApi.uploadCustomFieldAttachment = async (workspaceId, fieldId, buffer, filename) => {
+  const id = `att-${nextAttachmentId++}`;
+  lastUpload = { workspaceId, fieldId, filename, size: buffer.length, id };
+  return { id, title: filename };
+};
+clickupApi.setTaskCustomField = async (taskId, fieldId, value) => {
+  (fieldValues[taskId] ||= {})[fieldId] = value;
+  // Mirror the association into `attachments` so the flow's result is easy to assert.
+  if (value && Array.isArray(value.add)) {
+    for (const attId of value.add) {
+      (attachments[taskId] ||= []).push({ filename: lastUpload?.filename, size: lastUpload?.size, fieldId, attId });
+    }
+  }
 };
 clickupApi.getTask = async (taskId) => {
-  if (taskId === 'GETFAIL') throw new Error('boom (getTask)');
-  return { id: taskId, ...(taskState[taskId] || {}) };
+  // 'FAIL' / 'GETFAIL' model a task read failure (e.g. a deleted task 404).
+  if (taskId === 'GETFAIL' || taskId === 'FAIL') throw new Error('boom (getTask)');
+  const state = taskState[taskId] || {};
+  // Default every task to carrying the Authorisation Forms field unless overridden.
+  const custom_fields = state.custom_fields || [AUTH_FORM_FILE_FIELD];
+  return { id: taskId, ...state, custom_fields };
 };
 // Drive download stub: a driveUrl of 'https://drive/FAIL' throws; otherwise returns
 // a small fake file. Records nothing — assertions read the resulting attachments.
@@ -189,6 +211,22 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(attachments.A1.length, 1);
     assert.strictEqual(attachments.A1[0].filename, 'Auth Form.pdf');
     assert.strictEqual(attachments.A2[0].size, Buffer.from('signed-form-bytes').length);
+    // The file lands on the "Authorisation Forms" custom field (add/rem shape), not
+    // the task's general attachments.
+    assert.strictEqual(attachments.A1[0].fieldId, 'cf-authforms');
+    assert.deepStrictEqual(fieldValues.A1['cf-authforms'], { add: [attachments.A1[0].attId], rem: [] });
+  });
+
+  await test('fails the task when the Authorisation Forms field is absent', async () => {
+    taskState = { NOFIELD: { custom_fields: [{ id: 'x', name: 'Something Else' }] } };
+    const r = await request('/clickup/finalised-auth-form', {
+      headers: KEY, body: { clientName: 'Acme', driveUrl: 'https://drive/ok', clickupTaskId: 'NOFIELD' },
+    });
+    assert.strictEqual(r.status, 502);
+    assert.strictEqual(r.json.ok, false);
+    assert.ok(/not found/.test(r.json.results[0].error), 'error names the missing field');
+    assert.ok(!attachments.NOFIELD, 'nothing associated when the field is missing');
+    taskState = {};
   });
 
   await test('accepts a single clickupTaskId too', async () => {
