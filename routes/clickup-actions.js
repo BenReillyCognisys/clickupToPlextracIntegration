@@ -193,8 +193,8 @@ router.post('/extra-urls', async (req, res) => {
   // 2) Slack alert — always. Link the ClickUp task too when we have one.
   let slack = 'failed';
   try {
-    const channel = process.env.SLACK_AUTH_FORM_CHANNEL;
-    if (!channel) throw new Error('SLACK_AUTH_FORM_CHANNEL is not set');
+    // Free Black Box extra-URL alerts always go to this channel (hardcoded).
+    const channel = 'C0B9D6487HR';
     const taskLink = clickupTaskId ? ` ClickUp task: ${clickupTaskUrl(clickupTaskId)}` : '';
     await postMessage(channel, `${summary}${taskLink}`);
     slack = 'sent';

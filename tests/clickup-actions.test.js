@@ -40,8 +40,9 @@ clickupApi.updateTaskSchedule = async (taskId, opts) => {
   if (taskId === 'FAIL') throw new Error('boom (schedule)');
   scheduled.push({ taskId, ...opts });
 };
+let slackShouldFail = false; // toggled by the "Slack fails" test (channel is hardcoded)
 slack.postMessage = async (channel, text) => {
-  if (channel === 'C0FAIL') throw new Error('boom (slack)');
+  if (channel === 'C0FAIL' || slackShouldFail) throw new Error('boom (slack)');
   slackPosts.push({ channel, text });
   return '123.456';
 };
@@ -172,6 +173,7 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.deepStrictEqual({ ok: r.json.ok, clickup: r.json.clickup, slack: r.json.slack }, { ok: true, clickup: 'commented', slack: 'sent' });
     assert.strictEqual(comments.U1.length, 1);
     assert.strictEqual(slackPosts.length, before + 1);
+    assert.strictEqual(slackPosts.at(-1).channel, 'C0B9D6487HR', 'alert goes to the hardcoded channel');
     assert.ok(slackPosts.at(-1).text.includes('app.clickup.com/t/U1'), 'Slack text links the task');
   });
 
@@ -186,13 +188,13 @@ const KEY = { 'X-API-Key': 'test-key' };
   });
 
   await test('returns 502 when the only work (Slack) fails', async () => {
-    process.env.SLACK_AUTH_FORM_CHANNEL = 'C0FAIL';
+    slackShouldFail = true;
     const r = await request('/clickup/extra-urls', {
       headers: KEY, body: { clientName: 'Acme', clickupTaskId: null, urls: ['https://a', 'https://b'] },
     });
     assert.strictEqual(r.status, 502);
     assert.deepStrictEqual({ ok: r.json.ok, clickup: r.json.clickup, slack: r.json.slack }, { ok: false, clickup: 'skipped', slack: 'failed' });
-    process.env.SLACK_AUTH_FORM_CHANNEL = 'C0AUTH';
+    slackShouldFail = false;
   });
 
   // ── schedule-task ─────────────────────────────────────────────────────────────
