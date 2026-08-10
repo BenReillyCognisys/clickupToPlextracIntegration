@@ -2,6 +2,7 @@ const { parseTaskName } = require('./parse-task');
 const { findOrCreateClient } = require('./plextrac-client');
 const { createReport } = require('./plextrac-report');
 const { createAuthFormForTask } = require('./auth-form-create');
+const store = require('../lib/task-store');
 const log = require('../lib/logger');
 const BLACKLIST = require('../config/blacklist');
 const { isPlaceholderTaskName } = require('../config/placeholder-task-names');
@@ -21,6 +22,23 @@ async function runPipeline(task) {
     log.info('Task still has its template placeholder name — waiting for rename before creating a report', {
       task: task.name,
       task_id: task.id,
+    });
+    return;
+  }
+
+  // ── Phase 0.5: Skip if a report already exists for this task ──────────────
+  // taskCreated and a rename can both reach here for the same task; the webhook
+  // serialises them so this check sees the mapping the first run saved and the
+  // second run bails out — no duplicate report, no duplicate Slack notice.
+  const existingMapping = await store.findByTaskId(task.id).catch((err) => {
+    log.error('Idempotency check failed — proceeding with create pipeline', {
+      reason: err.message, task_id: task.id,
+    });
+    return null;
+  });
+  if (existingMapping) {
+    log.info('Task already has a Plextrac report — skipping create pipeline', {
+      task: task.name, task_id: task.id, report_id: existingMapping.plextrac_report_id,
     });
     return;
   }

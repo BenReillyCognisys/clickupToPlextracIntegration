@@ -3,6 +3,7 @@ const axios = require('axios');
 const { runPipeline } = require('../pipeline');
 const { handleTaskRename } = require('../pipeline/task-rename');
 const { crossOffReport } = require('../pipeline/reports-due');
+const { withTaskLock } = require('../lib/task-lock');
 const log = require('../lib/logger');
 
 // Pulls the new status name out of a taskStatusUpdated payload's history_items
@@ -112,23 +113,29 @@ async function handler(req, res) {
   // "Test Task" placeholder at taskCreated time) it creates the report now; for an
   // existing project it renames/moves the report to match. Other field edits on a
   // taskUpdated are ignored here.
+  // taskCreated and a near-simultaneous rename both drive the create pipeline; run
+  // concurrently they'd create duplicate reports. Serialise all processing for a
+  // given task id so the second event runs only after the first has finished (and
+  // its idempotency check can see the report the first one created).
   if (payload.event === 'taskUpdated') {
     if (!isNameChange(payload)) return;
-    const task = await loadMonitoredTask(payload.task_id);
-    if (!task) return;
-    log.info('ClickUp task renamed', { task: task.name, task_id: task.id });
-    await handleTaskRename(task);
+    await withTaskLock(payload.task_id, async () => {
+      const task = await loadMonitoredTask(payload.task_id);
+      if (!task) return;
+      log.info('ClickUp task renamed', { task: task.name, task_id: task.id });
+      await handleTaskRename(task);
+    });
     return;
   }
 
   if (payload.event !== 'taskCreated') return;
 
-  const task = await loadMonitoredTask(payload.task_id);
-  if (!task) return;
-
-  log.info('ClickUp task received', { task: task.name, task_id: task.id });
-
-  await runPipeline(task);
+  await withTaskLock(payload.task_id, async () => {
+    const task = await loadMonitoredTask(payload.task_id);
+    if (!task) return;
+    log.info('ClickUp task received', { task: task.name, task_id: task.id });
+    await runPipeline(task);
+  });
 }
 
 module.exports = handler;
