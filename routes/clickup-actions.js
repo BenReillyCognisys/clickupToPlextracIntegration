@@ -7,12 +7,14 @@
  *
  *   POST /clickup/merged-auth-form   — comment a merged auth-form link onto every
  *                                      related ClickUp task (idempotent, see below).
- *   POST /clickup/finalised-auth-form — prepend the signed auth form's Google Drive
- *                                      link to each related task's description.
+ *   POST /clickup/finalised-auth-form — download the signed auth form from Google
+ *                                      Drive and upload it to each related task's
+ *                                      Attachments (the "Authorisation Forms" file).
  *   POST /clickup/extra-urls         — comment + alert SLACK_AUTH_FORM_CHANNEL for a
  *                                      Free Black Box form that scoped more than one URL.
  *   POST /clickup/schedule-task      — write resolved start/due dates onto an
- *                                      existing ClickUp task.
+ *                                      existing ClickUp task. A repeat Free Black Box
+ *                                      submission (task already scheduled) is a no-op.
  *
  * Idempotent-comment strategy (endpoint 1): the portal re-sends the same merged
  * form every time a new task for that client arrives, so this endpoint is called
@@ -31,10 +33,10 @@ const {
   createTaskComment,
   updateComment,
   updateTaskSchedule,
-  getTaskDescription,
-  updateTaskDescription,
+  uploadTaskAttachment,
+  getTask,
 } = require('../lib/clickup-api');
-const { prependFinalisedAuthForm } = require('../lib/auth-form-description');
+const { downloadDriveFile } = require('../lib/google-drive');
 const { cache, getMembersMap, findUserInMap } = require('../lib/availability-cache');
 const { postMessage } = require('../lib/slack');
 const log = require('../lib/logger');
@@ -66,6 +68,19 @@ router.use(requireBreakServicesKey);
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const clickupTaskUrl = (taskId) => `https://app.clickup.com/t/${taskId}`;
+
+// A Free Black Box lets the client (re)submit their auth form; identify it from the
+// test type so a repeat submission can be treated as a no-op for scheduling.
+function isFreeBlackBox(testType) {
+  return /free\s*black\s*box/i.test(String(testType || ''));
+}
+
+// The name the finalised auth form is stored under in ClickUp. Prefer the original
+// Drive filename; fall back to a client-labelled default when Drive gives us none.
+function authFormFilename(driveName, clientName) {
+  if (driveName) return driveName;
+  return clientName ? `Authorisation Form - ${clientName}.pdf` : 'Authorisation Form.pdf';
+}
 
 // ─── POST /clickup/merged-auth-form ───────────────────────────────────────────
 // Comments the merged auth-form link onto every related ClickUp task, idempotently
@@ -117,10 +132,10 @@ router.post('/merged-auth-form', async (req, res) => {
 
 // ─── POST /clickup/finalised-auth-form ────────────────────────────────────────
 // The SFE has finalised the client's authorisation form and uploaded it to Google
-// Drive. Prepend a link to that Drive file at the top of each related ClickUp task's
-// description (keeping the original text below), so the consultant has the signed
-// form to hand. Accepts a single clickupTaskId or a clickupTaskIds array (a merged
-// form covers several tasks). Idempotent: a re-send replaces the block in place.
+// Drive. Download that file and upload it to each related task's Attachments (the
+// "Authorisation Forms" file), so the consultant has the signed form to hand.
+// Accepts a single clickupTaskId or a clickupTaskIds array (a merged form covers
+// several tasks). The file is fetched once and attached to every task.
 router.post('/finalised-auth-form', async (req, res) => {
   const { clientName, driveUrl, clickupTaskIds, clickupTaskId } = req.body || {};
 
@@ -134,15 +149,25 @@ router.post('/finalised-auth-form', async (req, res) => {
     });
   }
 
+  // Fetch the finalised form from Drive once — every related task gets the same file.
+  // A download failure is fatal here: there's nothing to attach.
+  let file;
+  try {
+    file = await downloadDriveFile(driveUrl);
+  } catch (err) {
+    log.error('Finalised auth-form download failed', { driveUrl, reason: err.message });
+    return res.status(502).json({ ok: false, error: `could not download auth form: ${err.message}` });
+  }
+
+  const filename = authFormFilename(file.filename, clientName);
+
   const results = [];
   for (const taskId of taskIds) {
     try {
-      const existing = await getTaskDescription(taskId);
-      const updated = prependFinalisedAuthForm(existing, driveUrl, clientName);
-      await updateTaskDescription(taskId, updated);
-      results.push({ taskId, action: 'updated' });
+      await uploadTaskAttachment(taskId, file.buffer, filename);
+      results.push({ taskId, action: 'attached' });
     } catch (err) {
-      log.error('Finalised auth-form description update failed', { taskId, reason: err.message });
+      log.error('Finalised auth-form attachment failed', { taskId, reason: err.message });
       results.push({ taskId, action: 'failed', error: err.message });
     }
   }
@@ -233,6 +258,34 @@ router.post('/schedule-task', async (req, res) => {
   const dueDateMs = Date.parse(`${endDate}T00:00:00Z`);
   if (!Number.isFinite(startDateMs) || !Number.isFinite(dueDateMs)) {
     return res.status(400).json({ error: 'startDate and endDate must be yyyy-mm-dd dates' });
+  }
+
+  // Free Black Box forms can be submitted more than once: the first submission fixes
+  // the schedule and later ones must not move it. If this is a Free Black Box task
+  // that already has a start date, skip the whole update (no dates, no assignee). A
+  // read failure is non-fatal — we fall through and treat it as a first submission
+  // rather than block one on a transient hiccup.
+  if (isFreeBlackBox(testType)) {
+    let existing = null;
+    try {
+      existing = await getTask(clickupTaskId);
+    } catch (err) {
+      log.warn('Schedule-task could not read task to check for a repeat submission', {
+        clickupTaskId, reason: err.message,
+      });
+    }
+    if (existing && existing.start_date) {
+      log.info('Schedule-task skipped — Free Black Box already scheduled (repeat submission)', {
+        clickupTaskId, testType,
+      });
+      return res.status(200).json({
+        ok: true,
+        taskId: clickupTaskId,
+        skipped: true,
+        start_date: Number(existing.start_date),
+        due_date: existing.due_date != null ? Number(existing.due_date) : null,
+      });
+    }
   }
 
   // Optional assignee resolution — best effort, never blocks the date write.

@@ -12,12 +12,15 @@ process.env.SLACK_AUTH_FORM_CHANNEL = 'C0AUTH';
 const clickupApi = require('../lib/clickup-api');
 const slack      = require('../lib/slack');
 const availability = require('../lib/availability-cache');
+const googleDrive  = require('../lib/google-drive');
 
 // In-memory comment store keyed by task id; a task id of 'FAIL' throws.
 const comments = {};   // taskId -> [{ id, comment_text }]
 let nextCommentId = 1;
 const scheduled = [];  // recorded updateTaskSchedule calls
 const slackPosts = []; // recorded postMessage calls
+const attachments = {}; // taskId -> [{ filename, size }]
+let taskState = {};     // taskId -> { start_date, due_date } returned by getTask
 
 clickupApi.listTaskComments = async (taskId) => {
   if (taskId === 'FAIL') throw new Error('boom (list)');
@@ -39,6 +42,21 @@ clickupApi.updateComment = async (commentId, text) => {
 clickupApi.updateTaskSchedule = async (taskId, opts) => {
   if (taskId === 'FAIL') throw new Error('boom (schedule)');
   scheduled.push({ taskId, ...opts });
+};
+clickupApi.uploadTaskAttachment = async (taskId, buffer, filename) => {
+  if (taskId === 'FAIL') throw new Error('boom (attach)');
+  (attachments[taskId] ||= []).push({ filename, size: buffer.length });
+  return { id: `att-${taskId}`, title: filename };
+};
+clickupApi.getTask = async (taskId) => {
+  if (taskId === 'GETFAIL') throw new Error('boom (getTask)');
+  return { id: taskId, ...(taskState[taskId] || {}) };
+};
+// Drive download stub: a driveUrl of 'https://drive/FAIL' throws; otherwise returns
+// a small fake file. Records nothing — assertions read the resulting attachments.
+googleDrive.downloadDriveFile = async (driveUrl) => {
+  if (driveUrl === 'https://drive/FAIL') throw new Error('boom (drive)');
+  return { buffer: Buffer.from('signed-form-bytes'), filename: 'Auth Form.pdf', mimeType: 'application/pdf' };
 };
 let slackShouldFail = false; // toggled by the "Slack fails" test (channel is hardcoded)
 slack.postMessage = async (channel, text) => {
@@ -152,6 +170,53 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(r.json.ok, false);
   });
 
+  // ── finalised-auth-form ───────────────────────────────────────────────────────
+  console.log('\nPOST /clickup/finalised-auth-form:');
+
+  await test('rejects a missing driveUrl / task ids with 400', async () => {
+    const r = await request('/clickup/finalised-auth-form', { headers: KEY, body: { clientName: 'Acme' } });
+    assert.strictEqual(r.status, 400);
+  });
+
+  await test('downloads the form once and attaches it to each task', async () => {
+    const r = await request('/clickup/finalised-auth-form', {
+      headers: KEY,
+      body: { clientName: 'Acme', driveUrl: 'https://drive/ok', clickupTaskIds: ['A1', 'A2'] },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.ok, true);
+    assert.deepStrictEqual(r.json.results.map((x) => x.action), ['attached', 'attached']);
+    assert.strictEqual(attachments.A1.length, 1);
+    assert.strictEqual(attachments.A1[0].filename, 'Auth Form.pdf');
+    assert.strictEqual(attachments.A2[0].size, Buffer.from('signed-form-bytes').length);
+  });
+
+  await test('accepts a single clickupTaskId too', async () => {
+    const r = await request('/clickup/finalised-auth-form', {
+      headers: KEY, body: { clientName: 'Acme', driveUrl: 'https://drive/ok', clickupTaskId: 'A3' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(attachments.A3.length, 1);
+  });
+
+  await test('returns 502 when the Drive download fails (nothing to attach)', async () => {
+    const r = await request('/clickup/finalised-auth-form', {
+      headers: KEY, body: { clientName: 'Acme', driveUrl: 'https://drive/FAIL', clickupTaskIds: ['A4'] },
+    });
+    assert.strictEqual(r.status, 502);
+    assert.strictEqual(r.json.ok, false);
+    assert.ok(!attachments.A4, 'no attachment attempted when the download failed');
+  });
+
+  await test('reports a per-task attach failure but still 200 when others succeed', async () => {
+    const r = await request('/clickup/finalised-auth-form', {
+      headers: KEY, body: { clientName: 'Acme', driveUrl: 'https://drive/ok', clickupTaskIds: ['A5', 'FAIL'] },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.ok, true);
+    assert.strictEqual(r.json.results.find((x) => x.taskId === 'FAIL').action, 'failed');
+  });
+
   // ── extra-urls ────────────────────────────────────────────────────────────────
   console.log('\nPOST /clickup/extra-urls:');
 
@@ -240,6 +305,54 @@ const KEY = { 'X-API-Key': 'test-key' };
     });
     assert.strictEqual(r.status, 502);
     assert.strictEqual(r.json.ok, false);
+  });
+
+  await test('Free Black Box: schedules on first submission (no existing start date)', async () => {
+    taskState = { FB1: {} }; // no start_date yet
+    const before = scheduled.length;
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: { clickupTaskId: 'FB1', startDate: '2026-09-07', endDate: '2026-09-08', testType: 'Free Black Box Test' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.skipped, undefined);
+    assert.strictEqual(scheduled.length, before + 1, 'first submission writes the dates');
+  });
+
+  await test('Free Black Box: a repeat submission does NOT change the dates', async () => {
+    taskState = { FB2: { start_date: '1757203200000', due_date: '1757289600000' } };
+    const before = scheduled.length;
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: { clickupTaskId: 'FB2', startDate: '2027-01-01', endDate: '2027-01-02', testType: 'Free Black Box Test' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.skipped, true);
+    assert.strictEqual(r.json.start_date, 1757203200000, 'original start date is preserved');
+    assert.strictEqual(scheduled.length, before, 'no schedule write happened');
+  });
+
+  await test('a repeat NON-Free-Black-Box submission still updates the dates', async () => {
+    taskState = { PB1: { start_date: '1757203200000' } };
+    const before = scheduled.length;
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: { clickupTaskId: 'PB1', startDate: '2027-01-01', endDate: '2027-01-02', testType: 'Paid Black Box Pentest' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.skipped, undefined);
+    assert.strictEqual(scheduled.length, before + 1, 'non-Free type is not frozen');
+  });
+
+  await test('Free Black Box: a task read failure falls through to a normal update', async () => {
+    const before = scheduled.length;
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: { clickupTaskId: 'GETFAIL', startDate: '2026-09-07', endDate: '2026-09-08', testType: 'Free Black Box Test' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.skipped, undefined);
+    assert.strictEqual(scheduled.length, before + 1, 'transient read failure does not block scheduling');
   });
 
   console.log(`\n${passed} passed, ${failed} failed\n`);
