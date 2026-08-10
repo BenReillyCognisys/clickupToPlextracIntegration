@@ -71,12 +71,13 @@ function verifySlackSignature(signingSecret, timestamp, rawBody, signature) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-// Renders one queue line: "• <url|Report name> — Client _(pushed <time>)_" (link
-// omitted when no url; the time is when the report first entered the QA queue).
+// Renders one queue line: "• Client — <url|Report name> _(pushed <time>)_" (link
+// omitted when no url, client omitted when unknown; the time is when the report
+// first entered the QA queue).
 function queueLine(e) {
   const name = slackEscape(e.report_name || `Report ${e.report_id}`);
   const label = e.report_url ? `<${e.report_url}|${name}>` : name;
-  const head = e.client_name ? `• ${label} — ${slackEscape(e.client_name)}` : `• ${label}`;
+  const head = e.client_name ? `• ${slackEscape(e.client_name)} — ${label}` : `• ${label}`;
   return `${head} _(pushed ${formatDateTime(e.entered_at)})_`;
 }
 
