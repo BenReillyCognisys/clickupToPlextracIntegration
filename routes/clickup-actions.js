@@ -194,7 +194,7 @@ router.post('/extra-urls', async (req, res) => {
   let slack = 'failed';
   try {
     // Free Black Box extra-URL alerts always go to this channel (hardcoded).
-    const channel = 'C0B9D6487HR';
+    const channel = 'C0AA3SNQUKE';
     const taskLink = clickupTaskId ? ` ClickUp task: ${clickupTaskUrl(clickupTaskId)}` : '';
     await postMessage(channel, `${summary}${taskLink}`);
     slack = 'sent';

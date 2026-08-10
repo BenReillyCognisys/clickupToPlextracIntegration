@@ -173,7 +173,7 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.deepStrictEqual({ ok: r.json.ok, clickup: r.json.clickup, slack: r.json.slack }, { ok: true, clickup: 'commented', slack: 'sent' });
     assert.strictEqual(comments.U1.length, 1);
     assert.strictEqual(slackPosts.length, before + 1);
-    assert.strictEqual(slackPosts.at(-1).channel, 'C0B9D6487HR', 'alert goes to the hardcoded channel');
+    assert.strictEqual(slackPosts.at(-1).channel, 'C0AA3SNQUKE', 'alert goes to the hardcoded channel');
     assert.ok(slackPosts.at(-1).text.includes('app.clickup.com/t/U1'), 'Slack text links the task');
   });
 
