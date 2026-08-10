@@ -77,11 +77,25 @@ clickupApi.getTask = async (taskId) => {
 };
 clickupApi.getTaskDescription = async (taskId) => descriptions[taskId] || '';
 clickupApi.updateTaskDescription = async (taskId, markdown) => { descriptions[taskId] = markdown; };
-// Drive download stub: a driveUrl of 'https://drive/FAIL' throws; otherwise returns
-// a small fake file. Records nothing — assertions read the resulting attachments.
+// Real Drive share links — the route validates the URL itself (only the download is
+// stubbed), so these must parse as genuine Drive links.
+const DRIVE_OK   = 'https://drive.google.com/file/d/FILEID123/view';
+const DRIVE_FAIL = 'https://drive.google.com/file/d/FAILID999/view';
+// The canonical link the route rebuilds from the file id and writes to descriptions.
+const DRIVE_OK_CANONICAL = 'https://drive.google.com/file/d/FILEID123/view';
+
+// Drive download stub: DRIVE_FAIL throws; otherwise returns a small fake file carrying
+// the same fileId/canonicalUrl shape the real helper produces.
 googleDrive.downloadDriveFile = async (driveUrl) => {
-  if (driveUrl === 'https://drive/FAIL') throw new Error('boom (drive)');
-  return { buffer: Buffer.from('signed-form-bytes'), filename: 'Auth Form.pdf', mimeType: 'application/pdf' };
+  if (driveUrl === DRIVE_FAIL) throw new Error('boom (drive)');
+  const fileId = googleDrive.fileIdFromUrl(driveUrl);
+  return {
+    buffer: Buffer.from('signed-form-bytes'),
+    filename: 'Auth Form.pdf',
+    mimeType: 'application/pdf',
+    fileId,
+    canonicalUrl: googleDrive.driveFileUrl(fileId),
+  };
 };
 let slackShouldFail = false; // toggled by the "Slack fails" test (channel is hardcoded)
 slack.postMessage = async (channel, text) => {
@@ -207,7 +221,7 @@ const KEY = { 'X-API-Key': 'test-key' };
     descriptions.A1 = 'Existing description body.'; // A1 already has description text
     const r = await request('/clickup/finalised-auth-form', {
       headers: KEY,
-      body: { clientName: 'Acme', driveUrl: 'https://drive/ok', clickupTaskIds: ['A1', 'A2'] },
+      body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskIds: ['A1', 'A2'] },
     });
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.json.ok, true);
@@ -221,15 +235,15 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.deepStrictEqual(fieldValues.A1['cf-authforms'], { add: [attachments.A1[0].attId], rem: [] });
     // The link is prepended to the description, above the existing text (not over it).
     assert.deepStrictEqual(r.json.results.map((x) => x.description), ['updated', 'updated']);
-    assert.ok(descriptions.A1.startsWith('📄 **Authorisation form:** https://drive/ok'), 'link is at the top');
+    assert.ok(descriptions.A1.startsWith(`📄 **Authorisation form:** ${DRIVE_OK_CANONICAL}`), 'link is at the top');
     assert.ok(descriptions.A1.includes('Existing description body.'), 'existing text is preserved');
-    assert.ok(descriptions.A2.includes('https://drive/ok'), 'link added even when there was no prior description');
+    assert.ok(descriptions.A2.includes(DRIVE_OK_CANONICAL), 'link added even when there was no prior description');
   });
 
   await test('does not prepend the link twice on a repeat call (idempotent description)', async () => {
     const r = await request('/clickup/finalised-auth-form', {
       headers: KEY,
-      body: { clientName: 'Acme', driveUrl: 'https://drive/ok', clickupTaskId: 'A1' },
+      body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskId: 'A1' },
     });
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.json.results[0].description, 'skipped');
@@ -237,10 +251,37 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(occurrences, 1, 'the auth-form line appears exactly once');
   });
 
+  await test('rejects a driveUrl that is not a Google Drive link with 400', async () => {
+    for (const bad of [
+      'https://evil.example/file/d/ABC123/view',   // wrong host
+      'http://drive.google.com/file/d/ABC123/view', // not https
+      'https://drive.google.com/file/nope',         // no file id
+      'not-a-url',
+    ]) {
+      const r = await request('/clickup/finalised-auth-form', {
+        headers: KEY, body: { clientName: 'Acme', driveUrl: bad, clickupTaskId: 'BAD1' },
+      });
+      assert.strictEqual(r.status, 400, `expected 400 for ${bad}`);
+      assert.ok(!attachments.BAD1, `nothing attached for ${bad}`);
+    }
+  });
+
+  await test('strips smuggled markdown from driveUrl before writing the description', async () => {
+    // A real file id with attacker markdown appended — only the id may survive.
+    const smuggled = 'https://drive.google.com/file/d/FILEID123/view#\n\n## Urgent\n[Re-auth](https://evil.example)';
+    const r = await request('/clickup/finalised-auth-form', {
+      headers: KEY, body: { clientName: 'Acme', driveUrl: smuggled, clickupTaskId: 'INJ1' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(descriptions.INJ1, `📄 **Authorisation form:** ${DRIVE_OK_CANONICAL}`);
+    assert.ok(!descriptions.INJ1.includes('evil.example'), 'attacker link is not in the description');
+    assert.ok(!descriptions.INJ1.includes('Urgent'), 'attacker markdown is not in the description');
+  });
+
   await test('fails the task when the Authorisation Forms field is absent', async () => {
     taskState = { NOFIELD: { custom_fields: [{ id: 'x', name: 'Something Else' }] } };
     const r = await request('/clickup/finalised-auth-form', {
-      headers: KEY, body: { clientName: 'Acme', driveUrl: 'https://drive/ok', clickupTaskId: 'NOFIELD' },
+      headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskId: 'NOFIELD' },
     });
     assert.strictEqual(r.status, 502);
     assert.strictEqual(r.json.ok, false);
@@ -251,7 +292,7 @@ const KEY = { 'X-API-Key': 'test-key' };
 
   await test('accepts a single clickupTaskId too', async () => {
     const r = await request('/clickup/finalised-auth-form', {
-      headers: KEY, body: { clientName: 'Acme', driveUrl: 'https://drive/ok', clickupTaskId: 'A3' },
+      headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskId: 'A3' },
     });
     assert.strictEqual(r.status, 200);
     assert.strictEqual(attachments.A3.length, 1);
@@ -259,7 +300,7 @@ const KEY = { 'X-API-Key': 'test-key' };
 
   await test('returns 502 when the Drive download fails (nothing to attach)', async () => {
     const r = await request('/clickup/finalised-auth-form', {
-      headers: KEY, body: { clientName: 'Acme', driveUrl: 'https://drive/FAIL', clickupTaskIds: ['A4'] },
+      headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_FAIL, clickupTaskIds: ['A4'] },
     });
     assert.strictEqual(r.status, 502);
     assert.strictEqual(r.json.ok, false);
@@ -268,7 +309,7 @@ const KEY = { 'X-API-Key': 'test-key' };
 
   await test('reports a per-task attach failure but still 200 when others succeed', async () => {
     const r = await request('/clickup/finalised-auth-form', {
-      headers: KEY, body: { clientName: 'Acme', driveUrl: 'https://drive/ok', clickupTaskIds: ['A5', 'FAIL'] },
+      headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskIds: ['A5', 'FAIL'] },
     });
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.json.ok, true);

@@ -40,7 +40,7 @@ const {
   getTaskDescription,
   updateTaskDescription,
 } = require('../lib/clickup-api');
-const { downloadDriveFile } = require('../lib/google-drive');
+const { downloadDriveFile, fileIdFromUrl } = require('../lib/google-drive');
 const { cache, getMembersMap, findUserInMap } = require('../lib/availability-cache');
 const { postMessage } = require('../lib/slack');
 const log = require('../lib/logger');
@@ -187,6 +187,12 @@ router.post('/finalised-auth-form', async (req, res) => {
     });
   }
 
+  // Reject anything that isn't a genuine Drive share link up front (a bad link is a
+  // client error, not an upstream failure). downloadDriveFile re-validates.
+  if (!fileIdFromUrl(driveUrl)) {
+    return res.status(400).json({ error: 'driveUrl is not a valid Google Drive file link' });
+  }
+
   // Fetch the finalised form from Drive once — every related task gets the same file.
   // A download failure is fatal here: there's nothing to attach.
   let file;
@@ -219,11 +225,13 @@ router.post('/finalised-auth-form', async (req, res) => {
       const attachment = await uploadCustomFieldAttachment(workspaceId, fieldId, file.buffer, filename);
       await setTaskCustomField(taskId, fieldId, { add: [attachment.id], rem: [] });
 
-      // Also surface the form link at the top of the description. Best-effort: the
-      // file is already on the field, so a description hiccup must not fail the task.
+      // Also surface the form link at the top of the description. Uses the canonical
+      // link rebuilt from the file id, never the caller's raw string, so nothing can be
+      // smuggled into the description's markdown. Best-effort: the file is already on
+      // the field, so a description hiccup must not fail the task.
       let description = 'skipped';
       try {
-        description = await prependAuthFormLink(taskId, driveUrl);
+        description = await prependAuthFormLink(taskId, file.canonicalUrl);
       } catch (err) {
         log.error('Finalised auth-form description update failed', { taskId, reason: err.message });
         description = 'failed';
