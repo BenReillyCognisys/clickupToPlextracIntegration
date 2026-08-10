@@ -22,6 +22,7 @@ const scheduled = [];  // recorded updateTaskSchedule calls
 const slackPosts = []; // recorded postMessage calls
 const attachments = {}; // taskId -> [{ filename, size, fieldId }]
 const fieldValues = {}; // taskId -> { [fieldId]: value } from setTaskCustomField
+const descriptions = {}; // taskId -> markdown description string
 let nextAttachmentId = 1;
 let taskState = {};     // taskId -> { start_date, due_date, custom_fields } returned by getTask
 
@@ -74,6 +75,8 @@ clickupApi.getTask = async (taskId) => {
   const custom_fields = state.custom_fields || [AUTH_FORM_FILE_FIELD];
   return { id: taskId, ...state, custom_fields };
 };
+clickupApi.getTaskDescription = async (taskId) => descriptions[taskId] || '';
+clickupApi.updateTaskDescription = async (taskId, markdown) => { descriptions[taskId] = markdown; };
 // Drive download stub: a driveUrl of 'https://drive/FAIL' throws; otherwise returns
 // a small fake file. Records nothing — assertions read the resulting attachments.
 googleDrive.downloadDriveFile = async (driveUrl) => {
@@ -201,6 +204,7 @@ const KEY = { 'X-API-Key': 'test-key' };
   });
 
   await test('downloads the form once and attaches it to each task', async () => {
+    descriptions.A1 = 'Existing description body.'; // A1 already has description text
     const r = await request('/clickup/finalised-auth-form', {
       headers: KEY,
       body: { clientName: 'Acme', driveUrl: 'https://drive/ok', clickupTaskIds: ['A1', 'A2'] },
@@ -215,6 +219,22 @@ const KEY = { 'X-API-Key': 'test-key' };
     // the task's general attachments.
     assert.strictEqual(attachments.A1[0].fieldId, 'cf-authforms');
     assert.deepStrictEqual(fieldValues.A1['cf-authforms'], { add: [attachments.A1[0].attId], rem: [] });
+    // The link is prepended to the description, above the existing text (not over it).
+    assert.deepStrictEqual(r.json.results.map((x) => x.description), ['updated', 'updated']);
+    assert.ok(descriptions.A1.startsWith('📄 **Authorisation form:** https://drive/ok'), 'link is at the top');
+    assert.ok(descriptions.A1.includes('Existing description body.'), 'existing text is preserved');
+    assert.ok(descriptions.A2.includes('https://drive/ok'), 'link added even when there was no prior description');
+  });
+
+  await test('does not prepend the link twice on a repeat call (idempotent description)', async () => {
+    const r = await request('/clickup/finalised-auth-form', {
+      headers: KEY,
+      body: { clientName: 'Acme', driveUrl: 'https://drive/ok', clickupTaskId: 'A1' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.results[0].description, 'skipped');
+    const occurrences = descriptions.A1.split('📄 **Authorisation form:**').length - 1;
+    assert.strictEqual(occurrences, 1, 'the auth-form line appears exactly once');
   });
 
   await test('fails the task when the Authorisation Forms field is absent', async () => {

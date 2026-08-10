@@ -8,8 +8,9 @@
  *   POST /clickup/merged-auth-form   — comment a merged auth-form link onto every
  *                                      related ClickUp task (idempotent, see below).
  *   POST /clickup/finalised-auth-form — download the signed auth form from Google
- *                                      Drive and store it on each related task's
- *                                      "Authorisation Forms" File custom field.
+ *                                      Drive, store it on each related task's
+ *                                      "Authorisation Forms" File custom field, and
+ *                                      prepend its link to the task description.
  *   POST /clickup/extra-urls         — comment + alert SLACK_AUTH_FORM_CHANNEL for a
  *                                      Free Black Box form that scoped more than one URL.
  *   POST /clickup/schedule-task      — write resolved start/due dates onto an
@@ -36,6 +37,8 @@ const {
   uploadCustomFieldAttachment,
   setTaskCustomField,
   getTask,
+  getTaskDescription,
+  updateTaskDescription,
 } = require('../lib/clickup-api');
 const { downloadDriveFile } = require('../lib/google-drive');
 const { cache, getMembersMap, findUserInMap } = require('../lib/availability-cache');
@@ -84,6 +87,23 @@ function findCustomFieldId(task, name) {
     (f) => (f.name || '').trim().toLowerCase() === target,
   );
   return field ? field.id : null;
+}
+
+// Label prefixing the auth-form line at the top of the task description. Doubles as the
+// idempotency marker: if the description already carries this label we don't prepend
+// again, so a repeat finalised-auth-form call never stacks duplicate links.
+const AUTH_FORM_DESC_LABEL = '📄 **Authorisation form:**';
+
+// Prepends the auth-form link to the top of the task's description without disturbing
+// the existing text. Idempotent (skips when the label is already present). Returns
+// 'updated' when it wrote the link, 'skipped' when it was already there.
+async function prependAuthFormLink(taskId, url) {
+  const existing = await getTaskDescription(taskId);
+  if (existing.includes(AUTH_FORM_DESC_LABEL)) return 'skipped';
+  const header = `${AUTH_FORM_DESC_LABEL} ${url}`;
+  const next = existing.trim() ? `${header}\n\n${existing}` : header;
+  await updateTaskDescription(taskId, next);
+  return 'updated';
 }
 
 // A Free Black Box lets the client (re)submit their auth form; identify it from the
@@ -150,9 +170,10 @@ router.post('/merged-auth-form', async (req, res) => {
 // ─── POST /clickup/finalised-auth-form ────────────────────────────────────────
 // The SFE has finalised the client's authorisation form and uploaded it to Google
 // Drive. Download that file and store it on each related task's "Authorisation Forms"
-// File custom field, so the consultant has the signed form to hand. Accepts a single
-// clickupTaskId or a clickupTaskIds array (a merged form covers several tasks). The
-// file is fetched once and uploaded to each task's field.
+// File custom field, and prepend the form link to the top of the task description
+// (without disturbing existing text), so the consultant has the signed form to hand.
+// Accepts a single clickupTaskId or a clickupTaskIds array (a merged form covers
+// several tasks). The file is fetched once and uploaded to each task's field.
 router.post('/finalised-auth-form', async (req, res) => {
   const { clientName, driveUrl, clickupTaskIds, clickupTaskId } = req.body || {};
 
@@ -197,7 +218,17 @@ router.post('/finalised-auth-form', async (req, res) => {
       }
       const attachment = await uploadCustomFieldAttachment(workspaceId, fieldId, file.buffer, filename);
       await setTaskCustomField(taskId, fieldId, { add: [attachment.id], rem: [] });
-      results.push({ taskId, action: 'attached' });
+
+      // Also surface the form link at the top of the description. Best-effort: the
+      // file is already on the field, so a description hiccup must not fail the task.
+      let description = 'skipped';
+      try {
+        description = await prependAuthFormLink(taskId, driveUrl);
+      } catch (err) {
+        log.error('Finalised auth-form description update failed', { taskId, reason: err.message });
+        description = 'failed';
+      }
+      results.push({ taskId, action: 'attached', description });
     } catch (err) {
       log.error('Finalised auth-form attachment failed', { taskId, reason: err.message });
       results.push({ taskId, action: 'failed', error: err.message });
