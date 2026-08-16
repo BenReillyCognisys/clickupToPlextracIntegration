@@ -10,6 +10,8 @@
 //   • testing type changed (e.g. Black Box → Grey Box) — the Plextrac report is
 //     renamed to "<Testing Type> | Month Year" (name only; the existing template
 //     and its content are left untouched).
+//     The client authorisation form is re-scoped to match (the old testing type's
+//     element is removed and the new one added) — see pipeline/auth-form-rename.js.
 //   • client name changed — the Plextrac client is renamed in place, but ONLY when
 //     (a) this report is the only one under it and (b) no other client already has
 //     the new name. Plextrac has no move-report API, so renaming a shared client
@@ -23,6 +25,7 @@
 
 const { parseTaskName } = require('./parse-task');
 const { buildReportName } = require('./plextrac-report');
+const { syncAuthFormForRename } = require('./auth-form-rename');
 const { runPipeline } = require('./index');
 const api = require('../lib/plextrac-api');
 const lookup = require('../lib/plextrac-lookup');
@@ -202,6 +205,13 @@ async function handleTaskRename(task) {
     return;
   }
 
+  // What the auth form was generated against, captured before the mapping is updated
+  // below. The stored testing_type is authoritative (it's what the create pipeline
+  // sent the portal); older mappings predate the field, so fall back to re-parsing
+  // the stored name.
+  const oldClientName = parseTaskName(mapping.task_name || '').client_name;
+  const oldTestType = mapping.testing_type || parseTaskName(mapping.task_name || '').testing_type;
+
   // Reflect a client-name change (renames the Plextrac client in place when safe)
   // and a testing-type change (renames the report). The report stays under the same
   // client id throughout — Plextrac has no move-report API.
@@ -210,6 +220,25 @@ async function handleTaskRename(task) {
   const reportRenamed = await syncReportName(
     clientId, mapping.plextrac_report_id, testing_type, task.start_date, task.name
   );
+
+  // Re-scope the client authorisation form so it stops authorising the old testing
+  // type and starts authorising the new one. Best-effort and independent of the
+  // Plextrac syncs above — a portal failure must not stop the mapping being updated.
+  const authFormSynced = await syncAuthFormForRename(task, {
+    oldClientName,
+    oldTestType,
+    clientName: client_name,
+    testType: testing_type,
+    clientId,
+    reportId: mapping.plextrac_report_id,
+  }).catch(err => {
+    // The sync handles its own failures; this only guards the mapping update below
+    // against an unexpected throw.
+    log.error('Task rename — auth-form sync threw unexpectedly', {
+      reason: err.message, task: task.name, task_id: task.id,
+    });
+    return null;
+  });
 
   // Persist the new details so future rename events and the reverse webhook stay in
   // step with what's now in Plextrac.
@@ -223,8 +252,8 @@ async function handleTaskRename(task) {
     });
   }
 
-  if (!clientRenamed && !reportRenamed) {
-    log.info('Task rename — no Plextrac change required (name already in sync)', {
+  if (!clientRenamed && !reportRenamed && !authFormSynced) {
+    log.info('Task rename — no Plextrac or auth-form change required (name already in sync)', {
       task: task.name, report_id: mapping.plextrac_report_id,
     });
   }

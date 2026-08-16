@@ -100,4 +100,4 @@ async function createAuthFormForTask(task, { clientName, testType, clientId, rep
   return { formUrl: result.formUrl, created };
 }
 
-module.exports = { createAuthFormForTask };
+module.exports = { createAuthFormForTask, setAuthFormLink };
