@@ -1,6 +1,11 @@
-// Deletes all existing webhooks pointing to this server, then registers a fresh one.
+// Re-issues the Penetration Test webhook: deletes the existing pentest-scoped
+// webhook(s) pointing at this server, then registers a fresh one.
 // Run: node scripts/reset-webhook.js
 // Then copy the printed secret into the server's .env as CLICKUP_WEBHOOK_SECRET.
+//
+// Scoped to CLICKUP_SPACE_ID only — the SecOps webhook (same endpoint, its own
+// secret) is deliberately left alone. Re-issue that one with
+// scripts/register-secops-webhook.js --replace.
 require('dotenv').config();
 const axios = require('axios');
 
@@ -21,16 +26,19 @@ const target  = `${WEBHOOK_URL}/webhook/clickup`;
     { headers }
   );
 
-  // 2. Delete any that point to our endpoint
-  const existing = (data.webhooks || []).filter(wh => wh.endpoint === target);
+  // 2. Delete any that point to our endpoint AND are scoped to the pentest space.
+  //    Filtering on space_id keeps the SecOps webhook (same endpoint) in place.
+  const existing = (data.webhooks || []).filter(
+    wh => wh.endpoint === target && String(wh.space_id) === String(CLICKUP_SPACE_ID)
+  );
   if (existing.length) {
-    console.log(`Deleting ${existing.length} existing webhook(s)...`);
+    console.log(`Deleting ${existing.length} existing pentest webhook(s)...`);
     for (const wh of existing) {
       await axios.delete(`https://api.clickup.com/api/v2/webhook/${wh.id}`, { headers });
       console.log(`  Deleted ${wh.id}`);
     }
   } else {
-    console.log('No existing webhooks found for this endpoint.');
+    console.log('No existing pentest webhooks found for this endpoint.');
   }
 
   // 3. Register a fresh webhook
