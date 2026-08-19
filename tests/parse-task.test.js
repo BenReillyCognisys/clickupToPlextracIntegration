@@ -52,6 +52,49 @@ test('splits only on first pipe when multiple pipes present', () => {
   eq(parseTaskName('Client | Grey Box | Extra'), { client_name: 'Client', testing_type: 'Grey Box | Extra' });
 });
 
+// ── Hyphen-separated format ─────────────────────────────────────────
+console.log('\nHyphen-separated format:');
+
+test('standard hyphen format', () => {
+  eq(parseTaskName('Acme Corp - Grey Box'), { client_name: 'Acme Corp', testing_type: 'Grey Box' });
+});
+
+test('hyphen without surrounding spaces', () => {
+  eq(parseTaskName('Acme Corp-External'), { client_name: 'Acme Corp', testing_type: 'External' });
+});
+
+test('hyphen normalises casing of known type', () => {
+  eq(parseTaskName('Acme - secure build review'), { client_name: 'Acme', testing_type: 'Secure Build Review' });
+});
+
+test('hyphen with unknown type preserves raw type', () => {
+  eq(parseTaskName('Acme - Custom Assessment'), { client_name: 'Acme', testing_type: 'Custom Assessment' });
+});
+
+test('hyphenated client name keeps its hyphen when type is known', () => {
+  eq(parseTaskName('Smith-Jones Ltd - External'), { client_name: 'Smith-Jones Ltd', testing_type: 'External' });
+});
+
+test('hyphenated client name with no type is left intact', () => {
+  eq(parseTaskName('Smith-Jones Ltd'), { client_name: 'Smith-Jones Ltd', testing_type: 'Unknown' });
+});
+
+test('multiple hyphens — splits at the one yielding a known type', () => {
+  eq(parseTaskName('Acme - Internal - External'), { client_name: 'Acme - Internal', testing_type: 'External' });
+});
+
+test('unknown type splits on the first spaced hyphen', () => {
+  eq(parseTaskName('Acme Corp - Bespoke - Work'), { client_name: 'Acme Corp', testing_type: 'Bespoke - Work' });
+});
+
+test('pipe takes precedence over hyphen', () => {
+  eq(parseTaskName('Smith-Jones Ltd | Internal'), { client_name: 'Smith-Jones Ltd', testing_type: 'Internal' });
+});
+
+test('hyphen takes precedence over trailing-type match', () => {
+  eq(parseTaskName('Acme - Grey Box'), { client_name: 'Acme', testing_type: 'Grey Box' });
+});
+
 // ── No-pipe format ───────────────────────────────────────────────────────────
 console.log('\nNo-pipe format:');
 
