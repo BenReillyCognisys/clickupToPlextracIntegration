@@ -20,12 +20,25 @@ if (!CLICKUP_API_TOKEN || !CLICKUP_TEAM_ID) {
     return;
   }
 
+  // ClickUp reports delivery health under `health`, not as a top-level `status`:
+  //   health.status     — 'active' while deliveries succeed, 'failing' after
+  //                       consecutive non-2xx responses (ClickUp stops delivering)
+  //   health.fail_count — consecutive failures; resets on the next success
+  // Reading wh.status printed `undefined` and hid a failing webhook entirely.
   for (const wh of webhooks) {
-    console.log(`\nID       : ${wh.id}`);
-    console.log(`Endpoint : ${wh.endpoint}`);
-    console.log(`Events   : ${wh.events.join(', ')}`);
-    console.log(`Status   : ${wh.status}`);
-    console.log(`Space    : ${wh.space_id || 'all'}`);
+    const health = wh.health || {};
+    console.log(`\nID         : ${wh.id}`);
+    console.log(`Endpoint   : ${wh.endpoint}`);
+    console.log(`Events     : ${wh.events.join(', ')}`);
+    console.log(`Health     : ${health.status ?? 'unknown'}  (fail_count: ${health.fail_count ?? 'n/a'})`);
+    console.log(`Space      : ${wh.space_id || 'all'}`);
+    console.log(`Folder     : ${wh.folder_id || '—'}`);
+    console.log(`List       : ${wh.list_id || '—'}`);
+  }
+
+  // --json dumps the raw objects, for any field this summary doesn't cover.
+  if (process.argv.includes('--json')) {
+    console.log(`\n${JSON.stringify(webhooks, null, 2)}`);
   }
 })().catch(err => {
   console.error(err.response?.data ?? err.message);
