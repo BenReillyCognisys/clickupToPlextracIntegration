@@ -9,12 +9,14 @@
  *                                      related ClickUp task (idempotent, see below).
  *   POST /clickup/finalised-auth-form — download the signed auth form from Google
  *                                      Drive, store it on each related task's
- *                                      "Authorisation Forms" File custom field, and
- *                                      prepend its link to the task description.
+ *                                      "Authorisation Forms" File custom field,
+ *                                      prepend its link to the task description, and
+ *                                      advance the task to the pre-reqs status.
  *   POST /clickup/extra-urls         — comment + alert SLACK_AUTH_FORM_CHANNEL for a
  *                                      Free Black Box form that scoped more than one URL.
  *   POST /clickup/schedule-task      — write resolved start/due dates onto an
- *                                      existing ClickUp task. A repeat Free Black Box
+ *                                      existing ClickUp task and assign the
+ *                                      consultant. A repeat Free Black Box
  *                                      submission (task already scheduled) is a no-op.
  *
  * Idempotent-comment strategy (endpoint 1): the portal re-sends the same merged
@@ -34,6 +36,7 @@ const {
   createTaskComment,
   updateComment,
   updateTaskSchedule,
+  updateTaskStatus,
   uploadCustomFieldAttachment,
   setTaskCustomField,
   getTask,
@@ -110,6 +113,57 @@ async function prependAuthFormLink(taskId, url) {
 // test type so a repeat submission can be treated as a no-op for scheduling.
 function isFreeBlackBox(testType) {
   return /free\s*black\s*box/i.test(String(testType || ''));
+}
+
+// ─── Pre-reqs status advance ──────────────────────────────────────────────────
+// Once the signed auth form is attached to a task, the paperwork is done and the
+// only thing outstanding is the client's pre-reqs — so the task advances to this
+// status. Must match a status defined in the pentest space exactly; list them with
+// `node scripts/list-statuses.js`.
+const PRE_REQS_STATUS = process.env.CLICKUP_STATUS_PRE_REQS || 'Waiting for Pre-reqs';
+
+// Only tasks currently sitting in one of these statuses are advanced. The finalised
+// form can arrive late, or be re-sent for a client whose other tasks are already
+// under way, and moving a task in QA (or Completed) back to pre-reqs would be worse
+// than leaving it alone. Compared case-insensitively against ClickUp's status name.
+const PRE_REQS_FROM_STATUSES = (process.env.CLICKUP_PRE_REQS_FROM_STATUSES || 'to do,open,scheduled')
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+
+/**
+ * Advances a task to PRE_REQS_STATUS if its current status allows it. Takes the
+ * already-fetched task so this costs no extra read. Returns what happened:
+ *   'set'          — status written
+ *   'already_set'  — task was already in the pre-reqs status
+ *   'skipped'      — current status isn't one we advance from (logged with the status)
+ *   'failed'       — ClickUp rejected the write (logged; never thrown)
+ */
+async function advanceToPreReqs(task) {
+  const current = task?.status?.status || '';
+  const currentLower = current.trim().toLowerCase();
+
+  if (currentLower === PRE_REQS_STATUS.trim().toLowerCase()) return 'already_set';
+
+  if (!PRE_REQS_FROM_STATUSES.includes(currentLower)) {
+    log.info('Finalised auth-form — pre-reqs status skipped, task has moved on', {
+      taskId: task.id, current_status: current || null, status_type: task?.status?.type || null,
+    });
+    return 'skipped';
+  }
+
+  try {
+    await updateTaskStatus(task.id, PRE_REQS_STATUS);
+    log.info('Finalised auth-form — task advanced to the pre-reqs status', {
+      taskId: task.id, from: current, to: PRE_REQS_STATUS,
+    });
+    return 'set';
+  } catch (err) {
+    log.error('Finalised auth-form — could not set the pre-reqs status', {
+      taskId: task.id, status: PRE_REQS_STATUS, reason: err.message,
+    });
+    return 'failed';
+  }
 }
 
 // The name the finalised auth form is stored under in ClickUp. Prefer the original
@@ -236,7 +290,14 @@ router.post('/finalised-auth-form', async (req, res) => {
         log.error('Finalised auth-form description update failed', { taskId, reason: err.message });
         description = 'failed';
       }
-      results.push({ taskId, action: 'attached', description });
+
+      // The signed form is now on the task, so the paperwork is complete — advance it
+      // to the pre-reqs status. Best-effort and guarded on the current status, for the
+      // same reason as the description: the file is already attached, so nothing here
+      // may fail the task or the whole request.
+      const status = await advanceToPreReqs(task);
+
+      results.push({ taskId, action: 'attached', description, status });
     } catch (err) {
       log.error('Finalised auth-form attachment failed', { taskId, reason: err.message });
       results.push({ taskId, action: 'failed', error: err.message });
@@ -384,6 +445,7 @@ router.post('/schedule-task', async (req, res) => {
       clickupTaskId, startDate, endDate, testType: testType || null, days: days ?? null,
       assigneeId: assigneeId ?? null,
     });
+
     res.status(200).json({ ok: true, taskId: clickupTaskId, start_date: startDateMs, due_date: dueDateMs });
   } catch (err) {
     log.error('Schedule-task update failed', { clickupTaskId, reason: err.message });
