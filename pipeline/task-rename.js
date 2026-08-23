@@ -259,4 +259,7 @@ async function handleTaskRename(task) {
   }
 }
 
-module.exports = { handleTaskRename };
+// syncClientName / syncReportName are also used by the manual remap endpoint
+// (pipeline/task-admin.js), which moves an existing mapping onto a different
+// ClickUp task and then has to bring Plextrac in line with that task's name.
+module.exports = { handleTaskRename, syncClientName, syncReportName };

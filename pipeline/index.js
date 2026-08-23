@@ -12,7 +12,26 @@ function findBlacklistedWord(text) {
   return BLACKLIST.find(word => lower.includes(word.toLowerCase())) || null;
 }
 
-async function runPipeline(task) {
+const reportUrl = (clientId, reportId) =>
+  `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}/client/${clientId}/report/${reportId}`;
+
+/**
+ * Creates the Plextrac client, report and authorisation form for a ClickUp task.
+ *
+ * Driven by the taskCreated webhook, by the first meaningful rename of a template
+ * placeholder (pipeline/task-rename.js), and by a manual replay
+ * (pipeline/task-admin.js). Options:
+ *   force — skip the "this task already has a report" check. Only for a manual
+ *           replay repairing a half-finished run (e.g. the report was created but
+ *           the auth form failed); createReport's name-based duplicate check is
+ *           what then stops a second report being made.
+ *
+ * Returns { status, ... } describing what happened. Webhook callers ignore it;
+ * the replay endpoint reports it back to the operator. Statuses:
+ *   placeholder_name · already_mapped · unknown_testing_type · blacklisted
+ *   client_failed · report_failed · report_exists · created
+ */
+async function runPipeline(task, { force = false } = {}) {
   // ── Phase 0: Skip template placeholders ──────────────────────────────────
   // The ClickUp project template creates each task as a placeholder ("Test Task")
   // which ClickBot then renames to the real "Client | Testing Type". Creating
@@ -23,7 +42,7 @@ async function runPipeline(task) {
       task: task.name,
       task_id: task.id,
     });
-    return;
+    return { status: 'placeholder_name', detail: `"${task.name}" is a template placeholder name` };
   }
 
   // ── Phase 0.5: Skip if a report already exists for this task ──────────────
@@ -36,15 +55,34 @@ async function runPipeline(task) {
     });
     return null;
   });
-  if (existingMapping) {
+  if (existingMapping && !force) {
     log.info('Task already has a Plextrac report — skipping create pipeline', {
       task: task.name, task_id: task.id, report_id: existingMapping.plextrac_report_id,
     });
-    return;
+    return {
+      status: 'already_mapped',
+      detail: 'the task is already mapped to a Plextrac report',
+      client_id: existingMapping.plextrac_client_id,
+      report_id: existingMapping.plextrac_report_id,
+      report_url: reportUrl(existingMapping.plextrac_client_id, existingMapping.plextrac_report_id),
+    };
+  }
+  if (existingMapping && force) {
+    log.warn('Task already has a Plextrac report — re-running the create pipeline anyway (forced)', {
+      task: task.name, task_id: task.id, report_id: existingMapping.plextrac_report_id,
+    });
   }
 
   // ── Phase 1: Parse task name ─────────────────────────────────────────────
-  const { client_name, testing_type } = parseTaskName(task.name);
+  const { client_name, testing_type, warning } = parseTaskName(task.name);
+
+  // The name didn't follow "Client | Testing Type" and had to be interpreted (e.g.
+  // the testing type was entered first). We proceed with the recovered client, but
+  // flag it so someone can fix the task name.
+  if (warning) {
+    log.warn('Task name interpreted', { task: task.name, client: client_name, type: testing_type, warning });
+    log.notify(`${warning} Task: "${task.name}"`);
+  }
 
   log.info('ClickUp Task received', {
     task: task.name,
@@ -55,10 +93,12 @@ async function runPipeline(task) {
     status: task.status?.status || null,
   });
 
+  const parsed = { client_name, testing_type, ...(warning ? { warning } : {}) };
+
   if (testing_type === 'Unknown') {
     log.warn('Testing type could not be determined — pipeline aborted', { task: task.name });
     log.notify(`Could not determine testing type from task name — no report created. Task: "${task.name}"`);
-    return;
+    return { status: 'unknown_testing_type', detail: 'the testing type could not be determined from the task name', ...parsed };
   }
 
   // ── Blacklist check ───────────────────────────────────────────────────────
@@ -66,7 +106,7 @@ async function runPipeline(task) {
   if (hit) {
     log.warn('Blacklisted word detected — pipeline aborted', { word: hit, task: task.name });
     log.notify(`Blacklisted word detected - ${hit} - ${client_name} ${testing_type}`);
-    return;
+    return { status: 'blacklisted', detail: `the task name contains the blacklisted word "${hit}"`, ...parsed };
   }
 
   // ── Phase 2: Find or create Plextrac client ───────────────────────────────
@@ -78,7 +118,8 @@ async function runPipeline(task) {
       reason: err.message,
       client: client_name,
     });
-    return; // Unrecoverable — cannot create a report without a client
+    // Unrecoverable — cannot create a report without a client
+    return { status: 'client_failed', detail: `Plextrac client find/create failed — ${err.message}`, ...parsed };
   }
 
   // ── Phase 3: Create Plextrac report ──────────────────────────────────────
@@ -91,7 +132,11 @@ async function runPipeline(task) {
       client_id: clientId,
       task: task.name,
     });
-    return;
+    return {
+      status: 'report_failed',
+      detail: `Plextrac report create failed — ${err.message}`,
+      client_id: clientId, client_created: clientCreated, ...parsed,
+    };
   }
 
   // ── Phase 4: Generate the client authorisation form (SFE portal) ─────────
@@ -106,14 +151,31 @@ async function runPipeline(task) {
     reportId: reportName?.reportId ?? null,
   });
 
-  if (reportName) {
-    const { name, reportId } = reportName;
-    const base = `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}`;
-    const url = `${base}/client/${clientId}/report/${reportId}`;
+  const { name, reportId, existed } = reportName;
+  const url = reportUrl(clientId, reportId);
+
+  // Only announce a report we actually created. `existed` means createReport found
+  // one already under this name — nothing new to shout about (it's the normal
+  // outcome of a forced replay, and of two tasks sharing a client/type/month).
+  if (!existed) {
     const suffix = clientCreated ? 'Client was created.' : 'Client already exists.';
     const authLine = authForm ? ` Auth form: <${authForm.formUrl}|link>.` : '';
     log.notify(`Report has been created for ${client_name} - <${url}|${name}>. ${suffix}${authLine}`);
   }
+
+  return {
+    status: existed ? 'report_exists' : 'created',
+    detail: existed
+      ? 'a Plextrac report with this name already existed under the client'
+      : 'the Plextrac report was created',
+    client_id: clientId,
+    client_created: Boolean(clientCreated),
+    report_id: reportId,
+    report_name: name,
+    report_url: url,
+    auth_form_url: authForm?.formUrl ?? null,
+    ...parsed,
+  };
 }
 
 module.exports = { runPipeline };

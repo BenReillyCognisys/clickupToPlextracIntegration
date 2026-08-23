@@ -87,7 +87,10 @@ async function createReport(clientId, task, testingType) {
       report_id: reportId,
       client_id: clientId,
     });
-    return null;
+    // `existed` tells the caller this is the report we found, not one we made — the
+    // create pipeline stays quiet about it, and a manual replay can offer to adopt
+    // it when the task lost its mapping (see pipeline/task-admin.js).
+    return { name, reportId, existed: true };
   }
 
   // Resolve names → IDs; fail loudly if template or layout can't be found
@@ -164,7 +167,7 @@ async function createReport(clientId, task, testingType) {
     client_id: clientId,
   });
 
-  return { name, reportId: result.report_id };
+  return { name, reportId: result.report_id, existed: false };
 }
 
 module.exports = { createReport, buildReportName, epochToISO };

@@ -95,6 +95,62 @@ test('hyphen takes precedence over trailing-type match', () => {
   eq(parseTaskName('Acme - Grey Box'), { client_name: 'Acme', testing_type: 'Grey Box' });
 });
 
+// ── Misordered names (testing type entered before the client) ───────────────
+console.log('\nMisordered names:');
+
+const REPORTED = 'Black Box Pen Test - Brask - Black Box Web Application Penetration Testing';
+
+test('type-first, three segments — middle segment is the client', () => {
+  const parsed = parseTaskName(REPORTED);
+  eq({ client_name: parsed.client_name, testing_type: parsed.testing_type },
+     { client_name: 'Brask', testing_type: 'Black Box Web Application Penetration Testing' });
+});
+
+test('misordered name carries a warning', () => {
+  assert.match(parseTaskName(REPORTED).warning, /out of order/);
+});
+
+test('well-formed name carries no warning', () => {
+  assert.strictEqual(parseTaskName('Brask | Black Box').warning, undefined);
+});
+
+test('type-first, two segments — client is the trailing segment', () => {
+  const parsed = parseTaskName('Black Box Pen Test - Brask');
+  eq({ client_name: parsed.client_name, testing_type: parsed.testing_type },
+     { client_name: 'Brask', testing_type: 'Black Box Pen Test' });
+});
+
+test('type-first with a canonical type — client recovered, type normalised', () => {
+  const parsed = parseTaskName('Black Box - Brask');
+  eq({ client_name: parsed.client_name, testing_type: parsed.testing_type },
+     { client_name: 'Brask', testing_type: 'Black Box' });
+});
+
+test('reversed pipe halves are swapped', () => {
+  const parsed = parseTaskName('Black Box Pen Test | Brask');
+  eq({ client_name: parsed.client_name, testing_type: parsed.testing_type },
+     { client_name: 'Brask', testing_type: 'Black Box Pen Test' });
+});
+
+test('client buried in a type-first pipe left-hand side', () => {
+  const parsed = parseTaskName('Black Box Pen Test - Brask | Black Box Web Application Penetration Testing');
+  eq({ client_name: parsed.client_name, testing_type: parsed.testing_type },
+     { client_name: 'Brask', testing_type: 'Black Box Web Application Penetration Testing' });
+});
+
+test('client whose name merely contains a type word is left alone', () => {
+  eq(parseTaskName('Internal Systems Ltd - Grey Box'),
+     { client_name: 'Internal Systems Ltd', testing_type: 'Grey Box' });
+  eq(parseTaskName('Audit Partners Ltd | Code Review'),
+     { client_name: 'Audit Partners Ltd', testing_type: 'Code Review' });
+  eq(parseTaskName('Review Group | Bespoke Thing'),
+     { client_name: 'Review Group', testing_type: 'Bespoke Thing' });
+});
+
+test('every segment reads as a type — left to the normal rules', () => {
+  eq(parseTaskName('Black Box - Grey Box'), { client_name: 'Black Box', testing_type: 'Grey Box' });
+});
+
 // ── No-pipe format ───────────────────────────────────────────────────────────
 console.log('\nNo-pipe format:');
 
