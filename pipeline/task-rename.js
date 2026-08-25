@@ -51,7 +51,7 @@ async function syncReportName(clientId, reportId, testingType, startDateMs, task
     return false;
   }
 
-  const newName = buildReportName(testingType, startDateMs);
+  const newName = buildReportName(testingType, startDateMs, parseTaskName(taskName || '').scope);
   if (currentName != null && currentName.toLowerCase() === newName.toLowerCase()) {
     return false; // already reflects the current type/date
   }

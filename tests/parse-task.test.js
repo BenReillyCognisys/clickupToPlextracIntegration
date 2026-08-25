@@ -17,8 +17,9 @@ function test(description, fn) {
   }
 }
 
+// Most cases carry no scope qualifier; spell it out only where it matters.
 function eq(actual, expected) {
-  assert.deepStrictEqual(actual, expected);
+  assert.deepStrictEqual(actual, { scope: null, ...expected });
 }
 
 // ── Pipe-separated format ────────────────────────────────────────────────────
@@ -36,8 +37,8 @@ test('pipe normalises casing of known type', () => {
   eq(parseTaskName('Acme | grey box'), { client_name: 'Acme', testing_type: 'Grey Box' });
 });
 
-test('pipe with unknown type preserves raw type', () => {
-  eq(parseTaskName('Acme | Custom Assessment'), { client_name: 'Acme', testing_type: 'Custom Assessment' });
+test('pipe with an unrecognised type is Unknown, not invented', () => {
+  eq(parseTaskName('Acme | Custom Assessment'), { client_name: 'Acme', testing_type: 'Unknown' });
 });
 
 test('pipe with multi-word client name', () => {
@@ -48,11 +49,12 @@ test('pipe with multi-word type', () => {
   eq(parseTaskName('Client X | Secure Build Review'), { client_name: 'Client X', testing_type: 'Secure Build Review' });
 });
 
-test('splits only on first pipe when multiple pipes present', () => {
-  eq(parseTaskName('Client | Grey Box | Extra'), { client_name: 'Client', testing_type: 'Grey Box | Extra' });
+test('text after the type becomes the scope qualifier', () => {
+  eq(parseTaskName('Client | Grey Box | Extra'),
+     { client_name: 'Client', testing_type: 'Grey Box', scope: 'Extra' });
 });
 
-// ── Hyphen-separated format ─────────────────────────────────────────
+// ── Hyphen-separated format ──────────────────────────────────────────────────
 console.log('\nHyphen-separated format:');
 
 test('standard hyphen format', () => {
@@ -67,8 +69,8 @@ test('hyphen normalises casing of known type', () => {
   eq(parseTaskName('Acme - secure build review'), { client_name: 'Acme', testing_type: 'Secure Build Review' });
 });
 
-test('hyphen with unknown type preserves raw type', () => {
-  eq(parseTaskName('Acme - Custom Assessment'), { client_name: 'Acme', testing_type: 'Custom Assessment' });
+test('hyphen with an unrecognised type is Unknown, not invented', () => {
+  eq(parseTaskName('Acme - Custom Assessment'), { client_name: 'Acme', testing_type: 'Unknown' });
 });
 
 test('hyphenated client name keeps its hyphen when type is known', () => {
@@ -79,24 +81,16 @@ test('hyphenated client name with no type is left intact', () => {
   eq(parseTaskName('Smith-Jones Ltd'), { client_name: 'Smith-Jones Ltd', testing_type: 'Unknown' });
 });
 
-test('multiple hyphens — splits at the one yielding a known type', () => {
-  eq(parseTaskName('Acme - Internal - External'), { client_name: 'Acme - Internal', testing_type: 'External' });
+test('multiple types — the one ending last wins, client is the first segment', () => {
+  eq(parseTaskName('Acme - Internal - External'), { client_name: 'Acme', testing_type: 'External' });
 });
 
-test('unknown type splits on the first spaced hyphen', () => {
-  eq(parseTaskName('Acme Corp - Bespoke - Work'), { client_name: 'Acme Corp', testing_type: 'Bespoke - Work' });
-});
-
-test('pipe takes precedence over hyphen', () => {
+test('pipe takes precedence over hyphen for the client cut', () => {
   eq(parseTaskName('Smith-Jones Ltd | Internal'), { client_name: 'Smith-Jones Ltd', testing_type: 'Internal' });
 });
 
-test('hyphen takes precedence over trailing-type match', () => {
-  eq(parseTaskName('Acme - Grey Box'), { client_name: 'Acme', testing_type: 'Grey Box' });
-});
-
-// ── No-pipe format ───────────────────────────────────────────────────────────
-console.log('\nNo-pipe format:');
+// ── No-separator format ──────────────────────────────────────────────────────
+console.log('\nNo-separator format:');
 
 test('single-word type at end', () => {
   eq(parseTaskName('Acme Corp External'), { client_name: 'Acme Corp', testing_type: 'External' });
@@ -107,7 +101,6 @@ test('single-word type — CIS', () => {
 });
 
 test('multi-word type wins over shorter match', () => {
-  // "Grey Box" should win, not "Box"
   eq(parseTaskName('Acme Corp Grey Box'), { client_name: 'Acme Corp', testing_type: 'Grey Box' });
 });
 
@@ -127,23 +120,88 @@ test('multi-word type — Mobile App', () => {
   eq(parseTaskName('Startup Co Mobile App'), { client_name: 'Startup Co', testing_type: 'Mobile App' });
 });
 
-test('case-insensitive match without pipe', () => {
+test('case-insensitive match without a separator', () => {
   eq(parseTaskName('Acme Corp grey box'), { client_name: 'Acme Corp', testing_type: 'Grey Box' });
+});
+
+// ── HubSpot deal names ───────────────────────────────────────────────────────
+// The real names the HubSpot → ClickUp automation creates: "Client - Deal title -
+// Service", with '|' and '-' mixed freely. The service is searched for anywhere in
+// the name, so the deal title in the middle is no longer read as the testing type.
+console.log('\nHubSpot deal names:');
+
+test('deal title in the middle is not mistaken for the type', () => {
+  eq(parseTaskName('Seatmaps Ltd - Penetration Test & DTA - Black Box Penetration Testing'),
+     { client_name: 'Seatmaps Ltd', testing_type: 'Black Box' });
+});
+
+test('longest service phrase wins over the one nested inside it', () => {
+  // "Mobile Device Application Penetration Testing" contains "Application
+  // Penetration Testing" (Web App) — the longer, more specific phrase must win.
+  eq(parseTaskName('Quint - Web App Testing (Money Guru & Credit Angel) - Mobile Device Application Penetration Testing'),
+     { client_name: 'Quint', testing_type: 'Mobile App' });
+});
+
+test('per-target qualifier after the service becomes the scope', () => {
+  eq(parseTaskName('Quint - Web App Testing (Money Guru & Credit Angel) - Application Penetration Testing- Money Guru'),
+     { client_name: 'Quint', testing_type: 'Web App', scope: 'Money Guru' });
+});
+
+test('two same-type deals for one client stay distinguishable', () => {
+  const a = parseTaskName('Quint - Web App Testing (Money Guru & Credit Angel) - Application Penetration Testing- Money Guru');
+  const b = parseTaskName('Quint - Web App Testing (Money Guru & Credit Angel) - Application Penetration Testing- Credit Angel');
+  assert.strictEqual(a.client_name, b.client_name);
+  assert.strictEqual(a.testing_type, b.testing_type);
+  assert.notStrictEqual(a.scope, b.scope);
+});
+
+test('"Internal Audit" in a deal title is not an Internal test', () => {
+  eq(parseTaskName('Cadensys LTD - Vanta Renewal, Internal Audit, VM Scanning & Pen Testing - Black Box Penetration Test'),
+     { client_name: 'Cadensys LTD', testing_type: 'Black Box' });
+});
+
+test('mixed pipe and hyphen separators — client is the first segment', () => {
+  eq(parseTaskName('Weflayr | Basic Internal Audit ISO 27001 - Free Black Box Pentest'),
+     { client_name: 'Weflayr', testing_type: 'Black Box' });
+});
+
+test('compliance framework in the middle is not the type', () => {
+  eq(parseTaskName('SANDAN AI | 30-Day Fast Start | ISO 27001 | Black Box Pentest'),
+     { client_name: 'SANDAN AI', testing_type: 'Black Box' });
+});
+
+test('repeated deal title segments do not leak into the client name', () => {
+  eq(parseTaskName('Gable Group | Vanta Fast Start - Vanta Fast Start - ISO 27001 | Black Box Pentest'),
+     { client_name: 'Gable Group', testing_type: 'Black Box' });
+});
+
+test('colourless application testing resolves to Web App', () => {
+  eq(parseTaskName('Ballpark Labs Ltd - Additional Testing Days - Application Penetration Testing'),
+     { client_name: 'Ballpark Labs Ltd', testing_type: 'Web App' });
+});
+
+test('the template placeholder never resolves to a testing type', () => {
+  // This is what filed 13 reports under a Plextrac client called "PT": the old
+  // parser read "Project Template" as a testing type, so the pipeline ran on it.
+  eq(parseTaskName('PT - Project Template'), { client_name: 'PT', testing_type: 'Unknown' });
 });
 
 // ── Word boundary ────────────────────────────────────────────────────────────
 console.log('\nWord boundary:');
 
-test('does not match type embedded mid-word', () => {
-  // "ExternalSystem" should not match "External"
+test('does not match a type embedded mid-word', () => {
   eq(parseTaskName('Client ExternalSystem'), { client_name: 'Client ExternalSystem', testing_type: 'Unknown' });
 });
 
 // ── Unknown type ─────────────────────────────────────────────────────────────
 console.log('\nUnknown type:');
 
-test('no pipe, no known type → Unknown', () => {
+test('no known type → Unknown', () => {
   eq(parseTaskName('Acme Corp Bespoke Work'), { client_name: 'Acme Corp Bespoke Work', testing_type: 'Unknown' });
+});
+
+test('unknown type still splits the client off the first separator', () => {
+  eq(parseTaskName('Acme Corp - Bespoke - Work'), { client_name: 'Acme Corp', testing_type: 'Unknown' });
 });
 
 test('empty string → Unknown', () => {

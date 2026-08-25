@@ -34,6 +34,22 @@ test('a real project name is not a placeholder', () => {
   assert.strictEqual(isPlaceholderTaskName('Acme Corp | Grey Box'), false);
 });
 
+test('matches the Penetration Test template task by name', () => {
+  // "PT - Project Template" ran the full create pipeline and filed every templated
+  // deal under a Plextrac client called "PT" until it was recognised here.
+  assert.strictEqual(isPlaceholderTaskName('PT - Project Template'), true);
+});
+
+test('recognises template scaffolding structurally, not just by exact name', () => {
+  assert.strictEqual(isPlaceholderTaskName('VMaaS Project List Template'), true);
+  assert.strictEqual(isPlaceholderTaskName('Project Template'), true);
+  assert.strictEqual(isPlaceholderTaskName('CE - Task Template'), true);
+});
+
+test('a client whose name merely contains "template" is not a placeholder', () => {
+  assert.strictEqual(isPlaceholderTaskName('Template Recruitment Ltd | Black Box'), false);
+});
+
 test('empty / missing names are not placeholders', () => {
   assert.strictEqual(isPlaceholderTaskName(''), false);
   assert.strictEqual(isPlaceholderTaskName(undefined), false);
@@ -50,6 +66,20 @@ test('changing the testing type changes the report name', () => {
   const greyBox = buildReportName('Grey Box', startMs);
   assert.notStrictEqual(blackBox, greyBox);
   assert.ok(greyBox.startsWith('Grey Box | '), `unexpected name: ${greyBox}`);
+});
+
+test('a scope qualifier keeps same-type reports for one client distinct', () => {
+  const startMs = Date.UTC(2026, 7, 15);
+  const moneyGuru = buildReportName('Web App', startMs, 'Money Guru');
+  const creditAngel = buildReportName('Web App', startMs, 'Credit Angel');
+  assert.strictEqual(moneyGuru, 'Web App (Money Guru) | August 2026');
+  assert.notStrictEqual(moneyGuru, creditAngel);
+});
+
+test('no scope leaves the report name unchanged', () => {
+  const startMs = Date.UTC(2026, 7, 15);
+  assert.strictEqual(buildReportName('Black Box', startMs, null), 'Black Box | August 2026');
+  assert.strictEqual(buildReportName('Black Box', startMs), 'Black Box | August 2026');
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────

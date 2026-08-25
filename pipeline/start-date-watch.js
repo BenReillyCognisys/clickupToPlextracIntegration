@@ -15,6 +15,7 @@ const store = require('../lib/task-store');
 const { getTask } = require('../lib/clickup-api');
 const api = require('../lib/plextrac-api');
 const { buildReportName, epochToISO } = require('./plextrac-report');
+const { parseTaskName } = require('./parse-task');
 const log = require('../lib/logger');
 
 // Derives the testing type for the report name. Prefer the value stored at
@@ -66,7 +67,10 @@ async function processPending(mapping) {
     return 'error';
   }
 
-  const resolvedName = buildReportName(testingTypeFor(mapping, currentName), task.start_date);
+  // Scope comes from the live task name so the rebuilt name matches what the create
+  // pipeline would produce today; the type still prefers the value stored at creation.
+  const { scope } = parseTaskName(task.name);
+  const resolvedName = buildReportName(testingTypeFor(mapping, currentName), task.start_date, scope);
   const nameChanged  = currentName == null || currentName.toLowerCase() !== resolvedName.toLowerCase();
 
   // Backfill the report's start/end dates from the task regardless — they were

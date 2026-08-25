@@ -1,6 +1,7 @@
 const api = require('../lib/plextrac-api');
 const log = require('../lib/logger');
 const TEMPLATE_MAP = require('../config/template-map');
+const { parseTaskName } = require('./parse-task');
 const store = require('../lib/task-store');
 
 const DEFAULT_TEMPLATE_NAME = process.env.PLEXTRAC_REPORT_TEMPLATE || 'Cognisys Web Application Black Box';
@@ -28,10 +29,16 @@ function epochToISO(epochMs) {
   return new Date(Number(epochMs)).toISOString();
 }
 
-function buildReportName(testingType, startEpochMs) {
+// `scope` is the per-target qualifier parsed off the end of the task name (see
+// pipeline/parse-task.js) — "Money Guru" in "… - Application Penetration Testing-
+// Money Guru". Two same-type engagements for one client in the same month would
+// otherwise produce identical report names, and the duplicate check below would
+// silently drop the second one.
+function buildReportName(testingType, startEpochMs, scope) {
   // Month/year derived from the task start date; fallback to current date with a warning
   const d = startEpochMs ? new Date(Number(startEpochMs)) : new Date();
-  return `${testingType} | ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+  const label = scope ? `${testingType} (${scope})` : testingType;
+  return `${label} | ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
 }
 
 // ── ID resolution helpers ─────────────────────────────────────────────────────
@@ -72,7 +79,8 @@ async function createReport(clientId, task, testingType) {
     });
   }
 
-  const name = buildReportName(testingType, task.start_date);
+  const { scope } = parseTaskName(task.name);
+  const name = buildReportName(testingType, task.start_date, scope);
 
   // Idempotency: skip if a report with this exact name already exists under the client
   const existingReports = await api.listClientReports(clientId);
