@@ -6,7 +6,6 @@ const { validateToken } = require('./lib/clickup-api');
 const { runAuthFormCheck, reconcileAuthFormMessage } = require('./pipeline/auth-form-check');
 const { runReportsDueCheck } = require('./pipeline/reports-due');
 const { runStartDateWatch } = require('./pipeline/start-date-watch');
-const { runMfaCheck } = require('./pipeline/mfa-check');
 const { seedQaQueue } = require('./pipeline/qa-queue-seed');
 const { startAvailabilityCache, requireApiKey } = require('./lib/availability-cache');
 const log = require('./lib/logger');
@@ -158,15 +157,6 @@ app.post('/jobs/start-date-watch', apiLimiter, requireApiKey, (req, res) => {
   runStartDateWatch().catch(err => log.error('Start-date watch failed', { reason: err.message }));
 });
 
-// Manual trigger for the daily MFA-enforcement check (also runs on a 14:00 cron
-// below). Requires the X-API-Key header and is rate-limited. Always responds with
-// a blank 200 and discloses nothing; the check runs fire-and-forget with the list
-// of users lacking enforced MFA printed to the console/logs.
-app.post('/jobs/mfa-check', apiLimiter, requireApiKey, (req, res) => {
-  res.status(200).end();
-  runMfaCheck().catch(err => log.error('MFA check failed', { reason: err.message }));
-});
-
 // One-shot backfill for the QA queue (the /reportqueue Slack commands). Walks the
 // whole Plextrac tenant and seeds any report currently in first- or second-round QA,
 // for reports that were already in QA before the webhook-driven queue existed.
@@ -219,16 +209,6 @@ if (START_DATE_WATCH_CRON) {
     runStartDateWatch().catch(err => log.error('Start-date watch failed', { reason: err.message }));
   }, { timezone: START_DATE_WATCH_TZ });
 }
-
-// MFA-enforcement check at 14:00 (2pm) on working days (Mon–Fri). Override the
-// schedule with MFA_CHECK_CRON (standard cron) or the timezone with MFA_CHECK_TZ.
-// Posts the users who do not have MFA enforced to Slack.
-const MFA_CHECK_CRON = process.env.MFA_CHECK_CRON || '0 14 * * 1-5';
-const MFA_CHECK_TZ = process.env.MFA_CHECK_TZ || 'Europe/London';
-cron.schedule(MFA_CHECK_CRON, () => {
-  console.log('[cron] Triggering daily MFA-enforcement check…');
-  runMfaCheck().catch(err => log.error('MFA check failed', { reason: err.message }));
-}, { timezone: MFA_CHECK_TZ });
 
 app.listen(PORT, async () => {
   console.log(`Server listening on port ${PORT}`);
