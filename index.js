@@ -113,6 +113,16 @@ app.use('/schedule', schedulingCors, require('./routes/schedule'));
 // the /jobs/* endpoints.
 app.use('/clickup', apiLimiter, require('./routes/clickup-actions'));
 
+// Manual repair endpoints for missed or mis-mapped automations (X-API-Key:
+// AVAILABILITY_API_KEY). Unlike the /jobs/* triggers below these answer
+// synchronously with what they did — see routes/task-admin.js.
+//   GET  /tasks/:taskId — which pipeline handles a task and which report it drives
+//   POST /tasks/replay  — { taskId, force?, adopt? } process a task as if its
+//                         taskCreated webhook had just arrived
+//   POST /tasks/remap   — { fromTaskId, toTaskId } move a report's automations onto
+//                         a different ClickUp task (duplicates)
+app.use('/tasks', apiLimiter, require('./routes/task-admin'));
+
 // Manual trigger for the daily auth-form check (also runs on a 14:00 cron below).
 // Requires the X-API-Key header (AVAILABILITY_API_KEY) and is rate-limited. Always
 // responds with a blank 200 and discloses nothing; the check runs fire-and-forget

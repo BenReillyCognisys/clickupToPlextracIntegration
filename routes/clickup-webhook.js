@@ -1,10 +1,9 @@
 const crypto = require('crypto');
-const axios = require('axios');
 const { runPipeline } = require('../pipeline');
 const { handleTaskRename } = require('../pipeline/task-rename');
 const { crossOffReport } = require('../pipeline/reports-due');
 const { runVmaasPipeline, handleVmaasRename, handleVmaasStatusChange } = require('../pipeline/vmaas');
-const { classifyTask } = require('../config/monitored-spaces');
+const { loadMonitoredTask } = require('../pipeline/load-task');
 const { withTaskLock } = require('../lib/task-lock');
 const log = require('../lib/logger');
 
@@ -46,51 +45,6 @@ function nameChangeFromPayload(payload) {
   const item = (payload.history_items || []).find((h) => h.field === 'name');
   if (!item) return null;
   return { before: item.before ?? null, after: item.after ?? null };
-}
-
-async function fetchTaskDetails(taskId) {
-  try {
-    const { data } = await axios.get(`https://api.clickup.com/api/v2/task/${taskId}`, {
-      headers: { Authorization: process.env.CLICKUP_API_TOKEN },
-    });
-    return data;
-  } catch (err) {
-    if (err.response?.status === 401 || err.response?.status === 403) {
-      throw new Error('CLICKUP_API_TOKEN is invalid or revoked — check your .env');
-    }
-    throw err;
-  }
-}
-
-// Fetches a task and applies the monitored-space / not-a-subtask filters shared by
-// the taskCreated, taskUpdated and taskStatusUpdated paths. Returns
-// { task, pipeline } — 'pentest' or 'vmaas' — or null when the task can't be
-// fetched or shouldn't be processed (the reason is logged).
-async function loadMonitoredTask(taskId) {
-  let task;
-  try {
-    task = await fetchTaskDetails(taskId);
-  } catch (err) {
-    log.error('Failed to fetch ClickUp task details', { reason: err.message, task_id: taskId });
-    return null;
-  }
-
-  // Subtasks are not delivery tasks in either space — no report, no auth form.
-  if (task.parent) {
-    log.info('Task ignored — subtask skipped', { task: task.name, parent: task.parent });
-    return null;
-  }
-
-  const { pipeline, reason } = classifyTask(task);
-  if (!pipeline) {
-    log.info(`Task ignored — ${reason}`, {
-      task: task.name, space: task.space?.name, space_id: task.space?.id,
-      folder: task.folder?.name || null, list: task.list?.name || null,
-    });
-    return null;
-  }
-
-  return { task, pipeline };
 }
 
 async function handler(req, res) {
@@ -137,9 +91,9 @@ async function handler(req, res) {
 
     // Otherwise fetch the task to see whose status changed. VMaaS has no
     // reports-due equivalent yet, so its handler only records the change.
-    const monitored = await loadMonitoredTask(payload.task_id);
-    if (monitored?.pipeline === 'vmaas') {
-      await handleVmaasStatusChange(monitored.task, status);
+    const { task: statusTask, pipeline: statusPipeline } = await loadMonitoredTask(payload.task_id);
+    if (statusPipeline === 'vmaas') {
+      await handleVmaasStatusChange(statusTask, status);
     }
     return;
   }
@@ -160,9 +114,8 @@ async function handler(req, res) {
     const nameChange = nameChangeFromPayload(payload);
     if (!nameChange) return;
     await withTaskLock(payload.task_id, async () => {
-      const monitored = await loadMonitoredTask(payload.task_id);
-      if (!monitored) return;
-      const { task, pipeline } = monitored;
+      const { task, pipeline } = await loadMonitoredTask(payload.task_id);
+      if (!pipeline) return;
       log.info('ClickUp task renamed', {
         task: task.name, task_id: task.id, previous_name: nameChange.before || null, pipeline,
       });
@@ -178,9 +131,8 @@ async function handler(req, res) {
   if (payload.event !== 'taskCreated') return;
 
   await withTaskLock(payload.task_id, async () => {
-    const monitored = await loadMonitoredTask(payload.task_id);
-    if (!monitored) return;
-    const { task, pipeline } = monitored;
+    const { task, pipeline } = await loadMonitoredTask(payload.task_id);
+    if (!pipeline) return;
     log.info('ClickUp task received', { task: task.name, task_id: task.id, pipeline });
     if (pipeline === 'vmaas') {
       await runVmaasPipeline(task);

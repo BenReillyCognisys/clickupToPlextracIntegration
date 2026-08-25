@@ -89,6 +89,87 @@ test('pipe takes precedence over hyphen for the client cut', () => {
   eq(parseTaskName('Smith-Jones Ltd | Internal'), { client_name: 'Smith-Jones Ltd', testing_type: 'Internal' });
 });
 
+// ── Misordered names (testing type entered before the client) ───────────────
+// The client name must never end up being a testing type. These names put the type
+// first, so the client is recovered from the remaining segments and flagged.
+console.log('\nMisordered names:');
+
+// Compares only the two fields these cases are about, ignoring scope/warning.
+function eqCore(parsed, expected) {
+  assert.deepStrictEqual(
+    { client_name: parsed.client_name, testing_type: parsed.testing_type }, expected);
+}
+
+const REPORTED = 'Black Box Pen Test - Brask - Black Box Web Application Penetration Testing';
+
+test('type-first, three segments — middle segment is the client', () => {
+  eqCore(parseTaskName(REPORTED), { client_name: 'Brask', testing_type: 'Black Box' });
+});
+
+test('misordered name carries a warning', () => {
+  assert.match(parseTaskName(REPORTED).warning, /out of order/);
+});
+
+test('well-formed name carries no warning', () => {
+  assert.strictEqual(parseTaskName('Brask | Black Box').warning, undefined);
+});
+
+test('type-first, two segments — client is the trailing segment', () => {
+  eqCore(parseTaskName('Black Box Pen Test - Brask'), { client_name: 'Brask', testing_type: 'Black Box' });
+});
+
+test('the recovered client is never mistaken for a scope qualifier', () => {
+  // "Brask" trails the testing type, but it's the client — it must not end up in
+  // the report name as "Black Box (Brask)".
+  assert.strictEqual(parseTaskName('Black Box Pen Test - Brask').scope, null);
+});
+
+test('type-first with a canonical type — client recovered, type normalised', () => {
+  eqCore(parseTaskName('Black Box - Brask'), { client_name: 'Brask', testing_type: 'Black Box' });
+});
+
+test('reversed pipe halves are swapped', () => {
+  eqCore(parseTaskName('Black Box Pen Test | Brask'), { client_name: 'Brask', testing_type: 'Black Box' });
+});
+
+test('client buried in a type-first pipe left-hand side', () => {
+  eqCore(parseTaskName('Black Box Pen Test - Brask | Black Box Web Application Penetration Testing'),
+         { client_name: 'Brask', testing_type: 'Black Box' });
+});
+
+test('client whose name merely contains a type word is left alone', () => {
+  eq(parseTaskName('Internal Systems Ltd - Grey Box'),
+     { client_name: 'Internal Systems Ltd', testing_type: 'Grey Box' });
+  eq(parseTaskName('Audit Partners Ltd | Code Review'),
+     { client_name: 'Audit Partners Ltd', testing_type: 'Code Review' });
+  eq(parseTaskName('Review Group | Bespoke Thing'),
+     { client_name: 'Review Group', testing_type: 'Unknown' });
+});
+
+test('a strong type phrase inside a real company name does not steal the client', () => {
+  eq(parseTaskName('Pentest Partners Ltd - Black Box'),
+     { client_name: 'Pentest Partners Ltd', testing_type: 'Black Box' });
+});
+
+test('every segment reads as a type — left to the normal rules', () => {
+  eq(parseTaskName('Black Box - Grey Box'), { client_name: 'Black Box', testing_type: 'Grey Box' });
+});
+
+// ── Methodology outranks target ──────────────────────────────────────────────
+// A name carrying both resolves to the methodology, because that is what
+// config/template-map.js selects a Plextrac template on.
+console.log('\nMethodology vs target:');
+
+test('black box web app testing is Black Box, not Web App', () => {
+  eq(parseTaskName('Acme Ltd - Black Box Web Application Penetration Testing'),
+     { client_name: 'Acme Ltd', testing_type: 'Black Box' });
+});
+
+test('with no methodology named, the target type stands', () => {
+  eq(parseTaskName('Acme Ltd - Web Application Penetration Testing'),
+     { client_name: 'Acme Ltd', testing_type: 'Web App' });
+});
+
 // ── No-separator format ──────────────────────────────────────────────────────
 console.log('\nNo-separator format:');
 

@@ -51,6 +51,13 @@ clickupApi.updateTaskSchedule = async (taskId, opts) => {
   if (taskId === 'FAIL') throw new Error('boom (schedule)');
   scheduled.push({ taskId, ...opts });
 };
+// Recorded updateTaskStatus calls; 'STATUSFAIL' models a rejected status (e.g. the
+// status doesn't exist in the space) so the non-fatal path can be asserted.
+const statusWrites = [];
+clickupApi.updateTaskStatus = async (taskId, status) => {
+  if (taskId === 'STATUSFAIL') throw new Error('boom (status)');
+  statusWrites.push({ taskId, status });
+};
 // Uploads to a File custom field entity (V3) and returns a fresh attachment id.
 let lastUpload = null;
 clickupApi.uploadCustomFieldAttachment = async (workspaceId, fieldId, buffer, filename) => {
@@ -452,6 +459,85 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.json.skipped, undefined);
     assert.strictEqual(scheduled.length, before + 1, 'transient read failure does not block scheduling');
+  });
+
+  // ── finalised-auth-form: pre-reqs status ──────────────────────────────────────
+  console.log('\nPOST /clickup/finalised-auth-form (pre-reqs status):');
+
+  await test('advances a task in an early status to the pre-reqs status', async () => {
+    taskState = { PR1: { status: { status: 'to do', type: 'open' } } };
+    const before = statusWrites.length;
+    const r = await request('/clickup/finalised-auth-form', {
+      headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskId: 'PR1' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.results[0].status, 'set');
+    assert.strictEqual(statusWrites.length, before + 1);
+    assert.deepStrictEqual(statusWrites.at(-1), { taskId: 'PR1', status: 'Waiting for Pre-reqs' });
+  });
+
+  await test('matches the early status case-insensitively', async () => {
+    taskState = { PR2: { status: { status: 'To Do', type: 'open' } } };
+    const r = await request('/clickup/finalised-auth-form', {
+      headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskId: 'PR2' },
+    });
+    assert.strictEqual(r.json.results[0].status, 'set');
+  });
+
+  await test('leaves a task that has moved on alone (QA is not dragged backwards)', async () => {
+    taskState = { PR3: { status: { status: 'QA / Reviewing', type: 'custom' } } };
+    const before = statusWrites.length;
+    const r = await request('/clickup/finalised-auth-form', {
+      headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskId: 'PR3' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.results[0].action, 'attached', 'the form is still attached');
+    assert.strictEqual(r.json.results[0].status, 'skipped');
+    assert.strictEqual(statusWrites.length, before, 'no status write happened');
+  });
+
+  await test('a task already in the pre-reqs status is not re-written', async () => {
+    taskState = { PR4: { status: { status: 'Waiting for Pre-reqs', type: 'custom' } } };
+    const before = statusWrites.length;
+    const r = await request('/clickup/finalised-auth-form', {
+      headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskId: 'PR4' },
+    });
+    assert.strictEqual(r.json.results[0].status, 'already_set');
+    assert.strictEqual(statusWrites.length, before);
+  });
+
+  await test('a failed status write is non-fatal — the form stays attached', async () => {
+    taskState = { STATUSFAIL: { status: { status: 'to do', type: 'open' } } };
+    const r = await request('/clickup/finalised-auth-form', {
+      headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskId: 'STATUSFAIL' },
+    });
+    assert.strictEqual(r.status, 200, 'not a 502 — the attachment already succeeded');
+    assert.strictEqual(r.json.ok, true);
+    assert.strictEqual(r.json.results[0].action, 'attached');
+    assert.strictEqual(r.json.results[0].status, 'failed');
+    assert.strictEqual((attachments.STATUSFAIL || []).length, 1);
+  });
+
+  await test('a merged form advances each task independently', async () => {
+    taskState = {
+      PR5: { status: { status: 'to do', type: 'open' } },
+      PR6: { status: { status: 'Completed', type: 'done' } },
+    };
+    const r = await request('/clickup/finalised-auth-form', {
+      headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskIds: ['PR5', 'PR6'] },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.deepStrictEqual(r.json.results.map((x) => x.status), ['set', 'skipped']);
+  });
+
+  await test('a task with no status field is skipped, not advanced', async () => {
+    taskState = { PR7: {} }; // getTask returned no status at all
+    const before = statusWrites.length;
+    const r = await request('/clickup/finalised-auth-form', {
+      headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskId: 'PR7' },
+    });
+    assert.strictEqual(r.json.results[0].status, 'skipped');
+    assert.strictEqual(statusWrites.length, before);
   });
 
   console.log(`\n${passed} passed, ${failed} failed\n`);

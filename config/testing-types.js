@@ -12,6 +12,11 @@
 // phrase, so "Mobile Device Application Penetration Testing" beats the
 // "Application Penetration Testing" sitting inside it.
 //
+// `methodology: true` marks a type that describes HOW the test is run (Black Box,
+// Grey Box) rather than WHAT is tested. When a name contains both — "Black Box Web
+// Application Penetration Testing" — the methodology wins, because that's what
+// config/template-map.js picks a Plextrac template on.
+//
 // `bareNotFollowedBy` guards the canonical name on its own, so that "Internal"
 // isn't harvested from "Internal Audit" in a deal like
 // "Vanta Renewal, Internal Audit, VM Scanning & Pen Testing - Black Box Pen Test".
@@ -70,7 +75,9 @@ module.exports = [
     ],
   },
   {
+    // Methodology, not a target — see the methodology rule in pipeline/parse-task.js.
     type: 'Grey Box',
+    methodology: true,
     aliases: [
       'grey box penetration testing', 'grey box penetration test', 'grey box pentest', 'grey box pen test',
       'gray box penetration testing', 'gray box penetration test', 'gray box pentest', 'gray box pen test',
@@ -79,6 +86,7 @@ module.exports = [
   },
   {
     type: 'Black Box',
+    methodology: true,
     aliases: [
       'black box penetration testing', 'black box penetration test', 'black box pentest', 'black box pen test',
       'blackbox',
