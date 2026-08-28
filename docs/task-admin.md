@@ -224,6 +224,11 @@ The "already scheduled, don't move it" guard is per task (it checks that task's
 `start_date`), so a target with no dates will still be scheduled even when the source
 already was.
 
+A Free Black Box is a **half day**, so it always lands on a single day: the endpoint
+ignores the `endDate` it was sent for this test type and writes the due date equal to
+the start date. (Callers often send the following day, which showed up as a 2-day
+booking.) Every other test type keeps the range it was given.
+
 A regular paid Black Box is never auto-scheduled — `POST /schedule/pentest` *creates* a
 task from a chosen consultant and date range, and has nothing to do with either
 endpoint here. A remapped task keeps whatever dates it already had in ClickUp.
