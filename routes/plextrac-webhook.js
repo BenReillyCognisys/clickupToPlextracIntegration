@@ -323,8 +323,10 @@ async function handler(req, res) {
   // When the report enters the QA status, kick off the automated AI QA review.
   // Fire-and-forget so the (fast) ClickUp status sync below isn't blocked by the
   // (slower, billable) review; runQaReview logs its own outcome and errors.
+  // `actorCuid` is whoever submitted the report for QA — the review @-mentions them
+  // if any of the report's custom fields are empty.
   if (reportStatus === QA_TRIGGER_STATUS) {
-    runQaReview(mapping).catch(err => {
+    runQaReview(mapping, { actorCuid }).catch(err => {
       log.error('QA review pipeline threw', {
         reason: err.message,
         cuid: targetCuid,
@@ -335,8 +337,10 @@ async function handler(req, res) {
 
   // When the report reaches the second-round QA status, the first round is complete:
   // announce it to #pt-second-round-qa, pinging the second-round reviewers and crediting
-  // whoever did the first QA (the actor who made this status change). Fire-and-forget so
-  // the ClickUp sync below isn't blocked by the cuid→name resolution; it logs its own errors.
+  // whoever did the first QA (the actor who made this status change). The report object
+  // is passed through so the announcement can run the empty-custom-field check without
+  // re-fetching it. Fire-and-forget so the ClickUp sync below isn't blocked by the
+  // cuid→name resolution; it logs its own errors.
   if (reportStatus === QA_SECOND_STATUS) {
     postSecondRoundQa({
       clientId:   mapping.plextrac_client_id,
@@ -346,6 +350,7 @@ async function handler(req, res) {
       reportUrl:  `${PLEXTRAC_BASE}/client/${mapping.plextrac_client_id}/report/${mapping.plextrac_report_id}`,
       actorCuid,
       reportId:   mapping.plextrac_report_id,
+      report,
     }).catch(err => {
       log.error('Second-round QA announcement threw', {
         reason: err.message, cuid: targetCuid, report_id: mapping.plextrac_report_id,
@@ -356,7 +361,8 @@ async function handler(req, res) {
   // When the report reaches the released status, it has cleared release QA and gone out:
   // announce it, pinging the release reviewers and crediting whoever released it (the
   // actor who made this status change). Fire-and-forget so the ClickUp sync below isn't
-  // blocked by the cuid→name resolution; it logs its own errors.
+  // blocked by the cuid→name resolution; it logs its own errors. The report object is
+  // passed through for the empty-custom-field check, as above.
   if (reportStatus === QA_RELEASED_STATUS) {
     postReleaseAnnouncement({
       clientId:   mapping.plextrac_client_id,
@@ -366,6 +372,7 @@ async function handler(req, res) {
       reportUrl:  `${PLEXTRAC_BASE}/client/${mapping.plextrac_client_id}/report/${mapping.plextrac_report_id}`,
       actorCuid,
       reportId:   mapping.plextrac_report_id,
+      report,
     }).catch(err => {
       log.error('Release announcement threw', {
         reason: err.message, cuid: targetCuid, report_id: mapping.plextrac_report_id,

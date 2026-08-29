@@ -33,8 +33,16 @@ function setByPath(obj, path, value) {
   return clone;
 }
 
+const { stripFormatting } = require('../../lib/html-text');
+
 // Sub-properties that hold the actual text inside an exec-summary section object.
 const TEXT_KEYS = ['text', 'value', 'custom_field', 'content', 'body'];
+
+// Report-level custom fields (Team Name, Author 1, Client Acronym, …) — the
+// label/value keys they can arrive under, and the labels allowed to be empty.
+const FIELD_LABEL_KEYS = ['label', 'title', 'name', 'key'];
+const FIELD_VALUE_KEYS = ['value', 'text', 'content', 'body'];
+const OPTIONAL_REPORT_FIELDS = require('../../config/optional-report-fields');
 
 // Section names that get a reduced review — client-name check only, no de-jargon
 // or incomplete-sentence checks (e.g. Methodology, Issue Matrix, Limitations).
@@ -122,6 +130,68 @@ function getFindingSegments(finding) {
   return segments;
 }
 
+// ── Report custom fields ─────────────────────────────────────────────────────
+// A report carries a set of label/value custom fields that feed the template's
+// %%...%% placeholders (Team Name, Author 1, Author 1 Title, Author 1 Email, …).
+// If one is left empty the rendered report has a hole in it, so first-round QA
+// checks them all bar the ones in config/optional-report-fields.js.
+
+// Whitespace-normalised, case-insensitive form of a label, for comparing the
+// live labels (which carry stray/doubled spaces) against the exempt list.
+function normaliseLabel(label) {
+  return String(label ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+// True if this field is allowed to be empty. Exact match on the normalised label
+// (not substring) so an exempt label never swallows a required one.
+function isOptionalField(label, optional = OPTIONAL_REPORT_FIELDS) {
+  const target = normaliseLabel(label);
+  if (!target) return false;
+  return optional.some(name => normaliseLabel(name) === target);
+}
+
+// True when a field's value carries no content. Values are rich text, so a
+// "cleared" field commonly still holds markup ("<p><br></p>", "&nbsp;") — strip
+// it before deciding. Numbers and booleans are values (0 and false included).
+function isBlankValue(value) {
+  if (value == null) return true;
+  if (typeof value === 'string') return stripFormatting(value).trim() === '';
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === 'object') return Object.keys(value).length === 0;
+  return false;
+}
+
+// Returns [{ path, label, value }] for the report's custom fields. Tolerant of the
+// key names the label/value can arrive under; a field with no recognisable label
+// falls back to its path so it is still reported rather than silently dropped.
+function getReportCustomFields(report) {
+  const candidates = ['custom_fields', 'customFields', 'report_custom_fields'];
+  const out = [];
+  for (const field of candidates) {
+    const list = report?.[field];
+    if (!Array.isArray(list)) continue;
+    list.forEach((entry, i) => {
+      if (!entry || typeof entry !== 'object') return;
+      const path = `${field}[${i}]`;
+      const labelKey = FIELD_LABEL_KEYS.find(k => typeof entry[k] === 'string' && entry[k].trim());
+      const valueKey = FIELD_VALUE_KEYS.find(k => entry[k] !== undefined);
+      out.push({
+        path,
+        label: labelKey ? entry[labelKey].trim() : path,
+        value: valueKey ? entry[valueKey] : undefined,
+      });
+    });
+  }
+  return out;
+}
+
+// Labels of every custom field that must be filled in but isn't.
+function findEmptyCustomFields(report, optional = OPTIONAL_REPORT_FIELDS) {
+  return getReportCustomFields(report)
+    .filter(f => !isOptionalField(f.label, optional) && isBlankValue(f.value))
+    .map(f => f.label);
+}
+
 // Best-effort canonical client name from a Plextrac client object (tolerant of
 // the array `data: [id, name, ...]` shape used elsewhere in this codebase).
 function clientNameFromRecord(clientRecord, fallback) {
@@ -139,4 +209,8 @@ module.exports = {
   getFindingSegments,
   clientNameFromRecord,
   isExcludedSection,
+  getReportCustomFields,
+  findEmptyCustomFields,
+  isOptionalField,
+  isBlankValue,
 };

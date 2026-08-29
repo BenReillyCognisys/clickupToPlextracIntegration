@@ -4,13 +4,15 @@
 // whoever did the first round (the actor who made this status change).
 //
 // Unlike the first-round pipeline (pipeline/qa-review), this does NO AI review and never
-// touches the Plextrac report — it is a single Slack notification. `buildSecondRoundMessage`
-// is a pure function so it can be unit-tested without Slack or the Plextrac API.
+// touches the Plextrac report — it is a single Slack notification, plus the deterministic
+// empty-custom-field check in its thread. `buildSecondRoundMessage` is a pure function so
+// it can be unit-tested without Slack or the Plextrac API.
 
 const slack = require('../lib/slack');
 const users = require('../lib/plextrac-users');
 const api = require('../lib/plextrac-api');
 const fields = require('./qa-review/report-fields');
+const { postEmptyFieldsNotice } = require('./qa-review/empty-fields');
 const log = require('../lib/logger');
 
 // #pt-second-round-qa channel id (override via env).
@@ -75,16 +77,24 @@ async function resolveClientName(clientId, fallback) {
 
 // Posts the second-round QA announcement to #pt-second-round-qa. Best-effort — any
 // failure is logged and swallowed so it never disrupts the rest of the webhook.
-async function postSecondRoundQa({ clientId, clientName, clientUrl, reportName, reportUrl, actorCuid, reportId }) {
+async function postSecondRoundQa({ clientId, clientName, clientUrl, reportName, reportUrl, actorCuid, reportId, report }) {
   const firstQaName = await resolveFirstQaName(actorCuid);
   const resolvedClientName = await resolveClientName(clientId, clientName);
   const text = buildSecondRoundMessage({ clientName: resolvedClientName, clientUrl, reportName, reportUrl, firstQaName });
+  let threadTs = null;
   try {
-    await slack.postMessage(SECOND_ROUND_QA_CHANNEL, text);
+    threadTs = await slack.postMessage(SECOND_ROUND_QA_CHANNEL, text);
     log.info('Second-round QA message posted', { report_id: reportId, first_qa: firstQaName });
   } catch (err) {
     log.error('Failed to post second-round QA message to Slack', { reason: err.message, report_id: reportId });
   }
+
+  // Same empty-custom-field check the first round runs, reported in this
+  // announcement's thread and @-ing whoever sent the report on for second-round QA.
+  // Best-effort and self-logging — it never throws.
+  await postEmptyFieldsNotice({
+    report, channel: SECOND_ROUND_QA_CHANNEL, threadTs, actorCuid, reportId, round: 'second',
+  });
 }
 
 module.exports = { postSecondRoundQa, buildSecondRoundMessage, resolveFirstQaName };

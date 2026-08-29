@@ -4,14 +4,20 @@
 // who made this status change).
 //
 // Like the second-round announcement (pipeline/qa-second-round), this does NO AI review
-// and never touches the Plextrac report — it is a single Slack notification.
+// and never touches the Plextrac report — it is a single Slack notification, plus the
+// deterministic empty-custom-field check and the PDF export in its thread.
 // `buildReleaseMessage` is a pure function so it can be unit-tested without Slack or the
 // Plextrac API.
+//
+// Releasing is also what triggers the report being exported to PDF and filed in Google
+// Drive (pipeline/report-export.js) — a released report is the version worth keeping.
 
 const slack = require('../lib/slack');
 const users = require('../lib/plextrac-users');
 const api = require('../lib/plextrac-api');
 const fields = require('./qa-review/report-fields');
+const { postEmptyFieldsNotice } = require('./qa-review/empty-fields');
+const { exportReleasedReport } = require('./report-export');
 const log = require('../lib/logger');
 
 // Channel for the release announcement (shares #pt-second-round-qa by default; override).
@@ -75,16 +81,37 @@ async function resolveClientName(clientId, fallback) {
 
 // Posts the release announcement to the release channel. Best-effort — any failure is
 // logged and swallowed so it never disrupts the rest of the webhook.
-async function postReleaseAnnouncement({ clientId, clientName, clientUrl, reportName, reportUrl, actorCuid, reportId }) {
+async function postReleaseAnnouncement({ clientId, clientName, clientUrl, reportName, reportUrl, actorCuid, reportId, report }) {
   const releaseQaName = await resolveReleaseQaName(actorCuid);
   const resolvedClientName = await resolveClientName(clientId, clientName);
   const text = buildReleaseMessage({ clientName: resolvedClientName, clientUrl, reportName, reportUrl, releaseQaName });
+  let threadTs = null;
   try {
-    await slack.postMessage(RELEASED_QA_CHANNEL, text);
+    threadTs = await slack.postMessage(RELEASED_QA_CHANNEL, text);
     log.info('Release announcement posted', { report_id: reportId, release_qa: releaseQaName });
   } catch (err) {
     log.error('Failed to post release announcement to Slack', { reason: err.message, report_id: reportId });
   }
+
+  // Same empty-custom-field check the earlier rounds run, reported in this
+  // announcement's thread and @-ing whoever released the report. The release wording
+  // is deliberately louder: this one went out with the holes still in it.
+  // Best-effort and self-logging — it never throws.
+  await postEmptyFieldsNotice({
+    report, channel: RELEASED_QA_CHANNEL, threadTs, actorCuid, reportId, round: 'released',
+  });
+
+  // Export the released report to PDF and file it in Google Drive, linking it in this
+  // announcement's thread. Best-effort and self-logging — it never throws, and it
+  // no-ops (with a warning) until GOOGLE_DRIVE_REPORTS_FOLDER_ID is configured.
+  await exportReleasedReport({
+    clientId,
+    reportId,
+    clientName: resolvedClientName,
+    reportName,
+    channel: RELEASED_QA_CHANNEL,
+    threadTs,
+  });
 }
 
 module.exports = { postReleaseAnnouncement, buildReleaseMessage, resolveReleaseQaName };

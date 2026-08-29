@@ -7,12 +7,16 @@
 // Flow:
 //   1. Post the "ready for first round of QA" parent message to #pt-first-round-qa
 //      up front (so the channel is notified the moment review begins).
-//   2. Review the executive summary (formatting, client name, de-jargon, flag
+//   2. Check the report's custom fields (Team Name, Author 1, …) are filled in —
+//      deterministic, no AI. The exempt labels live in
+//      config/optional-report-fields.js.
+//   3. Review the executive summary (formatting, client name, de-jargon, flag
 //      incomplete sentences) — collecting suggestions, WITHOUT writing them back.
-//   3. Review each finding (formatting, client name, flag incomplete sentences —
+//   4. Review each finding (formatting, client name, flag incomplete sentences —
 //      NOT de-jargon: findings are for a technical audience) — suggestions only.
-//   4. Log every suggestion to the log file, then reply IN THE PARENT'S THREAD with
-//      the AI QA feedback (the suggested changes + flags) once the review has fully
+//   5. Log every suggestion to the log file, then reply IN THE PARENT'S THREAD with
+//      the AI QA feedback (the suggested changes + flags, and any empty custom
+//      fields @-ing whoever submitted the report) once the review has fully
 //      completed.
 
 const api = require('../../lib/plextrac-api');
@@ -20,6 +24,7 @@ const log = require('../../lib/logger');
 const slack = require('../../lib/slack');
 const { runChecks } = require('./checks');
 const fields = require('./report-fields');
+const { resolveActorMention, emptyFieldsLines } = require('./empty-fields');
 
 const MAX_FINDINGS = Number(process.env.QA_MAX_FINDINGS || 200);
 // #pt-first-round-qa channel id (override via env).
@@ -37,12 +42,17 @@ function findingId(item) {
 
 /**
  * @param {object} mapping  Mongo mapping: { plextrac_client_id, plextrac_report_id, task_name }
+ * @param {object} [options]
+ * @param {string} [options.actorCuid]  Plextrac cuid of whoever moved the report into
+ *   the QA status — i.e. the person who submitted it for first-round QA. Used to
+ *   @-mention them if the report has empty custom fields for them to fill in.
  */
-async function runQaReview(mapping) {
+async function runQaReview(mapping, { actorCuid } = {}) {
   const clientId = mapping.plextrac_client_id;
   const reportId = mapping.plextrac_report_id;
   const applied = [];
   const flags = [];
+  let emptyFields = [];
 
   log.info('QA review started', { client_id: clientId, report_id: reportId, task: mapping.task_name });
 
@@ -78,6 +88,15 @@ async function runQaReview(mapping) {
   const threadTs = await postFirstRoundParent({ clientName, clientUrl, reportName, reportUrl });
 
   try {
+    // ── Report custom fields ──────────────────────────────────────────────────
+    // Deterministic (no AI): every custom field must be filled in except the ones
+    // listed in config/optional-report-fields.js (Client Acronym, Client Full Name,
+    // Report Title, Version). Empty ones are reported to the submitter to fix.
+    emptyFields = fields.findEmptyCustomFields(report);
+    for (const label of emptyFields) {
+      log.warn('QA flag — report custom field is empty', { field: label, report_id: reportId });
+    }
+
     // ── Executive summary ─────────────────────────────────────────────────────
     // Report-only: run the checks to collect suggestions, but never write back.
     const execSegments = fields.getExecutiveSummarySegments(report);
@@ -147,15 +166,22 @@ async function runQaReview(mapping) {
     log.warn('QA flag (needs author attention)', { type: f.type, field: f.label, sentence: truncate(f.sentence, 120), issue: f.issue });
   }
 
+  // Only resolve the submitter when there is something for them to fix — it costs a
+  // Plextrac user listing plus a Slack lookup.
+  const submitter = emptyFields.length ? await resolveActorMention(actorCuid) : null;
+
   // Now that QA has fully completed, post the AI feedback as a threaded reply to
   // the parent message sent at the start.
-  await postFirstRoundReply({ threadTs, reportUrl, applied, flags });
+  await postFirstRoundReply({ threadTs, reportUrl, applied, flags, emptyFields, submitter });
 
   log.info('QA review complete', {
-    report_id: reportId, changes_applied: applied.length, flags_raised: flags.length,
+    report_id: reportId,
+    changes_applied: applied.length,
+    flags_raised: flags.length,
+    empty_custom_fields: emptyFields.length,
   });
 
-  return { applied, flags };
+  return { applied, flags, emptyFields };
 }
 
 // Escapes the three characters that are special in Slack mrkdwn link text.
@@ -187,8 +213,8 @@ async function postFirstRoundParent({ clientName, clientUrl, reportName, reportU
 // Posts the AI QA feedback once the review is complete — as a reply in the parent
 // message's thread. If the parent post failed (no threadTs), it falls back to a
 // standalone message so the feedback is never silently lost.
-async function postFirstRoundReply({ threadTs, reportUrl, applied, flags }) {
-  const body = buildThreadBody(applied, flags, reportUrl);
+async function postFirstRoundReply({ threadTs, reportUrl, applied, flags, emptyFields, submitter }) {
+  const body = buildThreadBody(applied, flags, reportUrl, { emptyFields, submitter });
   try {
     if (threadTs) await slack.postReply(FIRST_ROUND_QA_CHANNEL, threadTs, body);
     else await slack.postMessage(FIRST_ROUND_QA_CHANNEL, body);
@@ -198,11 +224,15 @@ async function postFirstRoundReply({ threadTs, reportUrl, applied, flags }) {
 }
 
 // Builds the threaded reply body listing the AI QA feedback.
-function buildThreadBody(applied, flags, url) {
+function buildThreadBody(applied, flags, url, { emptyFields = [], submitter } = {}) {
   const lines = [
     `*AI QA feedback* — <${url}|open report>`,
-    `${applied.length} change(s) suggested, ${flags.length} item(s) flagged. _Nothing has been applied to Plextrac — please review and apply manually._`,
+    `${applied.length} change(s) suggested, ${flags.length} item(s) flagged, ${emptyFields.length} empty custom field(s). _Nothing has been applied to Plextrac — please review and apply manually._`,
   ];
+
+  // Empty custom fields go first and @ the submitter — they're the one action item
+  // that belongs to a specific person rather than to whoever picks up the QA.
+  lines.push(...emptyFieldsLines(emptyFields, submitter));
 
   if (applied.length) {
     lines.push('', '*Suggested changes (not applied to Plextrac):*');
@@ -220,7 +250,9 @@ function buildThreadBody(applied, flags, url) {
     if (flags.length > 30) lines.push(`…and ${flags.length - 30} more (see log file).`);
   }
 
-  if (!applied.length && !flags.length) lines.push('', 'No changes or issues found.');
+  if (!applied.length && !flags.length && !emptyFields.length) {
+    lines.push('', 'No changes or issues found.');
+  }
 
   return lines.join('\n');
 }

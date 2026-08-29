@@ -29,10 +29,12 @@ routes/plextrac-webhook.js          verify signature → ack 200 → look up map
    │      3. post parent msg "Client: {client} - {report} ready for first round of
    │         QA" to #pt-first-round-qa FIRST (client + report names hyperlinked);
    │         keep its thread anchor
-   │      4. executive summary:  strip formatting → client-name → de-jargon → flag incomplete sentences  (suggestions only — no write-back)
-   │      5. findings:           strip formatting → client-name → flag incomplete sentences               (suggestions only — no write-back)
-   │      6. log every suggestion to LOG_FILE; once QA is fully complete, reply in the
-   │         parent's thread with the AI QA feedback (suggested changes + flags)
+   │      4. custom fields: flag any empty required field (deterministic, no AI)
+   │      5. executive summary:  strip formatting → client-name → de-jargon → flag incomplete sentences  (suggestions only — no write-back)
+   │      6. findings:           strip formatting → client-name → flag incomplete sentences               (suggestions only — no write-back)
+   │      7. log every suggestion to LOG_FILE; once QA is fully complete, reply in the
+   │         parent's thread with the AI QA feedback (suggested changes, flags, and
+   │         any empty custom fields @-ing whoever submitted the report)
    ├─ if report status === PLEXTRAC_QA_SECOND_STATUS → postSecondRoundQa(...)  [fire-and-forget]
    │    ▼
    │    pipeline/qa-second-round.js
@@ -40,12 +42,17 @@ routes/plextrac-webhook.js          verify signature → ack 200 → look up map
    │      {@reviewers}. First QA done by {name}" to #pt-second-round-qa.
    │      {name} = the actor who moved the report here (they did the first QA),
    │      resolved cuid → name via lib/plextrac-users. No AI review, no write-back.
+   │      Then re-runs the empty-custom-field check and, if anything is empty,
+   │      replies in that message's thread @-ing the actor.
    └─ if report status === PLEXTRAC_RELEASED_STATUS → postReleaseAnnouncement(...)  [fire-and-forget]
         ▼
         pipeline/qa-released.js
           post msg ":white_check_mark: Client: {client} - {report} released
           {@reviewers}. Release QA done by {name} :white_check_mark:".
           {name} = the actor who released it, resolved cuid → name. No write-back.
+          Then the same empty-custom-field check (louder wording — it has already
+          gone out), and the PDF export to Google Drive, both replied into that
+          thread.
 ```
 
 Reaching the second-round status means the first round of QA is **done**, so that
@@ -93,6 +100,7 @@ to an ID, the handler logs a warning and stops.
 | **Correct client name** | exec summary + findings | Claude API — replaces wrong org names with the real client name. **Protected names** (the testing provider — Cognisys / Cognisys Group / Cognisys Group Limited, configurable via `QA_PROTECTED_NAMES` / `config/protected-names.js`) are never changed. | Yes |
 | **De-jargon** (no TLS/SMB/etc.) | **exec summary only** | Claude API — rewrites for a non-technical audience | Yes |
 | **Incomplete sentences** | exec summary + findings | Claude API — **detection only** | **No — flagged to Slack** |
+| **Empty custom fields** | report custom fields — **all three rounds** | Deterministic — no AI. Every custom field must be filled in except the labels in `config/optional-report-fields.js` (`QA_OPTIONAL_REPORT_FIELDS`) | **No — flagged to Slack, @-ing that round's actor** |
 
 > The **"Auto-applied?"** column describes each check's *intent*. In the current
 > **report-only** first round, nothing is written to Plextrac — every "Yes" is
@@ -111,6 +119,40 @@ any revision that would remove or rename a protected organisation name (the
 testing provider — Cognisys, etc.; see `config/protected-names.js`). This
 deterministically prevents the client-name check from rewriting "Cognisys" into
 the client's name.
+
+**Empty custom fields.** A report's custom fields (**Team Name**, **Author 1**,
+**Author 1 Title**, **Author 1 Email**, …) fill the template's `%%...%%`
+placeholders, so one left blank leaves a hole in the rendered report.
+
+**All three rounds run this check** — first round, second round and release — so a
+field emptied (or added) after an earlier round is still caught. The **release round
+is worded differently on purpose**: the first two rounds ask for the fields before
+the report goes out, whereas at release it already has, so that notice leads with
+:rotating_light: *Released with empty custom fields* and asks for the report to be
+re-issued rather than just filled in. Each round reads
+the fields off the report and lists any that are empty in Slack, **@-mentioning
+the person who moved the report into that round** (the webhook's `actorCuid`,
+resolved cuid → Plextrac email → Slack id): the author who submitted it for QA,
+whoever passed it to second round, and whoever released it. That way the list
+always reaches someone who can fix it. If that person can't be resolved the fields
+are still listed, just without a ping.
+
+The shared implementation is `pipeline/qa-review/empty-fields.js`. First round
+folds the list into its existing threaded feedback body; the second-round and
+release announcements post it as a **reply in their own message's thread**, so the
+announcement itself stays clean and nothing is posted at all when every required
+field is filled. The second-round and release checks reuse the report object the
+webhook already fetched — no extra Plextrac call.
+
+A field counts as empty when its value is blank once HTML/entities are stripped —
+Plextrac stores a cleared rich-text field as `<p><br></p>`.
+
+**Client Acronym**, **Client Full Name**, **Report Title** and **Version** are
+exempt (they don't need to be filled in); everything else is checked. Change the
+exempt list in `config/optional-report-fields.js` or via
+`QA_OPTIONAL_REPORT_FIELDS`. Unlike the section lists, matching is on the **exact**
+label (case- and whitespace-insensitive, not substring) so an exempt label can
+never accidentally swallow a required one.
 
 **Why de-jargon is exec-summary-only:** findings are written for a technical
 audience; removing acronyms there would be wrong.
@@ -138,6 +180,41 @@ wording. Sections matching `config/dejargon-excluded-sections.js` (override via
 `QA_DEJARGON_EXCLUDED_SECTIONS`, comma-separated) skip de-jargon only. Matching is
 case-insensitive and substring-based ("Project Roadmap" matches "Roadmap",
 "Limitation" matches both the singular and "Limitations").
+
+## Released-report export (PDF → Google Drive)
+
+Releasing a report is also what files it. When a report reaches the released status,
+`pipeline/report-export.js` renders it to PDF via Plextrac and uploads that PDF to
+Google Drive, then posts the link as a reply in the release announcement's thread:
+
+```
+:page_facing_up: Report saved to Drive: <link|Acme Corp - Web App Pentest.pdf>
+```
+
+- **Where it lands.** `GOOGLE_DRIVE_REPORTS_FOLDER_ID` is the destination folder. By
+  default each report is filed under a **per-client subfolder** created on first use
+  (`<folder>/Acme Corp/Acme Corp - Web App Pentest.pdf`); set
+  `GOOGLE_DRIVE_REPORTS_SUBFOLDER_BY_CLIENT=false` for one flat folder.
+- **Re-releases replace, they don't duplicate.** The filename is derived from the
+  client and report names, so releasing the same report again **overwrites the Drive
+  file in place** — Drive keeps its own version history. That also makes a repeated
+  webhook delivery harmless.
+- **Nothing is fatal.** A failed export never affects the release: it is logged, and
+  a `:warning:` reply in the thread says the PDF needs saving manually and why.
+  Until `GOOGLE_DRIVE_REPORTS_FOLDER_ID` is set the export no-ops with a warning.
+- **Permissions.** Uploads use the existing service-account key
+  (`GOOGLE_SERVICE_ACCOUNT_KEY`) but request the full `.../auth/drive` scope, since
+  the read-only scope can't write and `drive.file` can't write into a folder the app
+  didn't create. **The service account (or the `GOOGLE_DRIVE_SUBJECT` user it
+  impersonates) needs Editor access to the destination folder.**
+
+> ⚠️ **The Plextrac export endpoint is unverified on this instance.** The default is
+> the documented v1 route
+> (`/api/v1/client/{clientId}/report/{reportId}/export/{format}`). Run
+> **`node scripts/inspect-export.js`** — it tries the known candidates and prints which
+> one returns a real PDF — then set `PLEXTRAC_EXPORT_PATH` accordingly. The pipeline
+> checks the response actually starts with `%PDF-`, so a JSON job/error body returned
+> with a 200 is reported in Slack rather than filed in Drive as an unopenable "PDF".
 
 ## Claude Pro vs Claude API
 
@@ -218,10 +295,17 @@ These were coded defensively but could not be validated against the real API:
 - `routes/plextrac-webhook.js` — existing webhook; triggers `runQaReview` on the first-round QA status, `postSecondRoundQa` on the second-round status, and `postReleaseAnnouncement` on the released status
 - `lib/slack.js` — Slack Web API helper (parent message + threaded reply for first-round QA)
 - `pipeline/qa-review/index.js` — first-round orchestrator
-- `pipeline/qa-second-round.js` — second-round QA announcement to #pt-second-round-qa (pings reviewers, credits the first-QA actor); `buildSecondRoundMessage` is pure
-- `pipeline/qa-released.js` — report-released announcement (pings release reviewers, credits the releasing actor); `buildReleaseMessage` is pure
+- `pipeline/qa-second-round.js` — second-round QA announcement to #pt-second-round-qa (pings reviewers, credits the first-QA actor, threads the empty-custom-field notice); `buildSecondRoundMessage` is pure
+- `pipeline/qa-released.js` — report-released announcement (pings release reviewers, credits the releasing actor, threads the empty-custom-field notice); `buildReleaseMessage` is pure
+- `pipeline/qa-review/empty-fields.js` — the empty-custom-field check shared by all three rounds (actor → Slack mention, per-round message lines, threaded notice)
+- `pipeline/report-export.js` — released report → PDF → Google Drive, linked in the release thread
+- `lib/google-drive.js` — Drive download (auth forms) and upload (`uploadFile`, per-client subfolders, replace-in-place)
+- `lib/plextrac-api.js` — added `exportReport` / `rawBinary` for file responses
+- `scripts/inspect-export.js` — diagnostic: which export endpoint returns a real PDF
+- `tests/report-export.test.js` — unit tests for the filename, PDF sniffing and the export flow
 - `pipeline/qa-review/checks.js` — per-segment check runner
 - `pipeline/qa-review/report-fields.js` — shape-tolerant field locate/read/write (tags reduced-review sections)
+- `config/optional-report-fields.js` — report custom fields allowed to be empty (Client Acronym, Client Full Name, Report Title, Version)
 - `config/excluded-sections.js` — exec-summary sections that get client-name-only review (Methodology, Issue Matrix, Limitations, …)
 - `config/dejargon-excluded-sections.js` — exec-summary sections that skip de-jargon only, keeping client-name + sentence checks (Limitation, Roadmap)
 - `pipeline/qa-review/change-tracking.js` — best-effort Plextrac tracking toggle
