@@ -191,14 +191,45 @@ Google Drive, then posts the link as a reply in the release announcement's threa
 :page_facing_up: Report saved to Drive: <link|Acme Corp - Web App Pentest.pdf>
 ```
 
-- **Where it lands.** `GOOGLE_DRIVE_REPORTS_FOLDER_ID` is the destination folder. By
-  default each report is filed under a **per-client subfolder** created on first use
-  (`<folder>/Acme Corp/Acme Corp - Web App Pentest.pdf`); set
-  `GOOGLE_DRIVE_REPORTS_SUBFOLDER_BY_CLIENT=false` for one flat folder.
+- **Where it lands.** `GOOGLE_DRIVE_REPORTS_FOLDER_ID` is the destination folder.
+  Inside it, each report is filed under a **month folder** created on first use:
+
+  ```
+  <folder>/001. July 2026/Acme Corp - Web App Pentest.pdf
+  <folder>/002. August 2026/Beta Ltd - Infrastructure Test.pdf
+  <folder>/003. September 2026/...
+  ```
+
+  The month is taken from **the time of the export** (i.e. when the report is
+  released), read in `GOOGLE_DRIVE_REPORTS_TZ` — `Europe/London` by default, so a
+  report released at 00:30 BST on the 1st lands in the new month rather than the one
+  UTC still says it is.
+
+  The `NNN.` prefix exists so Drive lists the months chronologically instead of
+  alphabetically. It counts **months forward from `GOOGLE_DRIVE_REPORTS_EPOCH_MONTH`**
+  (`2026-07` = `001`), so `002` is August 2026, `003` is September 2026, and
+  `294` is December 2050. It passes 999 into four digits rather than wrapping.
+
+  **The number depends only on which month it is — never on what is in Drive.** That
+  is deliberate: folders can be deleted (an 18-month retention sweep, an archive
+  tidy-up, or emptying the destination entirely) and every remaining and future folder
+  keeps the number it always had. A counter derived from the folders present would
+  slide backwards the moment anything was removed, so two different months could end
+  up sharing a number.
+
+  An existing folder for the month is always reused — matched on the **month name**,
+  whatever number it carries — so a second release in the same month never creates a
+  duplicate, and a folder someone renumbered by hand is left alone rather than twinned.
+
+  Set `GOOGLE_DRIVE_REPORTS_MONTH_FOLDERS=false` for one flat folder, or
+  `GOOGLE_DRIVE_REPORTS_SUBFOLDER_BY_CLIENT=true` to add a per-client level *inside*
+  the month folder (`<folder>/002. August 2026/Acme Corp/...`).
 - **Re-releases replace, they don't duplicate.** The filename is derived from the
   client and report names, so releasing the same report again **overwrites the Drive
   file in place** — Drive keeps its own version history. That also makes a repeated
-  webhook delivery harmless.
+  webhook delivery harmless. Note the replace is *within one month folder*: a report
+  first released in August and re-released in September is filed in both months, which
+  is usually what you want (the month folder records when it went out).
 - **Nothing is fatal.** A failed export never affects the release: it is logged, and
   a `:warning:` reply in the thread says the PDF needs saving manually and why.
   Until `GOOGLE_DRIVE_REPORTS_FOLDER_ID` is set the export no-ops with a warning.
@@ -299,7 +330,7 @@ These were coded defensively but could not be validated against the real API:
 - `pipeline/qa-released.js` — report-released announcement (pings release reviewers, credits the releasing actor, threads the empty-custom-field notice); `buildReleaseMessage` is pure
 - `pipeline/qa-review/empty-fields.js` — the empty-custom-field check shared by all three rounds (actor → Slack mention, per-round message lines, threaded notice)
 - `pipeline/report-export.js` — released report → PDF → Google Drive, linked in the release thread
-- `lib/google-drive.js` — Drive download (auth forms) and upload (`uploadFile`, per-client subfolders, replace-in-place)
+- `lib/google-drive.js` — Drive download (auth forms) and upload (`uploadFile`, month/client subfolders via `ensureSequencedFolder`, replace-in-place)
 - `lib/plextrac-api.js` — added `exportReport` / `rawBinary` for file responses
 - `scripts/inspect-export.js` — diagnostic: which export endpoint returns a real PDF
 - `tests/report-export.test.js` — unit tests for the filename, PDF sniffing and the export flow

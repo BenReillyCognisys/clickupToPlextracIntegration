@@ -28,7 +28,8 @@ slack.postReply = async (channel, threadTs, text) => { replies.push({ channel, t
 slack.postMessage = async (channel, text) => { replies.push({ channel, threadTs: null, text }); };
 
 const {
-  exportReleasedReport, reportFilename, safeFilename, looksLikePdf, buildExportMessage,
+  exportReleasedReport, monthLabel, monthFolder, reportFilename, safeFilename, looksLikePdf,
+  buildExportMessage,
 } = require('../pipeline/report-export');
 
 let passed = 0, failed = 0;
@@ -75,6 +76,73 @@ const RELEASE = {
     eq(safeFilename('a'.repeat(200)).length, 120);
   });
 
+  console.log('');
+  console.log('monthLabel:');
+
+  await test('"<Month> <Year>" for the given instant', () => {
+    eq(monthLabel(new Date('2026-08-29T12:00:00Z')), 'August 2026');
+    eq(monthLabel(new Date('2026-07-01T12:00:00Z')), 'July 2026');
+  });
+
+  await test('reads the month in the configured timezone, not UTC', () => {
+    // 00:30 BST on 1 September is still 23:30 UTC on 31 August. The report was
+    // exported in September, so it belongs in the September folder.
+    const justAfterMidnightBst = new Date('2026-08-31T23:30:00Z');
+    eq(monthLabel(justAfterMidnightBst, 'Europe/London'), 'September 2026');
+    eq(monthLabel(justAfterMidnightBst, 'UTC'), 'August 2026');
+  });
+
+  await test('defaults to now, so the folder follows export time', () => {
+    eq(monthLabel(), monthLabel(new Date()));
+  });
+
+  console.log('');
+  console.log('monthFolder — the number is anchored to the month, not to Drive:');
+
+  const at = (iso) => monthFolder(new Date(iso));
+
+  await test('counts months forward from the epoch (2026-07 = 001)', () => {
+    eq(at('2026-07-15T12:00:00Z'), { label: 'July 2026', sequence: 1 });
+    eq(at('2026-08-15T12:00:00Z'), { label: 'August 2026', sequence: 2 });
+    eq(at('2026-09-15T12:00:00Z'), { label: 'September 2026', sequence: 3 });
+  });
+
+  await test('keeps counting across year boundaries', () => {
+    eq(at('2026-12-15T12:00:00Z'), { label: 'December 2026', sequence: 6 });
+    eq(at('2027-01-15T12:00:00Z'), { label: 'January 2027', sequence: 7 });
+    eq(at('2027-07-15T12:00:00Z'), { label: 'July 2027', sequence: 13 });
+  });
+
+  await test('reaches three and four figures far out without special-casing', () => {
+    eq(at('2050-12-15T12:00:00Z'), { label: 'December 2050', sequence: 294 });
+    eq(at('2109-09-15T12:00:00Z').sequence, 999);
+    eq(at('2109-10-15T12:00:00Z').sequence, 1000);
+  });
+
+  await test('is a pure function of the month — nothing in Drive can shift it', () => {
+    // The property the retention sweep depends on: same month in, same number out,
+    // every time, whatever has been deleted in the meantime.
+    eq(at('2028-03-15T12:00:00Z').sequence, at('2028-03-01T00:30:00Z').sequence);
+    eq(at('2028-03-15T12:00:00Z').sequence, 21);
+  });
+
+  await test('consecutive months never share or skip a number', () => {
+    let previous = at('2026-07-15T12:00:00Z').sequence;
+    for (let i = 1; i < 300; i++) {
+      const date = new Date(Date.UTC(2026, 6 + i, 15, 12));
+      const { sequence } = monthFolder(date);
+      eq(sequence, previous + 1);
+      previous = sequence;
+    }
+  });
+
+  await test('the label and the number agree on the month at a timezone boundary', () => {
+    // 23:30 UTC on 31 August is 00:30 BST on 1 September: September in both halves.
+    const boundary = new Date('2026-08-31T23:30:00Z');
+    eq(monthFolder(boundary, 'Europe/London'), { label: 'September 2026', sequence: 3 });
+    eq(monthFolder(boundary, 'UTC'), { label: 'August 2026', sequence: 2 });
+  });
+
   console.log('\nreportFilename:');
 
   await test('"<client> - <report>.pdf"', () => {
@@ -111,14 +179,17 @@ const RELEASE = {
 
   console.log('\nexportReleasedReport:');
 
-  await test('exports the PDF, files it under the client subfolder, and links it in the thread', async () => {
+  await test('exports the PDF, files it under the month folder, and links it in the thread', async () => {
     reset();
     const result = await exportReleasedReport(RELEASE);
     eq(exportCalls, [[12, 34, 'pdf']]);
     eq(uploads.length, 1);
     eq(uploads[0].filename, 'Acme Corp - Web App Pentest.pdf');
     eq(uploads[0].folderId, 'FOLDER_REPORTS');
-    eq(uploads[0].subfolder, 'Acme Corp');
+    // { label, sequence } — lib/google-drive names it "<NNN>. <label>".
+    eq(uploads[0].sequencedSubfolder, monthFolder());
+    // Per-client subfolders are off by default: the PDF sits in the month folder itself.
+    eq(uploads[0].subfolder, undefined);
     eq(uploads[0].mimeType, 'application/pdf');
     eq(uploads[0].buffer, PDF);
     eq(result.fileId, 'FILE1');
@@ -159,10 +230,10 @@ const RELEASE = {
     drive.uploadFile = async (args) => { uploads.push(args); return { ...uploadResult, name: args.filename }; };
   });
 
-  await test('an unnamed client still files under a usable folder and name', async () => {
+  await test('an unnamed client still files under a usable name', async () => {
     reset();
     await exportReleasedReport({ ...RELEASE, clientName: '', reportName: '' });
-    eq(uploads[0].subfolder, 'Unknown client');
+    eq(uploads[0].sequencedSubfolder, monthFolder());
     eq(uploads[0].filename, 'Unknown client - Report 34.pdf');
   });
 
