@@ -22,6 +22,8 @@ const CANDIDATES = [
   process.env.PLEXTRAC_EXPORT_PATH,
   '/api/v1/client/{clientId}/report/{reportId}/export/{format}',
   '/api/v1/client/{clientId}/report/{reportId}/export?type={format}',
+  '/api/v1/client/{clientId}/report/{reportId}/export?format={format}',
+  '/api/v1/client/{clientId}/report/{reportId}/export',
   '/api/v2/client/{clientId}/report/{reportId}/export/{format}',
   '/api/v1/client/{clientId}/report/{reportId}/{format}',
 ].filter(Boolean);
@@ -51,6 +53,25 @@ const fill = (path, clientId, reportId) => path
   }
   console.log(`Client ${clientId}, report ${reportId}, format ${FORMAT}\n`);
 
+  console.log(`Authenticating as: ${process.env.PLEXTRAC_USERNAME}`);
+  console.log('');
+
+  // Does this account have plain READ access to the client and report? That is what
+  // separates the two causes of "User is not authorized to perform this action":
+  //   reads OK + export refused -> the ROLE is missing the export permission
+  //   reads refused too         -> the account has no access to this CLIENT at all
+  console.log('Read access (for comparison with the export attempts below):');
+  for (const [, path] of [
+    ['client', `/api/v1/client/${clientId}`],
+    ['report', `/api/v1/client/${clientId}/report/${reportId}`],
+  ]) {
+    const res = await axios.get(`${BASE}${path}`, { headers, validateStatus: () => true });
+    const ok = res.status === 200;
+    console.log(`  ${ok ? 'OK' : '--'}  ${res.status}  GET ${path}`);
+    if (!ok) console.log(`      ${JSON.stringify(res.data).slice(0, 200)}`);
+  }
+  console.log('');
+
   for (const candidate of CANDIDATES) {
     const path = fill(candidate, clientId, reportId);
     try {
@@ -73,6 +94,9 @@ const fill = (path, clientId, reportId) => path
   }
 
   console.log('Set PLEXTRAC_EXPORT_PATH to whichever line shows "PDF ✔" (keep the {token}s).');
+  console.log('A 404 "Not Found" means the route does not exist. A 400/403 authorization');
+  console.log('message means it DOES exist and refused the caller — the path is fine and the');
+  console.log('Plextrac account needs the permission. Compare with the read-access lines above.');
   process.exit(0);
 })().catch(err => {
   console.error(err.response?.data ?? err.message);
