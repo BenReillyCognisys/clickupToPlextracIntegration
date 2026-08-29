@@ -75,6 +75,39 @@ module.exports = [
     ],
   },
   {
+    // API engagements, including the AI/LLM ones: "AI API testing" and
+    // "Backend AI API testing" both land here through the plain `api …` phrases,
+    // so AI work is not a type of its own — it is an API test, and
+    // config/template-map.js gives it the grey box web app template.
+    //
+    // The verb-carrying phrases ('api testing', 'api pentest', …) are what stop the
+    // verb being read as a scope qualifier: on the bare canonical name alone,
+    // "… - AI API testing" would report as "API (testing)".
+    type: 'API',
+    aliases: [
+      'api penetration testing', 'api penetration test',
+      'api pentest', 'api pen test',
+      'api security testing', 'api security assessment', 'api security review',
+      'api testing', 'api test', 'api review',
+    ],
+  },
+  {
+    // Model Context Protocol servers/integrations. Deals arrive as bare
+    // "MCP Integration" as often as they do with a testing verb, so the canonical
+    // name is the two-word phrase — a bare "MCP" would be harvested from client
+    // names like "MCP Solutions Ltd".
+    type: 'MCP Integration',
+    aliases: [
+      'mcp integration testing', 'mcp integration test',
+      'mcp integration penetration testing', 'mcp integration penetration test',
+      'mcp server penetration testing', 'mcp server penetration test',
+      'mcp server testing', 'mcp server test', 'mcp server review',
+      'mcp penetration testing', 'mcp penetration test',
+      'mcp pentest', 'mcp pen test',
+      'mcp security review', 'mcp security assessment',
+    ],
+  },
+  {
     // Methodology, not a target — see the methodology rule in pipeline/parse-task.js.
     type: 'Grey Box',
     methodology: true,

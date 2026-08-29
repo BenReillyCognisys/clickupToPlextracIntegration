@@ -267,6 +267,52 @@ test('the template placeholder never resolves to a testing type', () => {
   eq(parseTaskName('PT - Project Template'), { client_name: 'PT', testing_type: 'Unknown' });
 });
 
+// ── API and MCP services ─────────────────────────────────────────────────────
+console.log('\nAPI and MCP services:');
+
+test('AI API testing is an API test', () => {
+  eq(parseTaskName('Ballpark Labs Ltd - Additional Testing Days - AI API testing '),
+     { client_name: 'Ballpark Labs Ltd', testing_type: 'API' });
+});
+
+test('a qualifier before the service does not hide it', () => {
+  eq(parseTaskName('Ballpark Labs Ltd - Additional Testing Days - Backend AI API testing\n\n'),
+     { client_name: 'Ballpark Labs Ltd', testing_type: 'API' });
+});
+
+test('plain API penetration testing resolves the same way', () => {
+  eq(parseTaskName('Acme - API Penetration Testing'), { client_name: 'Acme', testing_type: 'API' });
+});
+
+test('the testing verb is consumed, not carried as a scope', () => {
+  // On the bare canonical name alone this would report as "API (testing)".
+  assert.strictEqual(parseTaskName('Acme - LLM API Testing').scope, null);
+});
+
+test('API keeps a genuine trailing scope qualifier', () => {
+  eq(parseTaskName('Acme - AI API Penetration Testing - Chatbot'),
+     { client_name: 'Acme', testing_type: 'API', scope: 'Chatbot' });
+});
+
+test('bare "MCP Integration" resolves without a testing verb', () => {
+  eq(parseTaskName('Ballpark Labs Ltd - Additional Testing Days - MCP Integration '),
+     { client_name: 'Ballpark Labs Ltd', testing_type: 'MCP Integration' });
+});
+
+test('MCP server testing resolves to MCP Integration', () => {
+  eq(parseTaskName('Acme - MCP Server Penetration Testing'),
+     { client_name: 'Acme', testing_type: 'MCP Integration' });
+});
+
+test('"AI" inside a client name is not a testing type', () => {
+  eq(parseTaskName('SANDAN AI - Bespoke Work'), { client_name: 'SANDAN AI', testing_type: 'Unknown' });
+});
+
+test('AI application testing is still tested as a Web App', () => {
+  eq(parseTaskName('Acme - AI Application Penetration Testing'),
+     { client_name: 'Acme', testing_type: 'Web App' });
+});
+
 // ── Word boundary ────────────────────────────────────────────────────────────
 console.log('\nWord boundary:');
 

@@ -423,6 +423,21 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.json.skipped, undefined);
     assert.strictEqual(scheduled.length, before + 1, 'first submission writes the dates');
+    assert.strictEqual(
+      scheduled.at(-1).dueDateMs, scheduled.at(-1).startDateMs,
+      'a half-day Free Black Box is collapsed onto a single day',
+    );
+    assert.strictEqual(r.json.due_date, r.json.start_date);
+  });
+
+  await test('a non-Free test type keeps the multi-day range it was given', async () => {
+    taskState = { MD1: {} };
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: { clickupTaskId: 'MD1', startDate: '2026-09-07', endDate: '2026-09-08', testType: 'Paid Black Box Pentest' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.notStrictEqual(scheduled.at(-1).dueDateMs, scheduled.at(-1).startDateMs);
   });
 
   await test('Free Black Box: a repeat submission does NOT change the dates', async () => {

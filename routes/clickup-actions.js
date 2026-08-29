@@ -387,9 +387,20 @@ router.post('/schedule-task', async (req, res) => {
 
   // yyyy-mm-dd → unix ms at UTC midnight (all-day dates).
   const startDateMs = Date.parse(`${startDate}T00:00:00Z`);
-  const dueDateMs = Date.parse(`${endDate}T00:00:00Z`);
+  let dueDateMs = Date.parse(`${endDate}T00:00:00Z`);
   if (!Number.isFinite(startDateMs) || !Number.isFinite(dueDateMs)) {
     return res.status(400).json({ error: 'startDate and endDate must be yyyy-mm-dd dates' });
+  }
+
+  // A Free Black Box is a half-day (0.5) engagement, so it must sit on ONE day in
+  // ClickUp — same start and due date. Callers commonly send the following day as
+  // the end date, which reads as a 2-day booking on the board and in availability,
+  // so collapse the due date onto the start date rather than trusting it.
+  if (isFreeBlackBox(testType) && dueDateMs !== startDateMs) {
+    log.info('Schedule-task collapsed a Free Black Box to a single day', {
+      clickupTaskId, startDate, requested_end_date: endDate,
+    });
+    dueDateMs = startDateMs;
   }
 
   // Free Black Box forms can be submitted more than once: the first submission fixes
@@ -442,7 +453,9 @@ router.post('/schedule-task', async (req, res) => {
   try {
     await updateTaskSchedule(clickupTaskId, { startDateMs, dueDateMs, assigneeId });
     log.info('Schedule-task updated ClickUp task dates', {
-      clickupTaskId, startDate, endDate, testType: testType || null, days: days ?? null,
+      clickupTaskId, startDate,
+      endDate: new Date(dueDateMs).toISOString().slice(0, 10),
+      testType: testType || null, days: days ?? null,
       assigneeId: assigneeId ?? null,
     });
 
