@@ -8,6 +8,13 @@
 // few known alternates, and reports for each: HTTP status, content-type, size, and
 // whether the body actually starts with "%PDF-". Nothing is written anywhere.
 //
+// Pass --post to ALSO try POST variants and list the tenant's report templates. The
+// GET route rejects `?type=` and `?format=` as "not allowed", which suggests the
+// export the web UI performs may be a POST carrying a template — worth ruling in or
+// out when the permission is granted but the action is still refused. A POST here only
+// asks Plextrac to render a document; nothing in the report is modified. It is opt-in
+// rather than default so the plain run stays strictly read-only.
+//
 // If a different path is the one that works, set it in .env:
 //   PLEXTRAC_EXPORT_PATH=/api/v2/...{clientId}...{reportId}...{format}
 require('dotenv').config();
@@ -89,6 +96,44 @@ const fill = (path, clientId, reportId) => path
     } catch (err) {
       console.log(`—     ERR  ${path}`);
       console.log(`      ${err.message}`);
+    }
+    console.log('');
+  }
+
+  if (process.argv.includes('--post')) {
+    console.log('Report templates available to this account:');
+    const tpl = await axios.get(`${BASE}/api/v1/tenant/0/report-templates`,
+      { headers, validateStatus: () => true });
+    const templates = Array.isArray(tpl.data) ? tpl.data : (tpl.data?.templates || []);
+    if (!templates.length) console.log('  (none returned — export may have no template to use)');
+    for (const t of templates.slice(0, 20)) {
+      console.log(`  ${t.id ?? t.doc_id ?? '?'}  ${t.name ?? t.data?.name ?? JSON.stringify(t).slice(0, 80)}`);
+    }
+    console.log('');
+
+    // Body shapes are guesses; the definitive answer is whatever the browser sends.
+    const templateId = templates[0]?.id ?? templates[0]?.doc_id;
+    const posts = [
+      [`/api/v1/client/${clientId}/report/${reportId}/export/${FORMAT}`, {}],
+      [`/api/v1/client/${clientId}/report/${reportId}/export`, { format: FORMAT }],
+      [`/api/v1/client/${clientId}/report/${reportId}/export`, { type: FORMAT }],
+    ];
+    if (templateId) {
+      posts.push([`/api/v1/client/${clientId}/report/${reportId}/export`,
+        { format: FORMAT, template_id: templateId }]);
+    }
+
+    console.log('POST attempts:');
+    for (const [path, payload] of posts) {
+      const res = await axios.post(`${BASE}${path}`, payload, {
+        headers, responseType: 'arraybuffer', validateStatus: () => true,
+      });
+      const buf = Buffer.from(res.data || []);
+      const isPdf = buf.length > 4 && buf.subarray(0, 5).toString('latin1') === '%PDF-';
+      console.log(`${isPdf ? 'PDF ✔' : '—    '}  ${res.status}  POST ${path}  ${JSON.stringify(payload)}`);
+      if (!isPdf && buf.length) {
+        console.log(`      ${buf.subarray(0, 200).toString('utf8').replace(/\s+/g, ' ').trim()}`);
+      }
     }
     console.log('');
   }
