@@ -239,13 +239,32 @@ Google Drive, then posts the link as a reply in the release announcement's threa
   didn't create. **The service account (or the `GOOGLE_DRIVE_SUBJECT` user it
   impersonates) needs Editor access to the destination folder.**
 
-> ⚠️ **The Plextrac export endpoint is unverified on this instance.** The default is
-> the documented v1 route
-> (`/api/v1/client/{clientId}/report/{reportId}/export/{format}`). Run
-> **`node scripts/inspect-export.js`** — it tries the known candidates and prints which
-> one returns a real PDF — then set `PLEXTRAC_EXPORT_PATH` accordingly. The pipeline
-> checks the response actually starts with `%PDF-`, so a JSON job/error body returned
-> with a 200 is reported in Slack rather than filed in Drive as an unopenable "PDF".
+> ⚠️ **The Plextrac API account needs an export permission.** The endpoint itself is
+> confirmed correct — `/api/v1/client/{clientId}/report/{reportId}/export/{format}`,
+> with the format as a path segment (`?type=` / `?format=` are rejected as "not
+> allowed", and the v2 and `/{format}` variants are 404s), so leave
+> `PLEXTRAC_EXPORT_PATH` unset.
+>
+> What fails is authorization. An account that can read the client and the report
+> (both `200`) is still refused on export with **HTTP 400** and:
+>
+> ```json
+> {"status":"failed","message":[{"type":"unknown","message":"User is not authorized to perform this action."}]}
+> ```
+>
+> Note it is a `400`, not a `403`, and the body never names the missing permission.
+> **Fix it in Plextrac RBAC by granting the export permission to the API account's
+> role** — not by changing the path. This is the same class of problem as the "View
+> Users" permission needed by `listTenantUsers`.
+>
+> `node scripts/inspect-export.js <clientId> <reportId>` re-checks it: it prints the
+> account's plain read access to the client and report *above* the export attempts, so
+> a missing role permission (reads OK, export refused) stays distinguishable from an
+> account with no access to that client (reads refused too).
+>
+> Separately, the pipeline checks the response actually starts with `%PDF-`, so a JSON
+> job/error body returned with a 200 is reported in Slack rather than filed in Drive as
+> an unopenable "PDF".
 
 ## Claude Pro vs Claude API
 
