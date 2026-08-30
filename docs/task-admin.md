@@ -195,6 +195,7 @@ decides which tasks these land on:**
 | Extra-URLs comment and Slack alert | `POST /clickup/extra-urls` |
 | Free Black Box auto-schedule (start/due dates + assignee) | `POST /clickup/schedule-task` |
 | Client's report deadline → the task's "Report Due" date field | `POST /clickup/schedule-task` |
+| Test-files upload → ticks the task's "testfilesstored" box + comments | `POST /clickup/test-files-uploaded` |
 
 Remap creates a form for the target task, so the target **is** in that set from then
 on. But the source task's form is still live in the portal, so the source is still in
@@ -253,6 +254,51 @@ The deadline is recorded on **every** call, independently of the booking:
 Deadline and dates never fail each other: a rejected deadline write is logged and the
 dates are still written. A deadline-only call that lands nowhere returns 502, so the
 portal audits it as failed rather than recording a deadline that never arrived.
+
+### Test files
+
+Clients send us the files an engagement needs (source archives, VPN packs, sample
+data) through a per-task upload link the portal hosts. Two ClickUp fields are
+involved, and the names are close enough to be worth spelling out:
+
+| Field | Type | What it is | Written by |
+|---|---|---|---|
+| `testfilesstorage` | short_text | the client's upload link | the create pipeline |
+| `testfilesstored` | checkbox | ticked once they have uploaded | `POST /clickup/test-files-uploaded` |
+
+ClickUp won't take two fields of the same name on one list, which is why the box is
+"stor**ed**" and the link is "stor**age**". Both are overridable
+(`CLICKUP_TEST_FILES_LINK_FIELD_NAME`, `CLICKUP_TEST_FILES_DONE_FIELD_NAME`), and the
+box name is a **list** of accepted names so a rename resolves without a code change.
+Lookups are type-checked as well as name-checked, so a link can never be written into
+a checkbox (or a checkbox ticked in place of the link field) even if the two ever end
+up sharing a name.
+
+**Getting the link onto the task.** `POST /api/clickup/auth-form` returns
+`testFilesUrl` alongside the form, so the existing intake call fills both fields in
+one round trip — every task that gets an auth form gets its files link for free. A
+task that needs a link but never gets a form (a remap onto a task whose testing type
+is still `Unknown`) uses the standalone `POST /api/clickup/test-files`. Both are
+idempotent per task, so re-running a sync is harmless. If the portal returns no
+`testFiles*` keys the field is left alone and retried on the next sync — that is not
+an intake failure.
+
+**When a client uploads.** The portal calls `POST /clickup/test-files-uploaded` on
+**every** successful upload, not just the first — a client can come back with more
+files later. Re-ticking an already-ticked box is skipped (still a 200), while a
+comment is posted every time, because each upload is its own event.
+
+The comment deliberately carries **no link**: the archives are encrypted and only
+retrievable by an administrator signed in to the portal, so a link on the task would
+be either useless or a leak. It names the file count, the upload time and the archive
+filename, which is what an admin matches the upload against.
+
+A task with no completion box is **not** an upload failure — the files are already
+safely in the portal — so it answers 200 with `marked: false` and a reason, and the
+comment becomes the only record on the task. A genuine ClickUp error is a 502, which
+the portal records against the link and shows to administrators. That includes a
+comment that failed after the box was ticked: the body carries `marked: true` so the
+response still says how far it got.
 
 A regular paid Black Box is never auto-scheduled — `POST /schedule/pentest` *creates* a
 task from a chosen consultant and date range, and has nothing to do with either

@@ -31,6 +31,10 @@ let taskState = {};     // taskId -> { start_date, due_date, custom_fields } ret
 const AUTH_FORM_FILE_FIELD = { id: 'cf-authforms', name: 'Authorisation Forms', type: 'attachment' };
 // The date custom field the client's chosen report deadline is written to.
 const REPORT_DUE_FIELD = { id: 'cf-reportdue', name: 'Report Due', type: 'date' };
+// The test-files pair: a short_text field holding the client's upload link, and the
+// checkbox the portal ticks once they have uploaded. Different names, different types.
+const TEST_FILES_LINK_FIELD = { id: 'cf-testfilesstorage', name: 'testfilesstorage', type: 'short_text' };
+const TEST_FILES_DONE_FIELD = { id: 'cf-testfilesstored', name: 'testfilesstored', type: 'checkbox', value: false };
 
 let commentsShouldFail = false; // toggled by the deadline-comment failure test
 clickupApi.listTaskComments = async (taskId) => {
@@ -68,7 +72,9 @@ clickupApi.uploadCustomFieldAttachment = async (workspaceId, fieldId, buffer, fi
   lastUpload = { workspaceId, fieldId, filename, size: buffer.length, id };
   return { id, title: filename };
 };
+let fieldWriteShouldFail = false; // toggled by the rejected-tick test
 clickupApi.setTaskCustomField = async (taskId, fieldId, value) => {
+  if (fieldWriteShouldFail) throw new Error('boom (custom field)');
   (fieldValues[taskId] ||= {})[fieldId] = value;
   // Mirror the association into `attachments` so the flow's result is easy to assert.
   if (value && Array.isArray(value.add)) {
@@ -77,12 +83,18 @@ clickupApi.setTaskCustomField = async (taskId, fieldId, value) => {
     }
   }
 };
+const checklistWrites = []; // recorded setChecklistItemResolved calls
+clickupApi.setChecklistItemResolved = async (checklistId, itemId, resolved) => {
+  if (checklistId === 'CLFAIL') throw new Error('boom (checklist)');
+  checklistWrites.push({ checklistId, itemId, resolved });
+};
 clickupApi.getTask = async (taskId) => {
   // 'FAIL' / 'GETFAIL' model a task read failure (e.g. a deleted task 404).
   if (taskId === 'GETFAIL' || taskId === 'FAIL') throw new Error('boom (getTask)');
   const state = taskState[taskId] || {};
   // Default every task to carrying the Authorisation Forms field unless overridden.
-  const custom_fields = state.custom_fields || [AUTH_FORM_FILE_FIELD, REPORT_DUE_FIELD];
+  const custom_fields = state.custom_fields
+    || [AUTH_FORM_FILE_FIELD, REPORT_DUE_FIELD, TEST_FILES_LINK_FIELD, TEST_FILES_DONE_FIELD];
   return { id: taskId, ...state, custom_fields };
 };
 clickupApi.getTaskDescription = async (taskId) => descriptions[taskId] || '';
@@ -694,6 +706,168 @@ const KEY = { 'X-API-Key': 'test-key' };
     });
     assert.strictEqual(r.json.results[0].status, 'skipped');
     assert.strictEqual(statusWrites.length, before);
+  });
+
+  // ── test-files-uploaded ───────────────────────────────────────────────────────
+  console.log('\nPOST /clickup/test-files-uploaded:');
+
+  // A task where the completion box is a checklist item instead of a custom field.
+  const CHECKLIST_TASK = (resolved = false) => ({
+    custom_fields: [AUTH_FORM_FILE_FIELD],
+    checklists: [{
+      id: 'cl-1',
+      name: 'Pre-reqs',
+      items: [
+        { id: 'it-0', name: 'VPN access', resolved: true },
+        { id: 'it-1', name: 'testfilesstored', resolved },
+      ],
+    }],
+  });
+
+  await test('rejects a missing X-API-Key with 401', async () => {
+    const r = await request('/clickup/test-files-uploaded', { body: { clickupTaskId: 'TF1' } });
+    assert.strictEqual(r.status, 401);
+  });
+
+  await test('rejects a missing clickupTaskId with 400', async () => {
+    const r = await request('/clickup/test-files-uploaded', { headers: KEY, body: { clientName: 'Acme' } });
+    assert.strictEqual(r.status, 400);
+  });
+
+  await test('ticks the testfilesstored checkbox and comments the upload', async () => {
+    taskState = { TF1: {} };
+    const r = await request('/clickup/test-files-uploaded', {
+      headers: KEY,
+      body: {
+        clickupTaskId: 'TF1', clientName: 'Acme Ltd', fileCount: 3,
+        archiveName: 'Acme-Ltd-test-files-2026-09-02-1411.zip.enc',
+        submittedAt: '2026-09-02T14:11:07.482Z',
+      },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.ok, true);
+    assert.strictEqual(r.json.marked, true);
+    assert.strictEqual(r.json.via, 'custom_field');
+    assert.strictEqual(r.json.ticked, 'set');
+    assert.strictEqual(fieldValues.TF1['cf-testfilesstored'], true);
+    assert.strictEqual(comments.TF1.length, 1);
+  });
+
+  await test('the comment names the file count, time and archive — and carries no link', async () => {
+    const text = comments.TF1[0].comment_text;
+    assert.match(text, /3 file\(s\) uploaded to the SFE portal/);
+    assert.match(text, /2 Sep 2026 15:11/, 'rendered in Europe/London (BST), not UTC');
+    assert.match(text, /Acme-Ltd-test-files-2026-09-02-1411\.zip\.enc/);
+    assert.doesNotMatch(text, /https?:\/\//, 'the encrypted archives are never linked from ClickUp');
+  });
+
+  await test('ticks the checkbox, never the same-named short_text link field', async () => {
+    // Both fields named "testfilesstorage" — only the type tells them apart.
+    taskState = {
+      TF2: {
+        custom_fields: [
+          { id: 'cf-link', name: 'testfilesstorage', type: 'short_text' },
+          { id: 'cf-box', name: 'testfilesstorage', type: 'checkbox' },
+        ],
+      },
+    };
+    const r = await request('/clickup/test-files-uploaded', {
+      headers: KEY, body: { clickupTaskId: 'TF2', fileCount: 1 },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.marked, true);
+    assert.strictEqual(fieldValues.TF2['cf-box'], true);
+    assert.strictEqual(fieldValues.TF2['cf-link'], undefined, 'the link field is left alone');
+  });
+
+  await test('a second upload comments again but does not re-tick', async () => {
+    taskState = { TF3: { custom_fields: [{ id: 'cf-box', name: 'testfilesstored', type: 'checkbox', value: true }] } };
+    const r = await request('/clickup/test-files-uploaded', {
+      headers: KEY, body: { clickupTaskId: 'TF3', fileCount: 2 },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.marked, true);
+    assert.strictEqual(r.json.ticked, 'already');
+    assert.strictEqual(fieldValues.TF3, undefined, 'an already-ticked box is not written again');
+    assert.strictEqual(comments.TF3.length, 1, 'each upload is still its own comment');
+  });
+
+  await test('treats the string "true" from ClickUp as already ticked', async () => {
+    taskState = { TF4: { custom_fields: [{ id: 'cf-box', name: 'testfilesstored', type: 'checkbox', value: 'true' }] } };
+    const r = await request('/clickup/test-files-uploaded', { headers: KEY, body: { clickupTaskId: 'TF4' } });
+    assert.strictEqual(r.json.ticked, 'already');
+    assert.strictEqual(fieldValues.TF4, undefined);
+  });
+
+  await test('falls back to resolving a checklist item when there is no checkbox', async () => {
+    taskState = { TF5: CHECKLIST_TASK(false) };
+    const before = checklistWrites.length;
+    const r = await request('/clickup/test-files-uploaded', {
+      headers: KEY, body: { clickupTaskId: 'TF5', fileCount: 4 },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.marked, true);
+    assert.strictEqual(r.json.via, 'checklist_item');
+    assert.strictEqual(checklistWrites.length, before + 1);
+    assert.deepStrictEqual(checklistWrites.at(-1), { checklistId: 'cl-1', itemId: 'it-1', resolved: true });
+  });
+
+  await test('an already-resolved checklist item is not written again', async () => {
+    taskState = { TF6: CHECKLIST_TASK(true) };
+    const before = checklistWrites.length;
+    const r = await request('/clickup/test-files-uploaded', { headers: KEY, body: { clickupTaskId: 'TF6' } });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.ticked, 'already');
+    assert.strictEqual(checklistWrites.length, before, 'no checklist write happened');
+  });
+
+  await test('no box at all: still 200, still comments, marked false with a reason', async () => {
+    taskState = { TF7: { custom_fields: [AUTH_FORM_FILE_FIELD] } };
+    const r = await request('/clickup/test-files-uploaded', {
+      headers: KEY, body: { clickupTaskId: 'TF7', fileCount: 1 },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.ok, true);
+    assert.strictEqual(r.json.marked, false);
+    assert.strictEqual(r.json.reason, 'no testfilesstorage field or checklist item');
+    assert.strictEqual(comments.TF7.length, 1, 'the comment is then the only record on the task');
+  });
+
+  await test('502 when the task cannot be read', async () => {
+    const r = await request('/clickup/test-files-uploaded', { headers: KEY, body: { clickupTaskId: 'GETFAIL' } });
+    assert.strictEqual(r.status, 502);
+    assert.strictEqual(r.json.ok, false);
+  });
+
+  await test('502 when ClickUp rejects the tick', async () => {
+    taskState = { TF8: {} };
+    fieldWriteShouldFail = true;
+    const r = await request('/clickup/test-files-uploaded', { headers: KEY, body: { clickupTaskId: 'TF8' } });
+    fieldWriteShouldFail = false;
+    assert.strictEqual(r.status, 502);
+    assert.strictEqual(r.json.ok, false);
+    assert.strictEqual(comments.TF8, undefined, 'no comment when the tick itself failed');
+  });
+
+  await test('502 when the comment fails, reporting that the box was still ticked', async () => {
+    taskState = { TF9: {} };
+    commentsShouldFail = true;
+    const r = await request('/clickup/test-files-uploaded', { headers: KEY, body: { clickupTaskId: 'TF9' } });
+    commentsShouldFail = false;
+    assert.strictEqual(r.status, 502);
+    assert.strictEqual(r.json.ok, false);
+    assert.strictEqual(r.json.marked, true, 'the tick landed and the body says so');
+    assert.strictEqual(fieldValues.TF9['cf-testfilesstored'], true);
+  });
+
+  await test('copes with a null fileCount and submittedAt', async () => {
+    taskState = { TF10: {} };
+    const r = await request('/clickup/test-files-uploaded', {
+      headers: KEY,
+      body: { clickupTaskId: 'TF10', clientName: 'Acme', fileCount: null, archiveName: null, submittedAt: null },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(comments.TF10[0].comment_text, '📦 Test files received — files uploaded to the SFE portal.');
   });
 
   console.log(`\n${passed} passed, ${failed} failed\n`);

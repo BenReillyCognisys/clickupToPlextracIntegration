@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node tests/parse-task.test.js && node tests/task-rename.test.js && node tests/qa-review.test.js && node tests/free-blackbox.test.js && node tests/qa-kpi.test.js && node tests/report-lateness.test.js && node tests/google-drive.test.js && node tests/clickup-actions.test.js && node tests/auth-form-rename.test.js && node tests/vmaas.test.js && node tests/task-admin.test.js && node tests/report-export.test.js"
+    "test": "node tests/parse-task.test.js && node tests/task-rename.test.js && node tests/qa-review.test.js && node tests/free-blackbox.test.js && node tests/qa-kpi.test.js && node tests/report-lateness.test.js && node tests/google-drive.test.js && node tests/clickup-actions.test.js && node tests/auth-form-rename.test.js && node tests/vmaas.test.js && node tests/task-admin.test.js && node tests/report-export.test.js && node tests/test-files.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",

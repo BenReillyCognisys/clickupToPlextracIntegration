@@ -24,7 +24,7 @@ const { runPipeline } = require('./index');
 const { runVmaasPipeline } = require('./vmaas');
 const { loadMonitoredTask } = require('./load-task');
 const { syncClientName, syncReportName } = require('./task-rename');
-const { createAuthFormForTask } = require('./auth-form-create');
+const { createAuthFormForTask, ensureTestFilesLinkForTask } = require('./auth-form-create');
 const api = require('../lib/plextrac-api');
 const store = require('../lib/task-store');
 const { withTaskLock } = require('../lib/task-lock');
@@ -377,6 +377,13 @@ async function remapTask(fromTaskId, toTaskId) {
       clientId: mapping.plextrac_client_id,
       reportId: mapping.plextrac_report_id,
     });
+
+    // An Unknown testing type gets no auth form, but the client still has to send us
+    // their test files, so mint that link on its own. (Every other task picks it up
+    // from the auth-form call above, which returns both links.)
+    if (resync.testing_type === 'Unknown') {
+      await ensureTestFilesLinkForTask(toTask, { clientName: resync.client_name });
+    }
 
     let reportName = mapping.report_name ?? null;
     try {

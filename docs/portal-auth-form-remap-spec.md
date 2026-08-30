@@ -104,7 +104,25 @@ POST /clickup/schedule-task
     the deadline, send the deadline with null dates and nothing is booked. For a Free
     Black Box the dates are a no-op if that task already has a start_date (repeat
     submissions must not move a booking); the deadline is still refreshed
+
+POST /clickup/test-files-uploaded
+{ clickupTaskId, clientName, fileCount, archiveName, submittedAt }
+  → the client uploaded their test files to the portal: ticks the task's completion
+    box (the "testfilesstored" Checkbox custom field, or a checklist item of that
+    name) and comments the upload — no link in the comment, the archives are
+    encrypted and portal-only. Called on EVERY upload: re-ticking is a no-op, but a
+    comment is posted each time. Only clickupTaskId is required. A task with no box
+    is 200 { marked: false, reason } — a ClickUp config problem, not an upload
+    failure; a ClickUp error is a 502
 ```
+
+break.services calls the portal for the upload link, on the same intake call that
+creates the auth form (`POST /api/clickup/auth-form` now also returns `testFilesUrl` /
+`testFilesToken`), and writes it to the task's `testfilesstorage` **short_text** field.
+A task that needs a link but never gets an auth form uses the standalone
+`POST /api/clickup/test-files` instead. Both are idempotent per ClickUp task — one
+link for the life of the task — so either is safe to call on every sync. When the
+portal returns no `testFiles*` keys the field is left alone and picked up next sync.
 
 ---
 

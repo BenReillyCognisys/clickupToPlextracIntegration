@@ -1,8 +1,8 @@
 /**
  * SFE-portal → break.services action endpoints.
  *
- * Three server-to-server POST routes the portal calls as auth forms move through
- * intake. All three authenticate with the shared BREAK_SERVICES_API_KEY (usually
+ * Server-to-server POST routes the portal calls as an engagement moves through
+ * intake. They all authenticate with the shared BREAK_SERVICES_API_KEY (usually
  * the same value as AVAILABILITY_API_KEY) via the X-API-Key header:
  *
  *   POST /clickup/merged-auth-form   — comment a merged auth-form link onto every
@@ -22,6 +22,10 @@
  *                                      the deadline arrives on its own). A repeat
  *                                      Free Black Box submission does not move an
  *                                      existing booking.
+ *   POST /clickup/test-files-uploaded — a client uploaded their test files to the
+ *                                      portal: tick the task's completion box and
+ *                                      comment the upload. Called on every upload,
+ *                                      so re-ticking is a no-op.
  *
  * Idempotent-comment strategy (endpoint 1): the portal re-sends the same merged
  * form every time a new task for that client arrives, so this endpoint is called
@@ -46,6 +50,7 @@ const {
   getTask,
   getTaskDescription,
   updateTaskDescription,
+  setChecklistItemResolved,
 } = require('../lib/clickup-api');
 const { downloadDriveFile, fileIdFromUrl } = require('../lib/google-drive');
 const { cache, getMembersMap, findUserInMap } = require('../lib/availability-cache');
@@ -85,13 +90,15 @@ const clickupTaskUrl = (taskId) => `https://app.clickup.com/t/${taskId}`;
 // the file field, distinct from the auth-form *link* field CLICKUP_AUTH_FORM_FIELD_NAME.)
 const AUTH_FORM_FILE_FIELD_NAME = process.env.CLICKUP_AUTH_FORM_FILE_FIELD_NAME || 'Authorisation Forms';
 
-// Resolves a custom field on a task by name (case-insensitive, trimmed). A field
-// appears on every task in its list even when unset, so this finding nothing means
-// the field isn't configured for that list at all. Returns null in that case.
-function findCustomField(task, name) {
+// Resolves a custom field on a task by name (case-insensitive, trimmed), optionally
+// requiring a ClickUp field type — two fields on the same list can share a name when
+// their types differ, and the test-files link (short_text) and completion box
+// (checkbox) are exactly that case. A field appears on every task in its list even
+// when unset, so finding nothing means it isn't configured for that list at all.
+function findCustomField(task, name, type = null) {
   const target = name.trim().toLowerCase();
   return (task.custom_fields || []).find(
-    (f) => (f.name || '').trim().toLowerCase() === target,
+    (f) => (f.name || '').trim().toLowerCase() === target && (!type || f.type === type),
   ) || null;
 }
 
@@ -609,6 +616,197 @@ router.post('/schedule-task', async (req, res) => {
     log.error('Schedule-task update failed', { clickupTaskId, reason: err.message });
     res.status(502).json({ ok: false, error: err.message, deadline });
   }
+});
+
+// ─── Test files uploaded ──────────────────────────────────────────────────────
+// The portal hosts a per-task upload link clients use to send us the files an
+// engagement needs (source archives, VPN packs, sample data). On every successful
+// upload the portal calls the endpoint below and we tick the task's completion box.
+//
+// Two similarly named fields are in play and they are NOT the same thing:
+//   testfilesstorage (short_text) — holds the upload LINK, written by the create
+//                                   pipeline (pipeline/auth-form-create.js).
+//   testfilesstored  (checkbox)   — the completion box ticked here.
+// ClickUp won't take two fields with the same name on one list, so the box is the one
+// that got renamed. Accepted names are a list, so the original "testfilesstorage"
+// naming (and any future rename) still resolves without a code change.
+const TEST_FILES_DONE_NAMES = (process.env.CLICKUP_TEST_FILES_DONE_FIELD_NAME || 'testfilesstored,testfilesstorage')
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+
+// A ClickUp checkbox custom field reads back as a boolean or as the string "true".
+function isTicked(value) {
+  return value === true || value === 'true';
+}
+
+// Finds the completion box as a Checkbox custom field, trying each accepted name in
+// order. The type check matters: "testfilesstorage" is also the name of the short_text
+// field holding the link, so a name-only match could tick the wrong field entirely.
+function findTestFilesCheckbox(task) {
+  for (const name of TEST_FILES_DONE_NAMES) {
+    const field = findCustomField(task, name, 'checkbox');
+    if (field) return field;
+  }
+  return null;
+}
+
+// The same box modelled the other way — as an item on one of the task's checklists.
+// Returns { checklistId, item } (the update needs the checklist id, not the task id).
+function findTestFilesChecklistItem(task) {
+  for (const checklist of task.checklists || []) {
+    for (const item of checklist.items || []) {
+      if (TEST_FILES_DONE_NAMES.includes((item.name || '').trim().toLowerCase())) {
+        return { checklistId: checklist.id, item };
+      }
+    }
+  }
+  return null;
+}
+
+// Timezone the upload timestamp is rendered in — the workspace's, so the comment reads
+// the way the board does.
+const TEST_FILES_TZ = process.env.CLICKUP_TIMEZONE || 'Europe/London';
+
+// "2 Sep 2026 14:11". en-GB's short month can render as "Sept", so it's clipped to
+// three letters for a stable, compact stamp. Returns null for a missing/unparseable
+// timestamp, and the caller simply leaves the clause out.
+function formatUploadedAt(submittedAt) {
+  if (!submittedAt) return null;
+  const d = new Date(submittedAt);
+  if (Number.isNaN(d.getTime())) return null;
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: TEST_FILES_TZ,
+    day: 'numeric', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(d);
+  const get = (type) => parts.find((p) => p.type === type)?.value || '';
+  const month = get('month').replace('.', '').slice(0, 3);
+  return `${get('day')} ${month} ${get('year')} ${get('hour')}:${get('minute')}`;
+}
+
+// One line per upload, deliberately carrying NO link: the archives are encrypted and
+// only retrievable by an administrator signed in to the portal, so a link on a ClickUp
+// task would be either useless or a leak. The archive name is safe (it names the
+// encrypted blob, it doesn't reach it) and is what an admin matches the upload against.
+function testFilesCommentText({ fileCount, archiveName, submittedAt }) {
+  const n = Number(fileCount);
+  const count = Number.isFinite(n) && n > 0 ? `${n} file(s) uploaded` : 'files uploaded';
+  const when = formatUploadedAt(submittedAt);
+  const whenText = when ? ` on ${when}` : '';
+  const archive = String(archiveName ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  const archiveText = archive ? ` Archive: ${archive}` : '';
+  return `📦 Test files received — ${count} to the SFE portal${whenText}.${archiveText}`;
+}
+
+// ─── POST /clickup/test-files-uploaded ────────────────────────────────────────
+// A client has uploaded the files their engagement needs to the portal's per-task
+// upload link. Tick the task's completion box and comment the upload.
+//
+// Called on EVERY successful upload, not just the first: a client can come back with
+// more files after the box is ticked. Re-ticking is skipped (a no-op that still answers
+// 200), while the comment is posted every time — each upload is its own event and
+// that's the record we want.
+router.post('/test-files-uploaded', async (req, res) => {
+  const { clickupTaskId, clientName, fileCount, archiveName, submittedAt } = req.body || {};
+
+  if (!clickupTaskId) {
+    return res.status(400).json({ error: 'clickupTaskId is required' });
+  }
+
+  // The task read resolves the completion box (custom field or checklist item) and
+  // tells us whether it's already ticked. Fatal — without it there's nothing to act on.
+  let task;
+  try {
+    task = await getTask(clickupTaskId);
+  } catch (err) {
+    log.error('Test-files upload — could not read the ClickUp task', {
+      clickupTaskId, reason: err.message,
+    });
+    return res.status(502).json({ ok: false, error: err.message });
+  }
+
+  // Checkbox custom field first, then a checklist item, then neither.
+  let marked = false;
+  let via = null;
+  let ticked = 'none';
+  try {
+    const checkbox = findTestFilesCheckbox(task);
+    if (checkbox) {
+      via = 'custom_field';
+      marked = true;
+      if (isTicked(checkbox.value)) {
+        ticked = 'already';
+      } else {
+        await setTaskCustomField(clickupTaskId, checkbox.id, true);
+        ticked = 'set';
+      }
+    } else {
+      const found = findTestFilesChecklistItem(task);
+      if (found) {
+        via = 'checklist_item';
+        marked = true;
+        if (found.item.resolved) {
+          ticked = 'already';
+        } else {
+          await setChecklistItemResolved(found.checklistId, found.item.id, true);
+          ticked = 'set';
+        }
+      }
+    }
+  } catch (err) {
+    log.error('Test-files upload — could not tick the completion box', {
+      clickupTaskId, via, reason: err.message,
+    });
+    return res.status(502).json({ ok: false, error: err.message });
+  }
+
+  // A missing box is not an upload failure: the files are already safely stored in the
+  // portal, and a task with no box is a ClickUp configuration problem for a human. Log
+  // it and carry on to the comment, which is then the only record on the task.
+  if (!marked) {
+    log.warn('Test-files upload — no completion box on the task', {
+      clickupTaskId, client: clientName || null, looked_for: TEST_FILES_DONE_NAMES.join(', '),
+    });
+  }
+
+  // One comment per upload, posted after the tick so a comment failure can never leave
+  // the box unticked. Reported honestly: a ClickUp write that failed is a 502 even when
+  // the tick landed, so the portal shows it to an administrator rather than swallowing
+  // it — `marked` in the body says how far we got.
+  try {
+    await createTaskComment(clickupTaskId, testFilesCommentText({ fileCount, archiveName, submittedAt }));
+  } catch (err) {
+    log.error('Test-files upload — could not comment the upload', {
+      clickupTaskId, marked, reason: err.message,
+    });
+    return res.status(502).json({
+      ok: false,
+      taskId: clickupTaskId,
+      marked,
+      commented: false,
+      error: `the completion box was ${marked ? 'ticked' : 'not found'}, but the ClickUp comment failed: ${err.message}`,
+    });
+  }
+
+  log.info('Test-files upload recorded on the ClickUp task', {
+    clickupTaskId, client: clientName || null, file_count: fileCount ?? null,
+    marked, via, ticked,
+  });
+
+  if (!marked) {
+    return res.status(200).json({
+      ok: true,
+      marked: false,
+      taskId: clickupTaskId,
+      commented: true,
+      reason: 'no testfilesstorage field or checklist item',
+    });
+  }
+
+  return res.status(200).json({
+    ok: true, marked: true, taskId: clickupTaskId, via, ticked, commented: true,
+  });
 });
 
 module.exports = router;
