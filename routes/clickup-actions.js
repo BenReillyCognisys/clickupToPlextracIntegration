@@ -23,9 +23,9 @@
  *                                      Free Black Box submission does not move an
  *                                      existing booking.
  *   POST /clickup/test-files-uploaded — a client uploaded their test files to the
- *                                      portal: tick the task's completion box and
- *                                      comment the upload. Called on every upload,
- *                                      so re-ticking is a no-op.
+ *                                      portal: tick the task's completion box.
+ *                                      Called on every upload, so re-ticking is a
+ *                                      no-op.
  *
  * Idempotent-comment strategy (endpoint 1): the portal re-sends the same merged
  * form every time a new task for that client arrives, so this endpoint is called
@@ -664,49 +664,17 @@ function findTestFilesChecklistItem(task) {
   return null;
 }
 
-// Timezone the upload timestamp is rendered in — the workspace's, so the comment reads
-// the way the board does.
-const TEST_FILES_TZ = process.env.CLICKUP_TIMEZONE || 'Europe/London';
-
-// "2 Sep 2026 14:11". en-GB's short month can render as "Sept", so it's clipped to
-// three letters for a stable, compact stamp. Returns null for a missing/unparseable
-// timestamp, and the caller simply leaves the clause out.
-function formatUploadedAt(submittedAt) {
-  if (!submittedAt) return null;
-  const d = new Date(submittedAt);
-  if (Number.isNaN(d.getTime())) return null;
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: TEST_FILES_TZ,
-    day: 'numeric', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', hour12: false,
-  }).formatToParts(d);
-  const get = (type) => parts.find((p) => p.type === type)?.value || '';
-  const month = get('month').replace('.', '').slice(0, 3);
-  return `${get('day')} ${month} ${get('year')} ${get('hour')}:${get('minute')}`;
-}
-
-// One line per upload, deliberately carrying NO link: the archives are encrypted and
-// only retrievable by an administrator signed in to the portal, so a link on a ClickUp
-// task would be either useless or a leak. The archive name is safe (it names the
-// encrypted blob, it doesn't reach it) and is what an admin matches the upload against.
-function testFilesCommentText({ fileCount, archiveName, submittedAt }) {
-  const n = Number(fileCount);
-  const count = Number.isFinite(n) && n > 0 ? `${n} file(s) uploaded` : 'files uploaded';
-  const when = formatUploadedAt(submittedAt);
-  const whenText = when ? ` on ${when}` : '';
-  const archive = String(archiveName ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
-  const archiveText = archive ? ` Archive: ${archive}` : '';
-  return `📦 Test files received — ${count} to the SFE portal${whenText}.${archiveText}`;
-}
-
 // ─── POST /clickup/test-files-uploaded ────────────────────────────────────────
 // A client has uploaded the files their engagement needs to the portal's per-task
-// upload link. Tick the task's completion box and comment the upload.
+// upload link. Tick the task's completion box — that is the whole job; the upload
+// itself is recorded in the portal, not on the ClickUp task.
 //
 // Called on EVERY successful upload, not just the first: a client can come back with
-// more files after the box is ticked. Re-ticking is skipped (a no-op that still answers
-// 200), while the comment is posted every time — each upload is its own event and
-// that's the record we want.
+// more files after the box is ticked. A re-tick is skipped and still answers 200, so
+// repeat uploads leave no trace here at all.
+//
+// The upload's details (file count, archive name, timestamp) are logged rather than
+// written to the task, so a client's submission history stays in one place.
 router.post('/test-files-uploaded', async (req, res) => {
   const { clickupTaskId, clientName, fileCount, archiveName, submittedAt } = req.body || {};
 
@@ -762,51 +730,27 @@ router.post('/test-files-uploaded', async (req, res) => {
   }
 
   // A missing box is not an upload failure: the files are already safely stored in the
-  // portal, and a task with no box is a ClickUp configuration problem for a human. Log
-  // it and carry on to the comment, which is then the only record on the task.
+  // portal, and a task with no box is a ClickUp configuration problem for a human — so
+  // it is logged and reported, never thrown.
   if (!marked) {
     log.warn('Test-files upload — no completion box on the task', {
       clickupTaskId, client: clientName || null, looked_for: TEST_FILES_DONE_NAMES.join(', '),
     });
-  }
-
-  // One comment per upload, posted after the tick so a comment failure can never leave
-  // the box unticked. Reported honestly: a ClickUp write that failed is a 502 even when
-  // the tick landed, so the portal shows it to an administrator rather than swallowing
-  // it — `marked` in the body says how far we got.
-  try {
-    await createTaskComment(clickupTaskId, testFilesCommentText({ fileCount, archiveName, submittedAt }));
-  } catch (err) {
-    log.error('Test-files upload — could not comment the upload', {
-      clickupTaskId, marked, reason: err.message,
-    });
-    return res.status(502).json({
-      ok: false,
-      taskId: clickupTaskId,
-      marked,
-      commented: false,
-      error: `the completion box was ${marked ? 'ticked' : 'not found'}, but the ClickUp comment failed: ${err.message}`,
-    });
-  }
-
-  log.info('Test-files upload recorded on the ClickUp task', {
-    clickupTaskId, client: clientName || null, file_count: fileCount ?? null,
-    marked, via, ticked,
-  });
-
-  if (!marked) {
     return res.status(200).json({
       ok: true,
       marked: false,
       taskId: clickupTaskId,
-      commented: true,
       reason: 'no testfilesstorage field or checklist item',
     });
   }
 
-  return res.status(200).json({
-    ok: true, marked: true, taskId: clickupTaskId, via, ticked, commented: true,
+  // The upload's own details live only here: nothing about them is written to the task.
+  log.info('Test-files upload recorded on the ClickUp task', {
+    clickupTaskId, client: clientName || null, file_count: fileCount ?? null,
+    archive: archiveName || null, submitted_at: submittedAt || null, via, ticked,
   });
+
+  return res.status(200).json({ ok: true, marked: true, taskId: clickupTaskId, via, ticked });
 });
 
 module.exports = router;

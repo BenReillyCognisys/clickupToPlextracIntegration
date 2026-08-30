@@ -195,7 +195,7 @@ decides which tasks these land on:**
 | Extra-URLs comment and Slack alert | `POST /clickup/extra-urls` |
 | Free Black Box auto-schedule (start/due dates + assignee) | `POST /clickup/schedule-task` |
 | Client's report deadline → the task's "Report Due" date field | `POST /clickup/schedule-task` |
-| Test-files upload → ticks the task's "testfilesstored" box + comments | `POST /clickup/test-files-uploaded` |
+| Test-files upload → ticks the task's "testfilesstored" box | `POST /clickup/test-files-uploaded` |
 
 Remap creates a form for the target task, so the target **is** in that set from then
 on. But the source task's form is still live in the portal, so the source is still in
@@ -285,20 +285,18 @@ an intake failure.
 
 **When a client uploads.** The portal calls `POST /clickup/test-files-uploaded` on
 **every** successful upload, not just the first — a client can come back with more
-files later. Re-ticking an already-ticked box is skipped (still a 200), while a
-comment is posted every time, because each upload is its own event.
+files later. Ticking the box is the whole job: an already-ticked box is skipped and
+still answers 200, so a repeat upload leaves no trace on the task.
 
-The comment deliberately carries **no link**: the archives are encrypted and only
-retrievable by an administrator signed in to the portal, so a link on the task would
-be either useless or a leak. It names the file count, the upload time and the archive
-filename, which is what an admin matches the upload against.
+Nothing else is written to ClickUp — **no comment**. The upload's own details (file
+count, archive name, timestamp) go to the log, and the record of the upload itself
+lives in the portal, which is also the only place the archives can be retrieved: they
+are encrypted and need an administrator signed in to the portal.
 
 A task with no completion box is **not** an upload failure — the files are already
-safely in the portal — so it answers 200 with `marked: false` and a reason, and the
-comment becomes the only record on the task. A genuine ClickUp error is a 502, which
-the portal records against the link and shows to administrators. That includes a
-comment that failed after the box was ticked: the body carries `marked: true` so the
-response still says how far it got.
+safely in the portal — so it answers 200 with `marked: false` and a reason, and a
+human can fix the field. A genuine ClickUp error (the task read, or the tick itself)
+is a 502, which the portal records against the link and shows to administrators.
 
 A regular paid Black Box is never auto-scheduled — `POST /schedule/pentest` *creates* a
 task from a chosen consultant and date range, and has nothing to do with either

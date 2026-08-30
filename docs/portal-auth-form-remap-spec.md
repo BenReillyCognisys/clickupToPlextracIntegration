@@ -109,11 +109,11 @@ POST /clickup/test-files-uploaded
 { clickupTaskId, clientName, fileCount, archiveName, submittedAt }
   → the client uploaded their test files to the portal: ticks the task's completion
     box (the "testfilesstored" Checkbox custom field, or a checklist item of that
-    name) and comments the upload — no link in the comment, the archives are
-    encrypted and portal-only. Called on EVERY upload: re-ticking is a no-op, but a
-    comment is posted each time. Only clickupTaskId is required. A task with no box
-    is 200 { marked: false, reason } — a ClickUp config problem, not an upload
-    failure; a ClickUp error is a 502
+    name). Nothing else is written to the task — no comment; the upload itself is
+    recorded in the portal, and the other fields are logged only. Called on EVERY
+    upload, so a re-tick is a no-op and a repeat leaves no trace. Only clickupTaskId
+    is required. A task with no box is 200 { marked: false, reason } — a ClickUp
+    config problem, not an upload failure; a ClickUp error is a 502
 ```
 
 break.services calls the portal for the upload link, on the same intake call that

@@ -111,9 +111,9 @@ app.use('/schedule', schedulingCors, require('./routes/schedule'));
 //                                       independently optional; repeat Free Black Box
 //                                       submissions never move an existing booking)
 //   POST /clickup/test-files-uploaded — a client uploaded their test files to the
-//                                       portal: tick the task's completion box and
-//                                       comment the upload (called on every upload,
-//                                       so re-ticking is a no-op)
+//                                       portal: tick the task's completion box
+//                                       (called on every upload, so a re-tick is a
+//                                       no-op)
 // These are server-to-server (not browser) calls, so they get no CORS. The key
 // check lives inside the router; apiLimiter throttles failed-auth attempts, matching
 // the /jobs/* endpoints.

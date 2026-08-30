@@ -734,7 +734,7 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(r.status, 400);
   });
 
-  await test('ticks the testfilesstored checkbox and comments the upload', async () => {
+  await test('ticks the testfilesstored checkbox', async () => {
     taskState = { TF1: {} };
     const r = await request('/clickup/test-files-uploaded', {
       headers: KEY,
@@ -750,15 +750,10 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(r.json.via, 'custom_field');
     assert.strictEqual(r.json.ticked, 'set');
     assert.strictEqual(fieldValues.TF1['cf-testfilesstored'], true);
-    assert.strictEqual(comments.TF1.length, 1);
   });
 
-  await test('the comment names the file count, time and archive — and carries no link', async () => {
-    const text = comments.TF1[0].comment_text;
-    assert.match(text, /3 file\(s\) uploaded to the SFE portal/);
-    assert.match(text, /2 Sep 2026 15:11/, 'rendered in Europe/London (BST), not UTC');
-    assert.match(text, /Acme-Ltd-test-files-2026-09-02-1411\.zip\.enc/);
-    assert.doesNotMatch(text, /https?:\/\//, 'the encrypted archives are never linked from ClickUp');
+  await test('posts no comment — the upload is recorded in the portal, not on the task', async () => {
+    assert.strictEqual(comments.TF1, undefined, 'ticking the box is the whole job');
   });
 
   await test('ticks the checkbox, never the same-named short_text link field', async () => {
@@ -780,7 +775,7 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(fieldValues.TF2['cf-link'], undefined, 'the link field is left alone');
   });
 
-  await test('a second upload comments again but does not re-tick', async () => {
+  await test('a second upload is a complete no-op', async () => {
     taskState = { TF3: { custom_fields: [{ id: 'cf-box', name: 'testfilesstored', type: 'checkbox', value: true }] } };
     const r = await request('/clickup/test-files-uploaded', {
       headers: KEY, body: { clickupTaskId: 'TF3', fileCount: 2 },
@@ -789,7 +784,7 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(r.json.marked, true);
     assert.strictEqual(r.json.ticked, 'already');
     assert.strictEqual(fieldValues.TF3, undefined, 'an already-ticked box is not written again');
-    assert.strictEqual(comments.TF3.length, 1, 'each upload is still its own comment');
+    assert.strictEqual(comments.TF3, undefined, 'and nothing else is written either');
   });
 
   await test('treats the string "true" from ClickUp as already ticked', async () => {
@@ -821,7 +816,7 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(checklistWrites.length, before, 'no checklist write happened');
   });
 
-  await test('no box at all: still 200, still comments, marked false with a reason', async () => {
+  await test('no box at all: still 200, marked false with a reason', async () => {
     taskState = { TF7: { custom_fields: [AUTH_FORM_FILE_FIELD] } };
     const r = await request('/clickup/test-files-uploaded', {
       headers: KEY, body: { clickupTaskId: 'TF7', fileCount: 1 },
@@ -830,7 +825,7 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(r.json.ok, true);
     assert.strictEqual(r.json.marked, false);
     assert.strictEqual(r.json.reason, 'no testfilesstorage field or checklist item');
-    assert.strictEqual(comments.TF7.length, 1, 'the comment is then the only record on the task');
+    assert.strictEqual(comments.TF7, undefined, 'nothing is written to the task at all');
   });
 
   await test('502 when the task cannot be read', async () => {
@@ -846,28 +841,18 @@ const KEY = { 'X-API-Key': 'test-key' };
     fieldWriteShouldFail = false;
     assert.strictEqual(r.status, 502);
     assert.strictEqual(r.json.ok, false);
-    assert.strictEqual(comments.TF8, undefined, 'no comment when the tick itself failed');
   });
 
-  await test('502 when the comment fails, reporting that the box was still ticked', async () => {
-    taskState = { TF9: {} };
-    commentsShouldFail = true;
-    const r = await request('/clickup/test-files-uploaded', { headers: KEY, body: { clickupTaskId: 'TF9' } });
-    commentsShouldFail = false;
-    assert.strictEqual(r.status, 502);
-    assert.strictEqual(r.json.ok, false);
-    assert.strictEqual(r.json.marked, true, 'the tick landed and the body says so');
-    assert.strictEqual(fieldValues.TF9['cf-testfilesstored'], true);
-  });
-
-  await test('copes with a null fileCount and submittedAt', async () => {
+  await test('ticks the box on a body carrying only clickupTaskId', async () => {
+    // Everything but the task id is optional and only ever reaches the log.
     taskState = { TF10: {} };
     const r = await request('/clickup/test-files-uploaded', {
       headers: KEY,
-      body: { clickupTaskId: 'TF10', clientName: 'Acme', fileCount: null, archiveName: null, submittedAt: null },
+      body: { clickupTaskId: 'TF10', clientName: null, fileCount: null, archiveName: null, submittedAt: null },
     });
     assert.strictEqual(r.status, 200);
-    assert.strictEqual(comments.TF10[0].comment_text, '📦 Test files received — files uploaded to the SFE portal.');
+    assert.strictEqual(r.json.marked, true);
+    assert.strictEqual(fieldValues.TF10['cf-testfilesstored'], true);
   });
 
   console.log(`\n${passed} passed, ${failed} failed\n`);
