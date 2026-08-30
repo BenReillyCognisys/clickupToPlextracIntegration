@@ -194,6 +194,7 @@ decides which tasks these land on:**
 | Signed form attached + link prepended to the description + status advanced to `Waiting for Pre-reqs` | `POST /clickup/finalised-auth-form` |
 | Extra-URLs comment and Slack alert | `POST /clickup/extra-urls` |
 | Free Black Box auto-schedule (start/due dates + assignee) | `POST /clickup/schedule-task` |
+| Client's report deadline → the task's "Report Due" date field | `POST /clickup/schedule-task` |
 
 Remap creates a form for the target task, so the target **is** in that set from then
 on. But the source task's form is still live in the portal, so the source is still in
@@ -228,6 +229,30 @@ A Free Black Box is a **half day**, so it always lands on a single day: the endp
 ignores the `endDate` it was sent for this test type and writes the due date equal to
 the start date. (Callers often send the following day, which showed up as a 2-day
 booking.) Every other test type keeps the range it was given.
+
+### The client's report deadline
+
+Some auth forms ask the client when they need the report by. That date arrives on the
+same `POST /clickup/schedule-task` call as `reportDeadline`, and goes onto the task's
+**Report Due** date custom field (override the field name with
+`CLICKUP_REPORT_DUE_FIELD_NAME`). If the task doesn't carry that field the deadline is
+commented instead, and the client's free-text scheduling `note` is always commented —
+a date field has nowhere to put it. The comment is tagged `[report-deadline]` and
+updated in place, so resubmitting a form moves the deadline rather than stacking a
+second comment.
+
+The deadline is recorded on **every** call, independently of the booking:
+
+- **A slot was found** — dates and deadline are both written.
+- **No slot before the deadline** — the portal sends `startDate`/`endDate` as `null`.
+  The deadline still lands on the task; nothing is booked and nobody is assigned, so
+  the job is visible with its deadline and no dates for a human to place by hand.
+- **A repeat Free Black Box submission** — the existing booking is left alone, but the
+  deadline is refreshed, because the client may have changed it.
+
+Deadline and dates never fail each other: a rejected deadline write is logged and the
+dates are still written. A deadline-only call that lands nowhere returns 502, so the
+portal audits it as failed rather than recording a deadline that never arrived.
 
 A regular paid Black Box is never auto-scheduled — `POST /schedule/pentest` *creates* a
 task from a chosen consultant and date range, and has nothing to do with either

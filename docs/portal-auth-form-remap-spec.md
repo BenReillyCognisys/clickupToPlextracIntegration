@@ -95,9 +95,15 @@ POST /clickup/extra-urls
   → comments + Slack-alerts a Free Black Box that scoped several URLs
 
 POST /clickup/schedule-task
-{ clickupTaskId, startDate: "yyyy-mm-dd", endDate: "yyyy-mm-dd", consultant, testType, days }
-  → writes start/due dates + assignee. For a Free Black Box it is a no-op if that
-    task already has a start_date (repeat submissions must not move a booking)
+{ clickupTaskId, startDate: "yyyy-mm-dd"|null, endDate: "yyyy-mm-dd"|null, consultant,
+  testType, days, reportDeadline: "yyyy-mm-dd", note }
+  → writes start/due dates + assignee, and records reportDeadline on the task's
+    "Report Due" date field (as a comment when the task has no such field; a `note`
+    is always commented, since a date field can't hold it). Requires clickupTaskId
+    plus either both dates or reportDeadline — when availability found no slot before
+    the deadline, send the deadline with null dates and nothing is booked. For a Free
+    Black Box the dates are a no-op if that task already has a start_date (repeat
+    submissions must not move a booking); the deadline is still refreshed
 ```
 
 ---

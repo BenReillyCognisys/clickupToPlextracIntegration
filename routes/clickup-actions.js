@@ -15,9 +15,13 @@
  *   POST /clickup/extra-urls         — comment + alert SLACK_AUTH_FORM_CHANNEL for a
  *                                      Free Black Box form that scoped more than one URL.
  *   POST /clickup/schedule-task      — write resolved start/due dates onto an
- *                                      existing ClickUp task and assign the
- *                                      consultant. A repeat Free Black Box
- *                                      submission (task already scheduled) is a no-op.
+ *                                      existing ClickUp task, assign the consultant,
+ *                                      and record the client's report deadline. The
+ *                                      dates and the deadline are independently
+ *                                      optional (no slot before the deadline means
+ *                                      the deadline arrives on its own). A repeat
+ *                                      Free Black Box submission does not move an
+ *                                      existing booking.
  *
  * Idempotent-comment strategy (endpoint 1): the portal re-sends the same merged
  * form every time a new task for that client arrives, so this endpoint is called
@@ -81,14 +85,19 @@ const clickupTaskUrl = (taskId) => `https://app.clickup.com/t/${taskId}`;
 // the file field, distinct from the auth-form *link* field CLICKUP_AUTH_FORM_FIELD_NAME.)
 const AUTH_FORM_FILE_FIELD_NAME = process.env.CLICKUP_AUTH_FORM_FILE_FIELD_NAME || 'Authorisation Forms';
 
-// Resolves a custom field id from a task's custom_fields by name (case-insensitive,
-// trimmed). The field appears on every task in its list even when unset. Returns null
-// when the field isn't on the task.
-function findCustomFieldId(task, name) {
+// Resolves a custom field on a task by name (case-insensitive, trimmed). A field
+// appears on every task in its list even when unset, so this finding nothing means
+// the field isn't configured for that list at all. Returns null in that case.
+function findCustomField(task, name) {
   const target = name.trim().toLowerCase();
-  const field = (task.custom_fields || []).find(
+  return (task.custom_fields || []).find(
     (f) => (f.name || '').trim().toLowerCase() === target,
-  );
+  ) || null;
+}
+
+// As above, but just the id — what the callers that only write a value need.
+function findCustomFieldId(task, name) {
+  const field = findCustomField(task, name);
   return field ? field.id : null;
 }
 
@@ -368,9 +377,93 @@ router.post('/extra-urls', async (req, res) => {
   res.status(anySuccess ? 200 : 502).json({ ok: anySuccess, clickup, slack });
 });
 
+// ─── Report deadline ──────────────────────────────────────────────────────────
+// Some jobs let the client pick the date they need the report by, and the portal sends
+// that date on every schedule-task call. It is not a booking: availability may find no
+// slot before it, in which case the deadline arrives on its own with no dates attached.
+// Either way it is the date the client committed to, so it is always recorded.
+
+// Date-type ClickUp custom field the deadline is written to. When a task doesn't carry
+// it (or it isn't a date field) the deadline is commented instead.
+const REPORT_DEADLINE_FIELD_NAME = process.env.CLICKUP_REPORT_DUE_FIELD_NAME || 'Report Due';
+
+// Stable marker on the deadline comment, so a client who resubmits their form refreshes
+// that comment in place rather than stacking a second one — the same idempotent-comment
+// strategy the merged auth form uses (see the file header).
+const REPORT_DEADLINE_MARKER = '[report-deadline]';
+
+// The client's free-text scheduling note goes onto the task verbatim; cap it so a
+// runaway paste can't be pushed into a ClickUp comment whole.
+const MAX_NOTE_LENGTH = 2000;
+
+function deadlineCommentText(reportDeadline, note) {
+  const trimmed = String(note ?? '').trim().slice(0, MAX_NOTE_LENGTH);
+  const noteText = trimmed ? `\nClient's scheduling note: ${trimmed}` : '';
+  return `${REPORT_DEADLINE_MARKER} 🗓️ The client needs their report by ${reportDeadline}.${noteText}`;
+}
+
+/**
+ * Records the client's report deadline on the task and returns { field, comment }
+ * describing what happened. Never throws — the date write must not fail because the
+ * deadline couldn't be recorded, and vice versa.
+ *
+ * The deadline goes onto the REPORT_DEADLINE_FIELD_NAME date custom field when the task
+ * carries one, otherwise it is commented. A scheduling note always gets a comment —
+ * there is nowhere for free text to live on a date field — so a task with the field and
+ * a note gets both. `task` is the already-fetched task (null when the read failed, in
+ * which case we can't see the field and fall back to the comment).
+ *
+ *   field:   'set' | 'absent' | 'failed'
+ *   comment: 'created' | 'updated' | 'skipped' | 'failed'
+ */
+async function recordReportDeadline(taskId, { deadlineMs, reportDeadline, note, task }) {
+  let field = 'absent';
+  const dateField = task ? findCustomField(task, REPORT_DEADLINE_FIELD_NAME) : null;
+  if (dateField && dateField.type === 'date') {
+    try {
+      await setTaskCustomField(taskId, dateField.id, deadlineMs);
+      field = 'set';
+    } catch (err) {
+      log.error('Schedule-task could not write the report deadline custom field', {
+        taskId, fieldId: dateField.id, reportDeadline, reason: err.message,
+      });
+      field = 'failed';
+    }
+  }
+
+  // The field holds the date and there's no note to carry — nothing left to say.
+  if (field === 'set' && !String(note ?? '').trim()) return { field, comment: 'skipped' };
+
+  const text = deadlineCommentText(reportDeadline, note);
+  try {
+    const comments = await listTaskComments(taskId);
+    const existing = comments.find((c) => (c.comment_text || '').includes(REPORT_DEADLINE_MARKER));
+    if (existing) {
+      await updateComment(existing.id, text);
+      return { field, comment: 'updated' };
+    }
+    await createTaskComment(taskId, text);
+    return { field, comment: 'created' };
+  } catch (err) {
+    log.error('Schedule-task could not comment the report deadline', {
+      taskId, reportDeadline, reason: err.message,
+    });
+    return { field, comment: 'failed' };
+  }
+}
+
+// True once the deadline has actually landed somewhere on the task.
+function deadlineRecorded(deadline) {
+  return !!deadline && (deadline.field === 'set' || deadline.comment === 'created' || deadline.comment === 'updated');
+}
+
 // ─── POST /clickup/schedule-task ──────────────────────────────────────────────
-// Writes resolved start/due dates onto an existing ClickUp task. Optionally sets
-// the assignee from `consultant`; assignee resolution failure is non-fatal.
+// Writes resolved start/due dates onto an existing ClickUp task and records the client's
+// report deadline. The two are independent: when availability finds no slot before the
+// deadline the portal still calls this with `startDate`/`endDate` null, so the date the
+// client picked reaches the task even though there is nothing to book. At least one of
+// (both dates) / reportDeadline must be present. Optionally sets the assignee from
+// `consultant`; assignee resolution failure is non-fatal.
 router.post('/schedule-task', async (req, res) => {
   const {
     clickupTaskId,
@@ -379,56 +472,105 @@ router.post('/schedule-task', async (req, res) => {
     consultant,
     testType,
     days,
+    reportDeadline,
+    note,
   } = req.body || {};
 
-  if (!clickupTaskId || !startDate || !endDate) {
-    return res.status(400).json({ error: 'clickupTaskId, startDate, and endDate are required' });
+  const hasDates = startDate != null && endDate != null;
+  if (!clickupTaskId || (!hasDates && !reportDeadline)) {
+    return res.status(400).json({
+      error: 'clickupTaskId, plus either both startDate and endDate or reportDeadline, are required',
+    });
   }
 
   // yyyy-mm-dd → unix ms at UTC midnight (all-day dates).
-  const startDateMs = Date.parse(`${startDate}T00:00:00Z`);
-  let dueDateMs = Date.parse(`${endDate}T00:00:00Z`);
-  if (!Number.isFinite(startDateMs) || !Number.isFinite(dueDateMs)) {
-    return res.status(400).json({ error: 'startDate and endDate must be yyyy-mm-dd dates' });
+  let startDateMs = null;
+  let dueDateMs = null;
+  if (hasDates) {
+    startDateMs = Date.parse(`${startDate}T00:00:00Z`);
+    dueDateMs = Date.parse(`${endDate}T00:00:00Z`);
+    if (!Number.isFinite(startDateMs) || !Number.isFinite(dueDateMs)) {
+      return res.status(400).json({ error: 'startDate and endDate must be yyyy-mm-dd dates' });
+    }
+  }
+
+  let deadlineMs = null;
+  if (reportDeadline != null) {
+    deadlineMs = Date.parse(`${reportDeadline}T00:00:00Z`);
+    if (!Number.isFinite(deadlineMs)) {
+      return res.status(400).json({ error: 'reportDeadline must be a yyyy-mm-dd date' });
+    }
   }
 
   // A Free Black Box is a half-day (0.5) engagement, so it must sit on ONE day in
   // ClickUp — same start and due date. Callers commonly send the following day as
   // the end date, which reads as a 2-day booking on the board and in availability,
   // so collapse the due date onto the start date rather than trusting it.
-  if (isFreeBlackBox(testType) && dueDateMs !== startDateMs) {
+  if (hasDates && isFreeBlackBox(testType) && dueDateMs !== startDateMs) {
     log.info('Schedule-task collapsed a Free Black Box to a single day', {
       clickupTaskId, startDate, requested_end_date: endDate,
     });
     dueDateMs = startDateMs;
   }
 
+  // One read serves both the deadline's custom-field lookup and the Free Black Box
+  // repeat-submission guard below. A read failure is non-fatal to either: the deadline
+  // falls back to a comment, and scheduling treats it as a first submission rather than
+  // blocking a booking on a transient hiccup.
+  let task = null;
+  if (deadlineMs != null || isFreeBlackBox(testType)) {
+    try {
+      task = await getTask(clickupTaskId);
+    } catch (err) {
+      log.warn('Schedule-task could not read the task', { clickupTaskId, reason: err.message });
+    }
+  }
+
+  // Record the deadline before anything below can return early: it must land on every
+  // call, including the repeat Free Black Box submission that writes no dates at all.
+  let deadline = null;
+  if (deadlineMs != null) {
+    deadline = await recordReportDeadline(clickupTaskId, { deadlineMs, reportDeadline, note, task });
+    log.info('Schedule-task recorded the client report deadline', {
+      clickupTaskId, reportDeadline, field: deadline.field, comment: deadline.comment,
+      has_note: !!String(note ?? '').trim(),
+    });
+  }
+
   // Free Black Box forms can be submitted more than once: the first submission fixes
   // the schedule and later ones must not move it. If this is a Free Black Box task
-  // that already has a start date, skip the whole update (no dates, no assignee). A
-  // read failure is non-fatal — we fall through and treat it as a first submission
-  // rather than block one on a transient hiccup.
-  if (isFreeBlackBox(testType)) {
-    let existing = null;
-    try {
-      existing = await getTask(clickupTaskId);
-    } catch (err) {
-      log.warn('Schedule-task could not read task to check for a repeat submission', {
-        clickupTaskId, reason: err.message,
-      });
-    }
-    if (existing && existing.start_date) {
-      log.info('Schedule-task skipped — Free Black Box already scheduled (repeat submission)', {
-        clickupTaskId, testType,
-      });
-      return res.status(200).json({
-        ok: true,
+  // that already has a start date, skip the date update (no dates, no assignee) — the
+  // deadline above is still refreshed, since the client may have changed it.
+  if (isFreeBlackBox(testType) && task && task.start_date) {
+    log.info('Schedule-task skipped — Free Black Box already scheduled (repeat submission)', {
+      clickupTaskId, testType,
+    });
+    return res.status(200).json({
+      ok: true,
+      taskId: clickupTaskId,
+      skipped: true,
+      start_date: Number(task.start_date),
+      due_date: task.due_date != null ? Number(task.due_date) : null,
+      deadline,
+    });
+  }
+
+  // No slot was free before the client's deadline, so there is nothing to book: the
+  // deadline is the entire payload. No assignee either — there is no booking to put
+  // anyone on. If the deadline landed nowhere then the call achieved nothing, so say so
+  // rather than reporting success the portal would audit as sent.
+  if (!hasDates) {
+    if (!deadlineRecorded(deadline)) {
+      return res.status(502).json({
+        ok: false,
         taskId: clickupTaskId,
-        skipped: true,
-        start_date: Number(existing.start_date),
-        due_date: existing.due_date != null ? Number(existing.due_date) : null,
+        deadline,
+        error: 'could not record the report deadline on the task',
       });
     }
+    return res.status(200).json({
+      ok: true, taskId: clickupTaskId, start_date: null, due_date: null, deadline,
+    });
   }
 
   // Optional assignee resolution — best effort, never blocks the date write.
@@ -457,12 +599,15 @@ router.post('/schedule-task', async (req, res) => {
       endDate: new Date(dueDateMs).toISOString().slice(0, 10),
       testType: testType || null, days: days ?? null,
       assigneeId: assigneeId ?? null,
+      reportDeadline: reportDeadline || null,
     });
 
-    res.status(200).json({ ok: true, taskId: clickupTaskId, start_date: startDateMs, due_date: dueDateMs });
+    res.status(200).json({
+      ok: true, taskId: clickupTaskId, start_date: startDateMs, due_date: dueDateMs, deadline,
+    });
   } catch (err) {
     log.error('Schedule-task update failed', { clickupTaskId, reason: err.message });
-    res.status(502).json({ ok: false, error: err.message });
+    res.status(502).json({ ok: false, error: err.message, deadline });
   }
 });
 

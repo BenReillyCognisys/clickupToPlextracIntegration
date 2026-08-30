@@ -29,13 +29,16 @@ let taskState = {};     // taskId -> { start_date, due_date, custom_fields } ret
 // The "Authorisation Forms" File custom field, present on every task by default so
 // the finalised-auth-form flow can resolve it. taskState may override per task.
 const AUTH_FORM_FILE_FIELD = { id: 'cf-authforms', name: 'Authorisation Forms', type: 'attachment' };
+// The date custom field the client's chosen report deadline is written to.
+const REPORT_DUE_FIELD = { id: 'cf-reportdue', name: 'Report Due', type: 'date' };
 
+let commentsShouldFail = false; // toggled by the deadline-comment failure test
 clickupApi.listTaskComments = async (taskId) => {
-  if (taskId === 'FAIL') throw new Error('boom (list)');
+  if (taskId === 'FAIL' || commentsShouldFail) throw new Error('boom (list)');
   return comments[taskId] || [];
 };
 clickupApi.createTaskComment = async (taskId, text) => {
-  if (taskId === 'FAIL') throw new Error('boom (create)');
+  if (taskId === 'FAIL' || commentsShouldFail) throw new Error('boom (create)');
   const id = `c${nextCommentId++}`;
   (comments[taskId] ||= []).push({ id, comment_text: text });
   return id;
@@ -79,7 +82,7 @@ clickupApi.getTask = async (taskId) => {
   if (taskId === 'GETFAIL' || taskId === 'FAIL') throw new Error('boom (getTask)');
   const state = taskState[taskId] || {};
   // Default every task to carrying the Authorisation Forms field unless overridden.
-  const custom_fields = state.custom_fields || [AUTH_FORM_FILE_FIELD];
+  const custom_fields = state.custom_fields || [AUTH_FORM_FILE_FIELD, REPORT_DUE_FIELD];
   return { id: taskId, ...state, custom_fields };
 };
 clickupApi.getTaskDescription = async (taskId) => descriptions[taskId] || '';
@@ -474,6 +477,144 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.json.skipped, undefined);
     assert.strictEqual(scheduled.length, before + 1, 'transient read failure does not block scheduling');
+  });
+
+  // ── schedule-task: the client's report deadline ───────────────────────────────
+  console.log('\nPOST /clickup/schedule-task (report deadline):');
+
+  // A task with no "Report Due" field configured on its list, so the deadline has to
+  // fall back to a comment.
+  const NO_DUE_FIELD = { custom_fields: [AUTH_FORM_FILE_FIELD] };
+
+  await test('rejects a call with neither dates nor a reportDeadline with 400', async () => {
+    const r = await request('/clickup/schedule-task', { headers: KEY, body: { clickupTaskId: 'D0' } });
+    assert.strictEqual(r.status, 400);
+  });
+
+  await test('rejects a malformed reportDeadline with 400', async () => {
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY, body: { clickupTaskId: 'D0', reportDeadline: 'next Tuesday' },
+    });
+    assert.strictEqual(r.status, 400);
+  });
+
+  await test('writes the deadline to the "Report Due" field, never to the task due date', async () => {
+    taskState = { D1: {} };
+    const before = scheduled.length;
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: {
+        clickupTaskId: 'D1', startDate: '2026-09-07', endDate: '2026-09-08',
+        testType: 'Paid Black Box Pentest', reportDeadline: '2026-09-25',
+      },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.deadline.field, 'set');
+    assert.strictEqual(fieldValues.D1['cf-reportdue'], Date.parse('2026-09-25T00:00:00Z'));
+    assert.strictEqual(scheduled.length, before + 1, 'the dates are still written');
+    // The deadline is the "Report Due" custom field and nothing else. It must never
+    // leak into the task's own due date, which stays the last day of the booking.
+    assert.strictEqual(scheduled.at(-1).dueDateMs, Date.parse('2026-09-08T00:00:00Z'));
+    assert.strictEqual(scheduled.at(-1).startDateMs, Date.parse('2026-09-07T00:00:00Z'));
+    assert.strictEqual(r.json.due_date, Date.parse('2026-09-08T00:00:00Z'));
+    assert.strictEqual(comments.D1, undefined, 'no comment needed when the field took it');
+  });
+
+  await test('no slot before the deadline: records the deadline and books nothing', async () => {
+    taskState = { D2: {} };
+    const before = scheduled.length;
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: {
+        clickupTaskId: 'D2', startDate: null, endDate: null,
+        testType: 'Paid Black Box Pentest', reportDeadline: '2026-10-02', days: 3,
+      },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.ok, true);
+    assert.strictEqual(r.json.start_date, null);
+    assert.strictEqual(r.json.due_date, null);
+    assert.strictEqual(fieldValues.D2['cf-reportdue'], Date.parse('2026-10-02T00:00:00Z'));
+    assert.strictEqual(scheduled.length, before, 'nothing is scheduled without dates');
+  });
+
+  await test('comments the deadline when the task has no "Report Due" field', async () => {
+    taskState = { D3: NO_DUE_FIELD };
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY, body: { clickupTaskId: 'D3', reportDeadline: '2026-10-02' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.deadline.field, 'absent');
+    assert.strictEqual(r.json.deadline.comment, 'created');
+    assert.match(comments.D3[0].comment_text, /2026-10-02/);
+  });
+
+  await test("carries the client's note in a comment even when the field took the date", async () => {
+    taskState = { D4: {} };
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: { clickupTaskId: 'D4', reportDeadline: '2026-10-02', note: 'Board meeting on the 5th' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.deadline.field, 'set');
+    assert.strictEqual(r.json.deadline.comment, 'created');
+    assert.match(comments.D4[0].comment_text, /Board meeting on the 5th/);
+  });
+
+  await test('a resubmitted form refreshes the deadline comment in place', async () => {
+    taskState = { D5: NO_DUE_FIELD };
+    await request('/clickup/schedule-task', {
+      headers: KEY, body: { clickupTaskId: 'D5', reportDeadline: '2026-10-02' },
+    });
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY, body: { clickupTaskId: 'D5', reportDeadline: '2026-10-09' },
+    });
+    assert.strictEqual(r.json.deadline.comment, 'updated');
+    assert.strictEqual(comments.D5.length, 1, 'one deadline comment, not two');
+    assert.match(comments.D5[0].comment_text, /2026-10-09/);
+  });
+
+  await test('a repeat Free Black Box refreshes the deadline but not the booking', async () => {
+    taskState = { D6: { start_date: '1757203200000', due_date: '1757203200000' } };
+    const before = scheduled.length;
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: {
+        clickupTaskId: 'D6', startDate: '2027-01-01', endDate: '2027-01-02',
+        testType: 'Free Black Box Test', reportDeadline: '2026-11-06',
+      },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.skipped, true);
+    assert.strictEqual(r.json.start_date, 1757203200000, 'the original booking stands');
+    assert.strictEqual(scheduled.length, before, 'no schedule write happened');
+    assert.strictEqual(fieldValues.D6['cf-reportdue'], Date.parse('2026-11-06T00:00:00Z'));
+  });
+
+  await test('502 when a deadline-only call cannot record the deadline anywhere', async () => {
+    // 'FAIL' throws on both the task read and the comment, so nothing lands.
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY, body: { clickupTaskId: 'FAIL', reportDeadline: '2026-10-02' },
+    });
+    assert.strictEqual(r.status, 502);
+    assert.strictEqual(r.json.ok, false);
+  });
+
+  await test('a failed deadline write does not stop the booking', async () => {
+    taskState = { D7: NO_DUE_FIELD };
+    const before = scheduled.length;
+    commentsShouldFail = true;
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: {
+        clickupTaskId: 'D7', startDate: '2026-09-07', endDate: '2026-09-08',
+        testType: 'Paid Black Box Pentest', reportDeadline: '2026-10-02',
+      },
+    });
+    commentsShouldFail = false;
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.deadline.comment, 'failed');
+    assert.strictEqual(scheduled.length, before + 1, 'the dates are written regardless');
   });
 
   // ── finalised-auth-form: pre-reqs status ──────────────────────────────────────

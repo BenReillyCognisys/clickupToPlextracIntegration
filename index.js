@@ -105,8 +105,11 @@ app.use('/schedule', schedulingCors, require('./routes/schedule'));
 //                                       and attach it to each related task
 //   POST /clickup/extra-urls          — comment + Slack-alert a Free Black Box form
 //                                       that scoped more than one URL
-//   POST /clickup/schedule-task       — write resolved start/due dates onto a task
-//                                       (repeat Free Black Box submissions are no-ops)
+//   POST /clickup/schedule-task       — write resolved start/due dates onto a task and
+//                                       record the client's report deadline on its
+//                                       "Report Due" field (dates and deadline are
+//                                       independently optional; repeat Free Black Box
+//                                       submissions never move an existing booking)
 // These are server-to-server (not browser) calls, so they get no CORS. The key
 // check lives inside the router; apiLimiter throttles failed-auth attempts, matching
 // the /jobs/* endpoints.
