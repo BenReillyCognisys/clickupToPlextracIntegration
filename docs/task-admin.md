@@ -236,11 +236,10 @@ booking.) Every other test type keeps the range it was given.
 Some auth forms ask the client when they need the report by. That date arrives on the
 same `POST /clickup/schedule-task` call as `reportDeadline`, and goes onto the task's
 **Report Due** date custom field (override the field name with
-`CLICKUP_REPORT_DUE_FIELD_NAME`). If the task doesn't carry that field the deadline is
-commented instead, and the client's free-text scheduling `note` is always commented —
-a date field has nowhere to put it. The comment is tagged `[report-deadline]` and
-updated in place, so resubmitting a form moves the deadline rather than stacking a
-second comment.
+`CLICKUP_REPORT_DUE_FIELD_NAME`) — and nowhere else. Nothing is commented onto the
+task: not the deadline, and not the client's free-text scheduling `note`, which is
+written to the log and left off the task. A task whose list doesn't carry the Report
+Due field has nowhere to record the deadline, and the call reports `field: "absent"`.
 
 The deadline is recorded on **every** call, independently of the booking:
 
@@ -252,8 +251,9 @@ The deadline is recorded on **every** call, independently of the booking:
   deadline is refreshed, because the client may have changed it.
 
 Deadline and dates never fail each other: a rejected deadline write is logged and the
-dates are still written. A deadline-only call that lands nowhere returns 502, so the
-portal audits it as failed rather than recording a deadline that never arrived.
+dates are still written. A deadline-only call whose deadline never reached the field
+returns 502, so the portal audits it as failed rather than recording a deadline that
+never arrived.
 
 ### Test files
 

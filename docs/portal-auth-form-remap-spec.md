@@ -98,8 +98,8 @@ POST /clickup/schedule-task
 { clickupTaskId, startDate: "yyyy-mm-dd"|null, endDate: "yyyy-mm-dd"|null, consultant,
   testType, days, reportDeadline: "yyyy-mm-dd", note }
   → writes start/due dates + assignee, and records reportDeadline on the task's
-    "Report Due" date field (as a comment when the task has no such field; a `note`
-    is always commented, since a date field can't hold it). Requires clickupTaskId
+    "Report Due" date field — the only place it is written; nothing is commented onto
+    the task, and `note` is logged rather than recorded. Requires clickupTaskId
     plus either both dates or reportDeadline — when availability found no slot before
     the deadline, send the deadline with null dates and nothing is booked. For a Free
     Black Box the dates are a no-op if that task already has a start_date (repeat

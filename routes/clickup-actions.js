@@ -390,78 +390,38 @@ router.post('/extra-urls', async (req, res) => {
 // slot before it, in which case the deadline arrives on its own with no dates attached.
 // Either way it is the date the client committed to, so it is always recorded.
 
-// Date-type ClickUp custom field the deadline is written to. When a task doesn't carry
-// it (or it isn't a date field) the deadline is commented instead.
+// Date-type ClickUp custom field the deadline is written to. It is the only place the
+// deadline is recorded — the deadline is never commented onto the task.
 const REPORT_DEADLINE_FIELD_NAME = process.env.CLICKUP_REPORT_DUE_FIELD_NAME || 'Report Due';
 
-// Stable marker on the deadline comment, so a client who resubmits their form refreshes
-// that comment in place rather than stacking a second one — the same idempotent-comment
-// strategy the merged auth form uses (see the file header).
-const REPORT_DEADLINE_MARKER = '[report-deadline]';
-
-// The client's free-text scheduling note goes onto the task verbatim; cap it so a
-// runaway paste can't be pushed into a ClickUp comment whole.
-const MAX_NOTE_LENGTH = 2000;
-
-function deadlineCommentText(reportDeadline, note) {
-  const trimmed = String(note ?? '').trim().slice(0, MAX_NOTE_LENGTH);
-  const noteText = trimmed ? `\nClient's scheduling note: ${trimmed}` : '';
-  return `${REPORT_DEADLINE_MARKER} 🗓️ The client needs their report by ${reportDeadline}.${noteText}`;
-}
-
 /**
- * Records the client's report deadline on the task and returns { field, comment }
- * describing what happened. Never throws — the date write must not fail because the
- * deadline couldn't be recorded, and vice versa.
+ * Records the client's report deadline on the task's REPORT_DEADLINE_FIELD_NAME date
+ * custom field and returns { field } describing what happened. Never throws — the date
+ * write must not fail because the deadline couldn't be recorded, and vice versa.
  *
- * The deadline goes onto the REPORT_DEADLINE_FIELD_NAME date custom field when the task
- * carries one, otherwise it is commented. A scheduling note always gets a comment —
- * there is nowhere for free text to live on a date field — so a task with the field and
- * a note gets both. `task` is the already-fetched task (null when the read failed, in
- * which case we can't see the field and fall back to the comment).
+ * `task` is the already-fetched task (null when the read failed, in which case we can't
+ * see the field, so there is nowhere to put the deadline).
  *
- *   field:   'set' | 'absent' | 'failed'
- *   comment: 'created' | 'updated' | 'skipped' | 'failed'
+ *   field: 'set' | 'absent' | 'failed'
  */
-async function recordReportDeadline(taskId, { deadlineMs, reportDeadline, note, task }) {
-  let field = 'absent';
+async function recordReportDeadline(taskId, { deadlineMs, reportDeadline, task }) {
   const dateField = task ? findCustomField(task, REPORT_DEADLINE_FIELD_NAME) : null;
-  if (dateField && dateField.type === 'date') {
-    try {
-      await setTaskCustomField(taskId, dateField.id, deadlineMs);
-      field = 'set';
-    } catch (err) {
-      log.error('Schedule-task could not write the report deadline custom field', {
-        taskId, fieldId: dateField.id, reportDeadline, reason: err.message,
-      });
-      field = 'failed';
-    }
-  }
+  if (!dateField || dateField.type !== 'date') return { field: 'absent' };
 
-  // The field holds the date and there's no note to carry — nothing left to say.
-  if (field === 'set' && !String(note ?? '').trim()) return { field, comment: 'skipped' };
-
-  const text = deadlineCommentText(reportDeadline, note);
   try {
-    const comments = await listTaskComments(taskId);
-    const existing = comments.find((c) => (c.comment_text || '').includes(REPORT_DEADLINE_MARKER));
-    if (existing) {
-      await updateComment(existing.id, text);
-      return { field, comment: 'updated' };
-    }
-    await createTaskComment(taskId, text);
-    return { field, comment: 'created' };
+    await setTaskCustomField(taskId, dateField.id, deadlineMs);
+    return { field: 'set' };
   } catch (err) {
-    log.error('Schedule-task could not comment the report deadline', {
-      taskId, reportDeadline, reason: err.message,
+    log.error('Schedule-task could not write the report deadline custom field', {
+      taskId, fieldId: dateField.id, reportDeadline, reason: err.message,
     });
-    return { field, comment: 'failed' };
+    return { field: 'failed' };
   }
 }
 
-// True once the deadline has actually landed somewhere on the task.
+// True once the deadline has actually landed on the task.
 function deadlineRecorded(deadline) {
-  return !!deadline && (deadline.field === 'set' || deadline.comment === 'created' || deadline.comment === 'updated');
+  return !!deadline && deadline.field === 'set';
 }
 
 // ─── POST /clickup/schedule-task ──────────────────────────────────────────────
@@ -522,8 +482,8 @@ router.post('/schedule-task', async (req, res) => {
 
   // One read serves both the deadline's custom-field lookup and the Free Black Box
   // repeat-submission guard below. A read failure is non-fatal to either: the deadline
-  // falls back to a comment, and scheduling treats it as a first submission rather than
-  // blocking a booking on a transient hiccup.
+  // write is skipped (logged, and reported as `field: 'absent'`), and scheduling treats
+  // it as a first submission rather than blocking a booking on a transient hiccup.
   let task = null;
   if (deadlineMs != null || isFreeBlackBox(testType)) {
     try {
@@ -537,10 +497,12 @@ router.post('/schedule-task', async (req, res) => {
   // call, including the repeat Free Black Box submission that writes no dates at all.
   let deadline = null;
   if (deadlineMs != null) {
-    deadline = await recordReportDeadline(clickupTaskId, { deadlineMs, reportDeadline, note, task });
+    deadline = await recordReportDeadline(clickupTaskId, { deadlineMs, reportDeadline, task });
+    // The client's free-text scheduling note is no longer put on the task, so the log
+    // is the only record of it — keep it here, capped so a runaway paste can't flood.
     log.info('Schedule-task recorded the client report deadline', {
-      clickupTaskId, reportDeadline, field: deadline.field, comment: deadline.comment,
-      has_note: !!String(note ?? '').trim(),
+      clickupTaskId, reportDeadline, field: deadline.field,
+      note: String(note ?? '').trim().slice(0, 500) || null,
     });
   }
 
@@ -564,8 +526,8 @@ router.post('/schedule-task', async (req, res) => {
 
   // No slot was free before the client's deadline, so there is nothing to book: the
   // deadline is the entire payload. No assignee either — there is no booking to put
-  // anyone on. If the deadline landed nowhere then the call achieved nothing, so say so
-  // rather than reporting success the portal would audit as sent.
+  // anyone on. If the deadline never reached the field then the call achieved nothing,
+  // so say so rather than reporting success the portal would audit as sent.
   if (!hasDates) {
     if (!deadlineRecorded(deadline)) {
       return res.status(502).json({

@@ -36,7 +36,7 @@ const REPORT_DUE_FIELD = { id: 'cf-reportdue', name: 'Report Due', type: 'date' 
 const TEST_FILES_LINK_FIELD = { id: 'cf-testfilesstorage', name: 'testfilesstorage', type: 'short_text' };
 const TEST_FILES_DONE_FIELD = { id: 'cf-testfilesstored', name: 'testfilesstored', type: 'checkbox', value: false };
 
-let commentsShouldFail = false; // toggled by the deadline-comment failure test
+let commentsShouldFail = false; // toggled by comment-failure tests
 clickupApi.listTaskComments = async (taskId) => {
   if (taskId === 'FAIL' || commentsShouldFail) throw new Error('boom (list)');
   return comments[taskId] || [];
@@ -494,8 +494,8 @@ const KEY = { 'X-API-Key': 'test-key' };
   // ── schedule-task: the client's report deadline ───────────────────────────────
   console.log('\nPOST /clickup/schedule-task (report deadline):');
 
-  // A task with no "Report Due" field configured on its list, so the deadline has to
-  // fall back to a comment.
+  // A task with no "Report Due" field configured on its list, so there is nowhere for
+  // the deadline to go — it is never commented as a fallback.
   const NO_DUE_FIELD = { custom_fields: [AUTH_FORM_FILE_FIELD] };
 
   await test('rejects a call with neither dates nor a reportDeadline with 400', async () => {
@@ -529,7 +529,7 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(scheduled.at(-1).dueDateMs, Date.parse('2026-09-08T00:00:00Z'));
     assert.strictEqual(scheduled.at(-1).startDateMs, Date.parse('2026-09-07T00:00:00Z'));
     assert.strictEqual(r.json.due_date, Date.parse('2026-09-08T00:00:00Z'));
-    assert.strictEqual(comments.D1, undefined, 'no comment needed when the field took it');
+    assert.strictEqual(comments.D1, undefined, 'the deadline is never commented');
   });
 
   await test('no slot before the deadline: records the deadline and books nothing', async () => {
@@ -550,18 +550,19 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(scheduled.length, before, 'nothing is scheduled without dates');
   });
 
-  await test('comments the deadline when the task has no "Report Due" field', async () => {
+  await test('never comments the deadline when the task has no "Report Due" field', async () => {
     taskState = { D3: NO_DUE_FIELD };
     const r = await request('/clickup/schedule-task', {
       headers: KEY, body: { clickupTaskId: 'D3', reportDeadline: '2026-10-02' },
     });
-    assert.strictEqual(r.status, 200);
+    // Nowhere to record it, so the deadline-only call reports failure — but it must
+    // not console it onto the task as a comment.
+    assert.strictEqual(r.status, 502);
     assert.strictEqual(r.json.deadline.field, 'absent');
-    assert.strictEqual(r.json.deadline.comment, 'created');
-    assert.match(comments.D3[0].comment_text, /2026-10-02/);
+    assert.strictEqual(comments.D3, undefined, 'no fallback comment');
   });
 
-  await test("carries the client's note in a comment even when the field took the date", async () => {
+  await test("never comments the client's note", async () => {
     taskState = { D4: {} };
     const r = await request('/clickup/schedule-task', {
       headers: KEY,
@@ -569,21 +570,20 @@ const KEY = { 'X-API-Key': 'test-key' };
     });
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.json.deadline.field, 'set');
-    assert.strictEqual(r.json.deadline.comment, 'created');
-    assert.match(comments.D4[0].comment_text, /Board meeting on the 5th/);
+    assert.strictEqual(comments.D4, undefined, 'the note stays off the task');
   });
 
-  await test('a resubmitted form refreshes the deadline comment in place', async () => {
-    taskState = { D5: NO_DUE_FIELD };
+  await test('a resubmitted form moves the deadline field and stacks no comments', async () => {
+    taskState = { D5: {} };
     await request('/clickup/schedule-task', {
       headers: KEY, body: { clickupTaskId: 'D5', reportDeadline: '2026-10-02' },
     });
     const r = await request('/clickup/schedule-task', {
       headers: KEY, body: { clickupTaskId: 'D5', reportDeadline: '2026-10-09' },
     });
-    assert.strictEqual(r.json.deadline.comment, 'updated');
-    assert.strictEqual(comments.D5.length, 1, 'one deadline comment, not two');
-    assert.match(comments.D5[0].comment_text, /2026-10-09/);
+    assert.strictEqual(r.json.deadline.field, 'set');
+    assert.strictEqual(fieldValues.D5['cf-reportdue'], Date.parse('2026-10-09T00:00:00Z'));
+    assert.strictEqual(comments.D5, undefined, 'no deadline comments at all');
   });
 
   await test('a repeat Free Black Box refreshes the deadline but not the booking', async () => {
@@ -603,8 +603,8 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(fieldValues.D6['cf-reportdue'], Date.parse('2026-11-06T00:00:00Z'));
   });
 
-  await test('502 when a deadline-only call cannot record the deadline anywhere', async () => {
-    // 'FAIL' throws on both the task read and the comment, so nothing lands.
+  await test('502 when a deadline-only call cannot record the deadline', async () => {
+    // 'FAIL' throws on the task read, so the field can't be resolved and nothing lands.
     const r = await request('/clickup/schedule-task', {
       headers: KEY, body: { clickupTaskId: 'FAIL', reportDeadline: '2026-10-02' },
     });
@@ -613,9 +613,9 @@ const KEY = { 'X-API-Key': 'test-key' };
   });
 
   await test('a failed deadline write does not stop the booking', async () => {
-    taskState = { D7: NO_DUE_FIELD };
+    taskState = { D7: {} };
     const before = scheduled.length;
-    commentsShouldFail = true;
+    fieldWriteShouldFail = true;
     const r = await request('/clickup/schedule-task', {
       headers: KEY,
       body: {
@@ -623,9 +623,10 @@ const KEY = { 'X-API-Key': 'test-key' };
         testType: 'Paid Black Box Pentest', reportDeadline: '2026-10-02',
       },
     });
-    commentsShouldFail = false;
+    fieldWriteShouldFail = false;
     assert.strictEqual(r.status, 200);
-    assert.strictEqual(r.json.deadline.comment, 'failed');
+    assert.strictEqual(r.json.deadline.field, 'failed');
+    assert.strictEqual(comments.D7, undefined, 'a rejected field write is not commented');
     assert.strictEqual(scheduled.length, before + 1, 'the dates are written regardless');
   });
 
