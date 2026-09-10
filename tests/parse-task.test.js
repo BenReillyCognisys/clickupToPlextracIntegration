@@ -1,5 +1,6 @@
 const assert = require('assert');
 const { parseTaskName } = require('../pipeline/parse-task');
+const { FREE_TYPE } = require('../config/free-markers');
 
 let passed = 0;
 let failed = 0;
@@ -242,18 +243,20 @@ test('"Internal Audit" in a deal title is not an Internal test', () => {
 });
 
 test('mixed pipe and hyphen separators — client is the first segment', () => {
+  // "Free" makes this the free offering, not a paid Black Box — see the free-marker
+  // section below and config/free-markers.js.
   eq(parseTaskName('Weflayr | Basic Internal Audit ISO 27001 - Free Black Box Pentest'),
-     { client_name: 'Weflayr', testing_type: 'Black Box' });
+     { client_name: 'Weflayr', testing_type: FREE_TYPE });
 });
 
 test('compliance framework in the middle is not the type', () => {
   eq(parseTaskName('SANDAN AI | 30-Day Fast Start | ISO 27001 | Black Box Pentest'),
-     { client_name: 'SANDAN AI', testing_type: 'Black Box' });
+     { client_name: 'SANDAN AI', testing_type: FREE_TYPE });
 });
 
 test('repeated deal title segments do not leak into the client name', () => {
   eq(parseTaskName('Gable Group | Vanta Fast Start - Vanta Fast Start - ISO 27001 | Black Box Pentest'),
-     { client_name: 'Gable Group', testing_type: 'Black Box' });
+     { client_name: 'Gable Group', testing_type: FREE_TYPE });
 });
 
 test('colourless application testing resolves to Web App', () => {
@@ -337,6 +340,76 @@ test('empty string → Unknown', () => {
 
 test('only whitespace → Unknown', () => {
   eq(parseTaskName('   '), { client_name: '', testing_type: 'Unknown' });
+});
+
+// ── Free-offering markers ────────────────────────────────────────────────────
+// The free product (a half-day black box) is sold on its own and bundled into the
+// onboarding programmes. None of that wording is part of the service phrase, so
+// config/free-markers.js re-maps the recognised type after the fact. Getting this
+// wrong bills a client for a free test — the SFE renders the paid black box form
+// off the `testType` these produce.
+console.log('\nFree-offering markers:');
+
+test('"Free" in the service maps to the free type', () => {
+  eq(parseTaskName('Acme Corp | Free Black Box Pentest'),
+     { client_name: 'Acme Corp', testing_type: FREE_TYPE });
+});
+
+test('"30-Day Fast Start" in the deal title maps to the free type', () => {
+  eq(parseTaskName('Royaltyport | 30-Day Fast Start Programme | SOC 2 | Black Box Pentest'),
+     { client_name: 'Royaltyport', testing_type: FREE_TYPE });
+});
+
+test('"30 Day" unhyphenated is the same marker', () => {
+  eq(parseTaskName('Royaltyport | 30 Day Fast Start | SOC 2 | Black Box Pentest'),
+     { client_name: 'Royaltyport', testing_type: FREE_TYPE });
+});
+
+test('"Vanta Free" maps to the free type', () => {
+  eq(parseTaskName('Cadensys LTD - Vanta Free Onboarding - Black Box Penetration Test'),
+     { client_name: 'Cadensys LTD', testing_type: FREE_TYPE });
+});
+
+test('a scope qualifier still survives the free re-map', () => {
+  eq(parseTaskName('Acme | Fast Start | Black Box Pentest - Money Guru'),
+     { client_name: 'Acme', testing_type: FREE_TYPE, scope: 'Money Guru' });
+});
+
+test('a paid black box with no marker is untouched', () => {
+  eq(parseTaskName('Acme Corp | Black Box Pentest'),
+     { client_name: 'Acme Corp', testing_type: 'Black Box' });
+});
+
+test('a marker in the CLIENT name never makes a test free', () => {
+  // The whole point of excluding the client segment: these are paying customers.
+  eq(parseTaskName('Freedom Finance Ltd | Black Box Pentest'),
+     { client_name: 'Freedom Finance Ltd', testing_type: 'Black Box' });
+  eq(parseTaskName('Fast Start Labs | External Pentest'),
+     { client_name: 'Fast Start Labs', testing_type: 'External' });
+});
+
+test('a marker does not fire on a word that merely starts with it', () => {
+  eq(parseTaskName('Acme | Freeform Migration | Black Box Pentest'),
+     { client_name: 'Acme', testing_type: 'Black Box' });
+});
+
+test('a marker with no recognised service stays Unknown — it never invents one', () => {
+  eq(parseTaskName('Acme | 30-Day Fast Start Programme | SOC 2'),
+     { client_name: 'Acme', testing_type: 'Unknown' });
+});
+
+test('a marker on a non-black-box service maps free but warns', () => {
+  const parsed = parseTaskName('Acme | Vanta Free | SOC 2 | External Pentest');
+  assert.strictEqual(parsed.client_name, 'Acme');
+  assert.strictEqual(parsed.testing_type, FREE_TYPE);
+  assert.match(parsed.warning, /check it is not a paid test/);
+});
+
+test('the free type is recognised as work, not as a client name', () => {
+  // Misordered names put the service first; the free type must be spotted there too.
+  const parsed = parseTaskName('Free Black Box Test - Brask - Black Box Pentest');
+  assert.strictEqual(parsed.client_name, 'Brask');
+  assert.strictEqual(parsed.testing_type, FREE_TYPE);
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────

@@ -1,4 +1,5 @@
 const TESTING_TYPES = require('../config/testing-types');
+const { FREE_TYPE, MARKERS: FREE_MARKERS } = require('../config/free-markers');
 
 // Every phrase we know how to recognise, flattened from config/testing-types.js.
 // The canonical name is itself a phrase (that's how "Acme | Grey Box" is matched);
@@ -27,6 +28,9 @@ const STRONG_HINTS = [
   // Multi-word canonical types, and every alias, are strong signals in their own right.
   ...CANONICAL_NAMES.filter(t => t.includes(' ')),
   ...TESTING_TYPES.flatMap(t => t.aliases || []),
+  // The free type isn't in config/testing-types.js (it's produced by a marker, not
+  // matched as a phrase), so it has to be listed here to be recognised as work.
+  FREE_TYPE, 'free black box',
 ];
 
 // Longest scope qualifier we'll carry into a report name — anything beyond this is
@@ -142,6 +146,26 @@ function clientFrom(name, typeStart) {
   return head.replace(/[\s\-|,:]+$/, '').trim();
 }
 
+// Blanks out the client name so a free marker is never harvested from it — a client
+// called "Freedom Finance" or "Fast Start Labs" must not have its paid tests written
+// off. Only the first occurrence is removed, which is the one clientFrom() (or the
+// misordered recovery) actually read the client out of.
+function withoutClient(name, clientName) {
+  const client = (clientName || '').trim();
+  if (!client) return name;
+  const at = name.toLowerCase().indexOf(client.toLowerCase());
+  if (at === -1) return name;
+  return `${name.slice(0, at)} ${name.slice(at + client.length)}`;
+}
+
+// Finds the wording that marks an engagement as the free offering (config/free-markers.js).
+// Whole-phrase and case-insensitive, exactly like the testing-type match, and searched
+// over everything BUT the client name. Returns the marker that matched, or null.
+function findFreeMarker(name, clientName) {
+  const haystack = withoutClient(name, clientName);
+  return FREE_MARKERS.find(marker => containsPhrase(haystack, marker)) || null;
+}
+
 // Whatever trails the testing type — the per-target qualifier in deal names like
 // "… - Application Penetration Testing- Money Guru". It keeps two same-type
 // engagements for one client distinguishable in Plextrac (their reports would
@@ -176,29 +200,54 @@ function scopeFrom(name, typeEnd) {
  * 'Unknown' when the name contains no recognised service. Unknown deliberately
  * aborts the create pipeline (pipeline/index.js) — a name we can't classify must
  * not be turned into a Plextrac client and report on a guess.
+ *
+ * One exception to "canonical name": free-offering wording anywhere outside the
+ * client name (config/free-markers.js — "Free", "30-Day", "Fast Start", …) re-maps
+ * the recognised service to FREE_TYPE:
+ *
+ *   "Royaltyport | 30-Day Fast Start Programme | SOC 2 | Black Box Pentest"
+ *     → { client_name: 'Royaltyport', testing_type: 'Free Black Box Test' }
+ *
+ * That one string is what the report name, the Plextrac template, the SFE auth-form
+ * payload and the stored mapping are all built from, so the engagement is free
+ * everywhere at once. A marker cannot conjure a service out of nothing: with no
+ * recognised type the name is still 'Unknown' and still aborts.
  */
 function parseTaskName(rawName) {
   const name = (rawName || '').trim();
   const match = findTestingType(name);
-  const testing_type = match ? match.type : 'Unknown';
 
   // A misordered name's trailing text is the client, not a scope qualifier, so the
   // recovered branch never carries a scope.
   const misordered = recoverMisorderedClient(name);
-  if (misordered) {
-    return {
-      client_name: misordered.client_name,
-      testing_type,
-      scope: null,
-      warning: misordered.warning,
-    };
+  const client_name = misordered ? misordered.client_name : clientFrom(name, match ? match.start : null);
+  const scope = misordered || !match ? null : scopeFrom(name, match.recognisedEnd);
+
+  let testing_type = match ? match.type : 'Unknown';
+  const warnings = misordered ? [misordered.warning] : [];
+
+  const freeMarker = findFreeMarker(name, client_name);
+  // 'Unknown' is left alone: a marker says how the work is PAID FOR, not what the
+  // work IS, so a name with no service in it is still one a human has to fix.
+  if (freeMarker && testing_type !== 'Unknown') {
+    // The free offering is a black box. Anything else carrying a free marker is
+    // either a mis-named task or a paid test sold inside a free programme, so it
+    // still maps free (that's the rule) but says so in Slack.
+    if (testing_type !== 'Black Box') {
+      warnings.push(
+        `Task name contains "${freeMarker}", so it was booked as a ${FREE_TYPE} even though `
+        + `its service reads as "${testing_type}" — check it is not a paid test.`
+      );
+    }
+    testing_type = FREE_TYPE;
   }
 
   return {
-    client_name: clientFrom(name, match ? match.start : null),
+    client_name,
     testing_type,
-    scope: match ? scopeFrom(name, match.recognisedEnd) : null,
+    scope,
+    ...(warnings.length ? { warning: warnings.join(' ') } : {}),
   };
 }
 
-module.exports = { parseTaskName, findTestingType };
+module.exports = { parseTaskName, findTestingType, findFreeMarker };
