@@ -21,7 +21,10 @@
  *                                      optional (no slot before the deadline means
  *                                      the deadline arrives on its own). A repeat
  *                                      Free Black Box submission does not move an
- *                                      existing booking.
+ *                                      existing booking. A Black Box task whose name
+ *                                      says "Fast Start" (Vanta bundle) is a Free
+ *                                      Black Box even when the portal sends a plain
+ *                                      "Black Box" test type.
  *   POST /clickup/test-files-uploaded — a client uploaded their test files to the
  *                                      portal: tick the task's completion box.
  *                                      Called on every upload, so re-ticking is a
@@ -125,24 +128,57 @@ async function prependAuthFormLink(taskId, url) {
   return 'updated';
 }
 
-// A Free Black Box lets the client (re)submit their auth form; identify it from the
-// test type so a repeat submission can be treated as a no-op for scheduling.
-function isFreeBlackBox(testType) {
-  return /free\s*black\s*box/i.test(String(testType || ''));
+// A Free Black Box lets the client (re)submit their auth form; identify it so a
+// repeat submission can be treated as a no-op for scheduling and the half-day is
+// collapsed onto one date. Two spellings reach us:
+//   • the portal labels the test type "Free Black Box ..." explicitly, or
+//   • the deal is one of the partner bundles that include the free half-day Black
+//     Box — Vanta "Fast Start" or the "Digital Trust Accelerator" ("DTA"). The
+//     HubSpot deal name (and so the ClickUp task name) only carries the bundle
+//     wording, e.g. "ClearSurgery - Vanta license & fast start - Vanta Fast Start -
+//     SMB | Black Box Pentest", while the portal sends a plain "Black Box" testType.
+// So both the portal's testType and the task name are checked. A bundle marker
+// only counts when the engagement is a Black Box — the wording alone never makes
+// some other test type a free half-day.
+const FREE_BLACK_BOX_RE = /free\s*black\s*box/i;
+const BLACK_BOX_RE      = /black\s*box/i;
+
+// Partner-bundle wording, tolerant of the separators deal names actually use
+// ("Fast-Start", "Digital Trust  Accelerator", "D.T.A"). "DTA" must stand alone as
+// a word so it isn't harvested from the inside of something like "updtaed".
+const FREE_BUNDLE_RES = [
+  /fast[\s-]*start/i,
+  /digital[\s-]*trust[\s-]*accelerator/i,
+  /\bd\.?t\.?a\b\.?/i,
+];
+
+function isFreeBlackBox(testType, taskName = '') {
+  const type = String(testType || '');
+  const name = String(taskName || '');
+  if (FREE_BLACK_BOX_RE.test(type) || FREE_BLACK_BOX_RE.test(name)) return true;
+  const bundle   = FREE_BUNDLE_RES.some((re) => re.test(type) || re.test(name));
+  const blackBox = BLACK_BOX_RE.test(type) || BLACK_BOX_RE.test(name);
+  return bundle && blackBox;
 }
 
 // ─── Pre-reqs status advance ──────────────────────────────────────────────────
 // Once the signed auth form is attached to a task, the paperwork is done and the
 // only thing outstanding is the client's pre-reqs — so the task advances to this
 // status. Must match a status defined in the pentest space exactly; list them with
-// `node scripts/list-statuses.js`.
-const PRE_REQS_STATUS = process.env.CLICKUP_STATUS_PRE_REQS || 'Waiting for Pre-reqs';
+// `node scripts/list-statuses.js`. The default is the "Penetration Test" space's
+// spelling — note it is "pre recs", not "pre-reqs"; ClickUp rejects a name that
+// doesn't exist, and the rejection is logged but never fails the request.
+const PRE_REQS_STATUS = process.env.CLICKUP_STATUS_PRE_REQS || 'waiting pre recs';
 
 // Only tasks currently sitting in one of these statuses are advanced. The finalised
 // form can arrive late, or be re-sent for a client whose other tasks are already
 // under way, and moving a task in QA (or Completed) back to pre-reqs would be worse
 // than leaving it alone. Compared case-insensitively against ClickUp's status name.
-const PRE_REQS_FROM_STATUSES = (process.env.CLICKUP_PRE_REQS_FROM_STATUSES || 'to do,open,scheduled')
+// The defaults are the pentest space's pre-engagement statuses: where a task is
+// created ("sales hold" for API-created engagements, "not started" otherwise) and
+// the intake steps before the form is signed.
+const PRE_REQS_FROM_STATUSES = (process.env.CLICKUP_PRE_REQS_FROM_STATUSES
+  || 'not started,sales hold,pending assignment,dates discussion,scheduled')
   .split(',')
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
@@ -509,28 +545,30 @@ router.post('/schedule-task', async (req, res) => {
     }
   }
 
+  // One read serves the Free Black Box classification (a Fast Start is only visible
+  // in the task NAME), the deadline's custom-field lookup, and the repeat-submission
+  // guard below. A read failure is non-fatal to all three: the deadline falls back to
+  // a comment, the free/paid call falls back to the portal's testType alone, and
+  // scheduling treats it as a first submission rather than blocking a booking on a
+  // transient hiccup.
+  let task = null;
+  try {
+    task = await getTask(clickupTaskId);
+  } catch (err) {
+    log.warn('Schedule-task could not read the task', { clickupTaskId, reason: err.message });
+  }
+  const freeBlackBox = isFreeBlackBox(testType, task?.name);
+
   // A Free Black Box is a half-day (0.5) engagement, so it must sit on ONE day in
   // ClickUp — same start and due date. Callers commonly send the following day as
   // the end date, which reads as a 2-day booking on the board and in availability,
   // so collapse the due date onto the start date rather than trusting it.
-  if (hasDates && isFreeBlackBox(testType) && dueDateMs !== startDateMs) {
+  if (hasDates && freeBlackBox && dueDateMs !== startDateMs) {
     log.info('Schedule-task collapsed a Free Black Box to a single day', {
       clickupTaskId, startDate, requested_end_date: endDate,
+      testType: testType || null, taskName: task?.name || null,
     });
     dueDateMs = startDateMs;
-  }
-
-  // One read serves both the deadline's custom-field lookup and the Free Black Box
-  // repeat-submission guard below. A read failure is non-fatal to either: the deadline
-  // falls back to a comment, and scheduling treats it as a first submission rather than
-  // blocking a booking on a transient hiccup.
-  let task = null;
-  if (deadlineMs != null || isFreeBlackBox(testType)) {
-    try {
-      task = await getTask(clickupTaskId);
-    } catch (err) {
-      log.warn('Schedule-task could not read the task', { clickupTaskId, reason: err.message });
-    }
   }
 
   // Record the deadline before anything below can return early: it must land on every
@@ -548,9 +586,9 @@ router.post('/schedule-task', async (req, res) => {
   // the schedule and later ones must not move it. If this is a Free Black Box task
   // that already has a start date, skip the date update (no dates, no assignee) — the
   // deadline above is still refreshed, since the client may have changed it.
-  if (isFreeBlackBox(testType) && task && task.start_date) {
+  if (freeBlackBox && task && task.start_date) {
     log.info('Schedule-task skipped — Free Black Box already scheduled (repeat submission)', {
-      clickupTaskId, testType,
+      clickupTaskId, testType: testType || null, taskName: task.name || null,
     });
     return res.status(200).json({
       ok: true,

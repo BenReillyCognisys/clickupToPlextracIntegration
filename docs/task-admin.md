@@ -191,7 +191,7 @@ decides which tasks these land on:**
 | Automation | Where |
 |---|---|
 | Merged auth-form link comment | `POST /clickup/merged-auth-form` |
-| Signed form attached + link prepended to the description + status advanced to `Waiting for Pre-reqs` | `POST /clickup/finalised-auth-form` |
+| Signed form attached + link prepended to the description + status advanced to `waiting pre recs` | `POST /clickup/finalised-auth-form` |
 | Extra-URLs comment and Slack alert | `POST /clickup/extra-urls` |
 | Free Black Box auto-schedule (start/due dates + assignee) | `POST /clickup/schedule-task` |
 | Client's report deadline → the task's "Report Due" date field | `POST /clickup/schedule-task` |
@@ -213,7 +213,7 @@ Timing matters for the signed form specifically:
   target's task id.
 
 The pre-reqs advance only fires from the statuses in `CLICKUP_PRE_REQS_FROM_STATUSES`
-(default `to do,open,scheduled`), so a task that has already moved on is skipped
+(default `not started,sales hold,pending assignment,dates discussion,scheduled`), so a task that has already moved on is skipped
 rather than dragged backwards.
 
 ### Black box scheduling

@@ -491,6 +491,114 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(scheduled.length, before + 1, 'transient read failure does not block scheduling');
   });
 
+  // A Vanta "Fast Start" deal bundles the free half-day Black Box, but only the task
+  // NAME says so — the portal sends a plain "Black Box" test type.
+  const FAST_START_NAME = 'ClearSurgery - Vanta license & fast start - Vanta Fast Start - SMB | Black Box Pentest';
+
+  await test('Fast Start: a Black Box task named "Fast Start" is a Free Black Box (collapsed to one day)', async () => {
+    taskState = { FS1: { name: FAST_START_NAME } };
+    const before = scheduled.length;
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: { clickupTaskId: 'FS1', startDate: '2026-09-07', endDate: '2026-09-08', testType: 'Black Box' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(scheduled.length, before + 1);
+    assert.strictEqual(scheduled.at(-1).dueDateMs, scheduled.at(-1).startDateMs, 'Fast Start collapsed onto a single day');
+  });
+
+  await test('Fast Start: a repeat submission does NOT move an existing booking', async () => {
+    taskState = { FS2: { name: FAST_START_NAME, start_date: '1757203200000', due_date: '1757203200000' } };
+    const before = scheduled.length;
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: { clickupTaskId: 'FS2', startDate: '2027-01-01', endDate: '2027-01-02', testType: 'Black Box' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.skipped, true);
+    assert.strictEqual(r.json.start_date, 1757203200000);
+    assert.strictEqual(scheduled.length, before, 'no schedule write happened');
+  });
+
+  await test('Fast Start: the wording alone does not make a non-Black-Box test free', async () => {
+    taskState = { FS3: { name: 'ClearSurgery - Vanta Fast Start - SMB | External Pentest' } };
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: { clickupTaskId: 'FS3', startDate: '2026-09-07', endDate: '2026-09-08', testType: 'External' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.notStrictEqual(scheduled.at(-1).dueDateMs, scheduled.at(-1).startDateMs, 'multi-day range kept');
+  });
+
+  // The Digital Trust Accelerator bundle — spelled out or abbreviated — is also free.
+  // Each variant should collapse the Black Box onto one day.
+  const DTA_FREE_NAMES = [
+    'Acme - Digital Trust Accelerator | Black Box Pentest',
+    'Acme - digital-trust-accelerator bundle | Black Box Pentest',
+    'Acme - DTA | Black Box Pentest',
+    'Acme - dta package - SMB | Black Box Pentest',
+    'Acme - D.T.A. | Black Box Pentest',
+  ];
+  for (const [i, name] of DTA_FREE_NAMES.entries()) {
+    await test(`DTA: "${name}" is a Free Black Box`, async () => {
+      const id = `DTA${i}`;
+      taskState = { [id]: { name } };
+      const r = await request('/clickup/schedule-task', {
+        headers: KEY,
+        body: { clickupTaskId: id, startDate: '2026-09-07', endDate: '2026-09-08', testType: 'Black Box' },
+      });
+      assert.strictEqual(r.status, 200);
+      assert.strictEqual(scheduled.at(-1).taskId, id);
+      assert.strictEqual(scheduled.at(-1).dueDateMs, scheduled.at(-1).startDateMs, 'collapsed onto a single day');
+    });
+  }
+
+  await test('DTA: the abbreviation in the portal test type also counts', async () => {
+    taskState = { DTAT: { name: 'Acme - Something | Black Box Pentest' } };
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: { clickupTaskId: 'DTAT', startDate: '2026-09-07', endDate: '2026-09-08', testType: 'DTA Black Box' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(scheduled.at(-1).dueDateMs, scheduled.at(-1).startDateMs);
+  });
+
+  await test('DTA: "dta" inside another word is not a match', async () => {
+    taskState = { DTAX: { name: 'Acme - Updtaed scope | Black Box Pentest', start_date: '1757203200000' } };
+    const before = scheduled.length;
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: { clickupTaskId: 'DTAX', startDate: '2027-01-01', endDate: '2027-01-02', testType: 'Black Box' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.skipped, undefined, 'treated as paid — not frozen');
+    assert.strictEqual(scheduled.length, before + 1);
+    assert.notStrictEqual(scheduled.at(-1).dueDateMs, scheduled.at(-1).startDateMs, 'not collapsed');
+  });
+
+  await test('DTA: the wording alone does not make a non-Black-Box test free', async () => {
+    taskState = { DTAE: { name: 'Acme - Digital Trust Accelerator | External Pentest' } };
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: { clickupTaskId: 'DTAE', startDate: '2026-09-07', endDate: '2026-09-08', testType: 'External' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.notStrictEqual(scheduled.at(-1).dueDateMs, scheduled.at(-1).startDateMs, 'multi-day range kept');
+  });
+
+  await test('a plain Black Box task (no Fast Start, no Free) stays paid', async () => {
+    taskState = { PB2: { name: 'Acme - Web App Deal | Black Box Pentest', start_date: '1757203200000' } };
+    const before = scheduled.length;
+    const r = await request('/clickup/schedule-task', {
+      headers: KEY,
+      body: { clickupTaskId: 'PB2', startDate: '2027-01-01', endDate: '2027-01-02', testType: 'Black Box' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.skipped, undefined);
+    assert.strictEqual(scheduled.length, before + 1, 'paid Black Box is re-scheduled and not collapsed');
+    assert.notStrictEqual(scheduled.at(-1).dueDateMs, scheduled.at(-1).startDateMs);
+  });
+
   // ── schedule-task: the client's report deadline ───────────────────────────────
   console.log('\nPOST /clickup/schedule-task (report deadline):');
 
@@ -633,7 +741,7 @@ const KEY = { 'X-API-Key': 'test-key' };
   console.log('\nPOST /clickup/finalised-auth-form (pre-reqs status):');
 
   await test('advances a task in an early status to the pre-reqs status', async () => {
-    taskState = { PR1: { status: { status: 'to do', type: 'open' } } };
+    taskState = { PR1: { status: { status: 'not started', type: 'open' } } };
     const before = statusWrites.length;
     const r = await request('/clickup/finalised-auth-form', {
       headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskId: 'PR1' },
@@ -641,11 +749,11 @@ const KEY = { 'X-API-Key': 'test-key' };
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.json.results[0].status, 'set');
     assert.strictEqual(statusWrites.length, before + 1);
-    assert.deepStrictEqual(statusWrites.at(-1), { taskId: 'PR1', status: 'Waiting for Pre-reqs' });
+    assert.deepStrictEqual(statusWrites.at(-1), { taskId: 'PR1', status: 'waiting pre recs' });
   });
 
   await test('matches the early status case-insensitively', async () => {
-    taskState = { PR2: { status: { status: 'To Do', type: 'open' } } };
+    taskState = { PR2: { status: { status: 'Pending Assignment', type: 'custom' } } };
     const r = await request('/clickup/finalised-auth-form', {
       headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskId: 'PR2' },
     });
@@ -665,7 +773,7 @@ const KEY = { 'X-API-Key': 'test-key' };
   });
 
   await test('a task already in the pre-reqs status is not re-written', async () => {
-    taskState = { PR4: { status: { status: 'Waiting for Pre-reqs', type: 'custom' } } };
+    taskState = { PR4: { status: { status: 'waiting pre recs', type: 'custom' } } };
     const before = statusWrites.length;
     const r = await request('/clickup/finalised-auth-form', {
       headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskId: 'PR4' },
@@ -675,7 +783,7 @@ const KEY = { 'X-API-Key': 'test-key' };
   });
 
   await test('a failed status write is non-fatal — the form stays attached', async () => {
-    taskState = { STATUSFAIL: { status: { status: 'to do', type: 'open' } } };
+    taskState = { STATUSFAIL: { status: { status: 'sales hold', type: 'custom' } } };
     const r = await request('/clickup/finalised-auth-form', {
       headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskId: 'STATUSFAIL' },
     });
@@ -688,8 +796,8 @@ const KEY = { 'X-API-Key': 'test-key' };
 
   await test('a merged form advances each task independently', async () => {
     taskState = {
-      PR5: { status: { status: 'to do', type: 'open' } },
-      PR6: { status: { status: 'Completed', type: 'done' } },
+      PR5: { status: { status: 'dates discussion', type: 'custom' } },
+      PR6: { status: { status: 'complete', type: 'done' } },
     };
     const r = await request('/clickup/finalised-auth-form', {
       headers: KEY, body: { clientName: 'Acme', driveUrl: DRIVE_OK, clickupTaskIds: ['PR5', 'PR6'] },

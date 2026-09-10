@@ -88,7 +88,8 @@ POST /clickup/finalised-auth-form
 { clientName, driveUrl, clickupTaskId | clickupTaskIds: [] }
   → downloads the signed PDF from Drive, attaches it to each task's "Authorisation
     Forms" field, prepends the link to the description, and advances the task to
-    "Waiting for Pre-reqs" (only from statuses: to do / open / scheduled)
+    "waiting pre recs" (only from the pre-engagement statuses: not started / sales
+    hold / pending assignment / dates discussion / scheduled)
 
 POST /clickup/extra-urls
 { clientName, formToken, formUrl, clickupTaskId, urls: [], urlCount }
@@ -235,7 +236,7 @@ you make today:
 - **Signed form already exists** (`signed: true`) → `POST /clickup/finalised-auth-form`
   with `{ clientName, driveUrl, clickupTaskId: <target> }`. break.services attaches the
   PDF to the target's "Authorisation Forms" field, prepends the link to its description
-  and advances it to "Waiting for Pre-reqs". Safe for a task that has never had one.
+  and advances it to "waiting pre recs". Safe for a task that has never had one.
 - **Merged form membership changed** → `POST /clickup/merged-auth-form` with the
   corrected `clickupTaskIds` (target in, source out).
 - **A Free Black Box schedule was already resolved for the source** →
@@ -262,7 +263,7 @@ Test these four scenarios; they are the real ones.
    authorises an external test, and the black-box element is gone.
 3. **Already-signed form.** Remap → `transferred: true, signed: true`, plus a
    `finalisedDriveUrl`. `POST /clickup/finalised-auth-form` fires for the target, so the
-   signed PDF lands on the target task and it advances to "Waiting for Pre-reqs". The
+   signed PDF lands on the target task and it advances to "waiting pre recs". The
    source task receives no further callbacks.
 4. **Target already has its own form.** Remap → 409 naming the conflicting form. Neither
    form is modified.
