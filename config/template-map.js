@@ -2,6 +2,10 @@
 // Keywords are matched case-insensitively against the full testing type string.
 // First match wins, so put more specific entries before broader ones.
 module.exports = [
+  // The Free Black Box Test is the same work as a paid black box, half a day of it,
+  // so it reports on the same template. Listed explicitly (it would fall through to
+  // the 'black' entry anyway) so a future reordering can't silently re-route it.
+  { keywords: ['free black box'], template: 'Cognisys Web Application Black Box' },
   { keywords: ['grey'],         template: 'Cognisys Web Application Grey Box' },
   // API work (AI/LLM APIs included) is reported on the grey box web app template.
   { keywords: ['api'],          template: 'Cognisys Web Application Grey Box' },

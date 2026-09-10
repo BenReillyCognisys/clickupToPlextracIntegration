@@ -1,12 +1,14 @@
 // Released-report export: when a Plextrac report is published, render it to PDF and
-// file that PDF in Google Drive, then link it in the release announcement's thread.
+// file that PDF in Google Drive.
 //
 // Runs from pipeline/qa-released.js (which the Plextrac webhook calls on the released
 // status), so releasing a report is the only trigger — there is no separate schedule.
 //
 // Best-effort by design: every failure is logged, reported in the Slack thread, and
 // swallowed. A report is released whether or not we managed to file a copy, and the
-// PDF can always be re-exported by flipping the status again.
+// PDF can always be re-exported by flipping the status again. A SUCCESSFUL export is
+// silent in Slack — only the log records it — so the release thread carries nothing
+// but the announcement and any problem that needs a human.
 //
 // Configuration (see .env.example → "Released-report export"):
 //   GOOGLE_DRIVE_REPORTS_FOLDER_ID            destination folder — REQUIRED, else skipped
@@ -151,7 +153,7 @@ function looksLikePdf(buffer) {
  * @param {string} args.clientName   canonical client name (used for the filename/subfolder)
  * @param {string} args.reportName
  * @param {string} [args.channel]    Slack channel of the release announcement
- * @param {string} [args.threadTs]   its thread anchor — the Drive link is replied there
+ * @param {string} [args.threadTs]   its thread anchor — failures are replied there
  * @returns {Promise<object|null>} the upload result, or null when skipped/failed
  */
 async function exportReleasedReport({ clientId, reportId, clientName, reportName, channel, threadTs }) {
@@ -200,7 +202,6 @@ async function exportReleasedReport({ clientId, reportId, clientName, reportName
       bytes: buffer.length,
     });
 
-    await postToThread(channel, threadTs, buildExportMessage(result));
     return result;
   } catch (err) {
     log.error('Failed to export released report to Drive', {
@@ -215,14 +216,9 @@ async function exportReleasedReport({ clientId, reportId, clientName, reportName
   }
 }
 
-// The Slack line announcing the filed copy. Pure, so it can be unit-tested.
-function buildExportMessage({ name, url, replaced }) {
-  const verb = replaced ? 'updated in' : 'saved to';
-  return `:page_facing_up: Report ${verb} Drive: <${url}|${name}>`;
-}
-
 // Replies in the announcement's thread, or posts standalone if the announcement
-// didn't make it. Never throws — the export itself is the point, not the notice.
+// didn't make it. Only failures come through here. Never throws — the export itself is
+// the point, not the notice.
 async function postToThread(channel, threadTs, text) {
   if (!channel) return;
   try {
@@ -240,5 +236,4 @@ module.exports = {
   reportFilename,
   safeFilename,
   looksLikePdf,
-  buildExportMessage,
 };

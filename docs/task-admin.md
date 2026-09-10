@@ -216,6 +216,47 @@ The pre-reqs advance only fires from the statuses in `CLICKUP_PRE_REQS_FROM_STAT
 (default `not started,sales hold,pending assignment,dates discussion,scheduled`), so a task that has already moved on is skipped
 rather than dragged backwards.
 
+### Free vs paid black box
+
+A task is a **free** black box when its name carries free-offering wording anywhere
+outside the client name — the markers in `config/free-markers.js`:
+
+| Marker | Matches |
+|---|---|
+| `free` | "Free Black Box Pentest", "Vanta Free Onboarding" |
+| `30-day`, `30 day` | "30-Day Fast Start Programme" |
+| `fast start`, `fast-start` | "Vanta Fast Start", "Fast Start Programme" |
+| `no charge`, `complimentary` | one-offs written up by hand |
+
+Markers are matched case-insensitively on whole-word boundaries, so `Freeform` is not
+`free`. When one hits, `parseTaskName` re-maps the recognised service to the single
+canonical type **`Free Black Box Test`**, and because everything downstream is built
+from that one string the engagement is free in every system at once:
+
+| Derived from `testing_type` | Free result |
+|---|---|
+| SFE auth-form payload (`testType`) | `Free Black Box Test` → the free form, not the paid one |
+| Plextrac report name | `Free Black Box Test \| September 2026` |
+| Plextrac template | `Cognisys Web Application Black Box` (same as paid) |
+| Stored mapping (`testing_type`) | `Free Black Box Test` |
+
+Three rules worth knowing:
+
+- **The client name is excluded from the search.** Otherwise "Freedom Finance Ltd" and
+  "Fast Start Labs" would get their paid tests written off.
+- **A marker cannot invent a service.** "Acme | Vanta Fast Start | SOC 2" has no
+  recognised testing type, so it is still `Unknown` and still aborts the create
+  pipeline with a Slack notice. A marker says how the work is paid for, not what it is.
+- **A marker on a non-black-box service still maps free, but warns.** "… | Vanta Free |
+  External Pentest" becomes a `Free Black Box Test` and posts a Slack warning, because
+  that combination is either a mis-named task or a paid test sold inside a free
+  programme, and a human should look.
+
+To support a new free programme, add its wording to `config/free-markers.js` — nothing
+else changes. `FREE_TYPE` in the same file is the string the SFE receives; it has to
+stay the SFE's own name for the product (it is the same value the portal sends us on
+`POST /clickup/schedule-task`).
+
 ### Black box scheduling
 
 Only the **Free** Black Box is scheduled automatically, and it isn't part of the
@@ -236,11 +277,10 @@ booking.) Every other test type keeps the range it was given.
 Some auth forms ask the client when they need the report by. That date arrives on the
 same `POST /clickup/schedule-task` call as `reportDeadline`, and goes onto the task's
 **Report Due** date custom field (override the field name with
-`CLICKUP_REPORT_DUE_FIELD_NAME`). If the task doesn't carry that field the deadline is
-commented instead, and the client's free-text scheduling `note` is always commented —
-a date field has nowhere to put it. The comment is tagged `[report-deadline]` and
-updated in place, so resubmitting a form moves the deadline rather than stacking a
-second comment.
+`CLICKUP_REPORT_DUE_FIELD_NAME`) — and nowhere else. Nothing is commented onto the
+task: not the deadline, and not the client's free-text scheduling `note`, which is
+written to the log and left off the task. A task whose list doesn't carry the Report
+Due field has nowhere to record the deadline, and the call reports `field: "absent"`.
 
 The deadline is recorded on **every** call, independently of the booking:
 
@@ -252,8 +292,9 @@ The deadline is recorded on **every** call, independently of the booking:
   deadline is refreshed, because the client may have changed it.
 
 Deadline and dates never fail each other: a rejected deadline write is logged and the
-dates are still written. A deadline-only call that lands nowhere returns 502, so the
-portal audits it as failed rather than recording a deadline that never arrived.
+dates are still written. A deadline-only call whose deadline never reached the field
+returns 502, so the portal audits it as failed rather than recording a deadline that
+never arrived.
 
 ### Test files
 

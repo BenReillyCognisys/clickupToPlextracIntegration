@@ -29,7 +29,6 @@ slack.postMessage = async (channel, text) => { replies.push({ channel, threadTs:
 
 const {
   exportReleasedReport, monthLabel, monthFolder, reportFilename, safeFilename, looksLikePdf,
-  buildExportMessage,
 } = require('../pipeline/report-export');
 
 let passed = 0, failed = 0;
@@ -168,18 +167,9 @@ const RELEASE = {
     eq(looksLikePdf(null), false);
   });
 
-  console.log('\nbuildExportMessage:');
-
-  await test('new file vs replaced file', () => {
-    eq(buildExportMessage({ name: 'a.pdf', url: 'https://d/1', replaced: false }),
-      ':page_facing_up: Report saved to Drive: <https://d/1|a.pdf>');
-    eq(buildExportMessage({ name: 'a.pdf', url: 'https://d/1', replaced: true }),
-      ':page_facing_up: Report updated in Drive: <https://d/1|a.pdf>');
-  });
-
   console.log('\nexportReleasedReport:');
 
-  await test('exports the PDF, files it under the month folder, and links it in the thread', async () => {
+  await test('exports the PDF and files it under the month folder, saying nothing in Slack', async () => {
     reset();
     const result = await exportReleasedReport(RELEASE);
     eq(exportCalls, [[12, 34, 'pdf']]);
@@ -193,11 +183,8 @@ const RELEASE = {
     eq(uploads[0].mimeType, 'application/pdf');
     eq(uploads[0].buffer, PDF);
     eq(result.fileId, 'FILE1');
-    eq(replies.length, 1);
-    eq(replies[0].channel, 'C0REL');
-    eq(replies[0].threadTs, 'ts-9');
-    eq(replies[0].text.includes(':page_facing_up: Report saved to Drive:'), true);
-    eq(replies[0].text.includes('Acme Corp - Web App Pentest.pdf'), true);
+    // A successful export is silent: the release thread only hears about problems.
+    eq(replies, []);
   });
 
   await test('a JSON body instead of a PDF is not filed, and is flagged in the thread', async () => {
