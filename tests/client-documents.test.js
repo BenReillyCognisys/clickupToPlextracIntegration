@@ -15,14 +15,16 @@ const reportExport = require('../pipeline/report-export');
 const fx = require('./fixtures/client-report');
 const data = require('../pipeline/client-documents/data');
 const clientDocuments = require('../pipeline/client-documents');
+// Kept before any test stubs it, for the tests that run the real thing.
+const realGenerate = clientDocuments.generateClientDocuments;
 const { runReleaseExports } = require('../pipeline/release-exports');
 
 const PDF = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(32, 0x20)]);
 const EXPORTED_AT = new Date('2026-09-26T13:30:05Z');
 
 const DOCS = [
-  { key: 'exec-summary', name: 'Executive Summary Report', template: 'exec.j2' },
-  { key: 'letter-of-attestation', name: 'Letter of Attestation', template: 'loa.j2' },
+  { key: 'exec-summary', name: 'Executive Summary Report', template: 'exec.j2', enabledBy: 'TEST_EXEC_ENABLED' },
+  { key: 'letter-of-attestation', name: 'Letter of Attestation', template: 'loa.j2', enabledBy: 'TEST_LOA_ENABLED' },
 ];
 
 let calls;
@@ -149,6 +151,71 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     eq(out[0].ok, true);
     eq(out[1].ok, false);
     eq(out[1].error, 'Rendering failed: UndefinedError: boom');
+  });
+
+  // Runs fn with .env switches set, restoring them afterwards.
+  const withEnv = async (vars, fn) => {
+    const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, vars);
+    try { return await fn(); } finally {
+      for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
+  };
+
+  await test('both documents are made when their switches are unset (on by default)', async () => {
+    reset();
+    const out = await clientDocuments.generateClientDocuments(job);
+    eq(out.map((d) => d.doc.key), ['exec-summary', 'letter-of-attestation']);
+  });
+
+  await test('switching off the executive summary leaves only the letter', async () => {
+    reset();
+    const out = await withEnv({ TEST_EXEC_ENABLED: 'false' }, () => clientDocuments.generateClientDocuments(job));
+    eq(out.map((d) => d.doc.key), ['letter-of-attestation']);
+    eq(calls.render[0].map((j) => j.template), ['loa.j2']);
+  });
+
+  await test('switching off the letter leaves only the executive summary', async () => {
+    reset();
+    const out = await withEnv({ TEST_LOA_ENABLED: 'false' }, () => clientDocuments.generateClientDocuments(job));
+    eq(out.map((d) => d.doc.key), ['exec-summary']);
+  });
+
+  await test('both off: nothing made, and Plextrac is not even asked for the data', async () => {
+    reset();
+    const out = await withEnv({ TEST_EXEC_ENABLED: 'false', TEST_LOA_ENABLED: 'false' },
+      () => clientDocuments.generateClientDocuments(job));
+    eq(out, []);
+    eq(calls.getReport.length, 0);
+    eq(calls.render.length, 0);
+  });
+
+  await test('false / 0 / off / no (any case) switch off; anything else — or unset — leaves on', () => {
+    for (const v of ['false', 'FALSE', '0', 'off', 'Off', 'no', ' false ']) {
+      process.env.TEST_EXEC_ENABLED = v;
+      eq([v, clientDocuments.isEnabled(DOCS[0])], [v, false]);
+    }
+    for (const v of ['true', '1', 'on', 'yes', '']) {
+      process.env.TEST_EXEC_ENABLED = v;
+      eq([v, clientDocuments.isEnabled(DOCS[0])], [v, true]);
+    }
+    delete process.env.TEST_EXEC_ENABLED;
+    eq(clientDocuments.isEnabled(DOCS[0]), true);
+  });
+
+  await test('previews ignore the switches', async () => {
+    reset();
+    const out = await withEnv({ TEST_EXEC_ENABLED: 'off', TEST_LOA_ENABLED: 'off' },
+      () => clientDocuments.generateClientDocuments({ ...job, respectSwitches: false }));
+    eq(out.map((d) => d.doc.key), ['exec-summary', 'letter-of-attestation']);
+  });
+
+  await test('the real config gives each document its own switch', () => {
+    const real = require('../config/client-documents');
+    eq(real.map((d) => [d.key, d.enabledBy]), [
+      ['exec-summary', 'CLIENT_DOCS_EXEC_SUMMARY_ENABLED'],
+      ['letter-of-attestation', 'CLIENT_DOCS_LETTER_OF_ATTESTATION_ENABLED'],
+    ]);
   });
 
   await test('a document without its template is skipped, not failed', async () => {
@@ -349,6 +416,19 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     ]);
     const [level, message, data] = lines[lines.length - 1];
     eq([level, message, data.problems, data.plextrac_artifacts], ['warn', 'Release export FINISHED WITH PROBLEMS', 2, 0]);
+  });
+
+  await test('a switched-off document shows in the release trail as skipped, and the run is not a problem', async () => {
+    reset();
+    clientDocuments.generateClientDocuments = realGenerate;
+    // The real config, with only the letter switched off; the exec summary still runs
+    // through the stubbed Plextrac / renderer / Drive.
+    const lines = await withEnv({ CLIENT_DOCS_LETTER_OF_ATTESTATION_ENABLED: 'no' },
+      () => captureLog(() => runReleaseExports(release)));
+    const skipped = lines.find(([, m]) => m === 'Release export: Letter of Attestation skipped — switched off');
+    eq(skipped && skipped[2], { report_id: 34, switch: 'CLIENT_DOCS_LETTER_OF_ATTESTATION_ENABLED=no' });
+    eq(lines.some(([, m]) => m === 'Release export: Executive Summary Report uploaded to Plextrac'), true);
+    eq(lines[lines.length - 1][1], 'Release export FINISHED');
   });
 
   await test('Plextrac data failing is reported, never thrown into the webhook', async () => {

@@ -29,15 +29,34 @@ const ARTIFACTS_ENABLED = process.env.CLIENT_DOCS_PLEXTRAC_ARTIFACTS !== 'false'
 const PDF_MIME = 'application/pdf';
 const TZ = process.env.GOOGLE_DRIVE_REPORTS_TZ || 'Europe/London';
 
-// The documents whose template is present. An entry can sit in the config before its
-// template is written; it is skipped, with a warning, until the file appears.
-function activeDocuments(documents = DOCUMENTS) {
+const OFF_VALUES = new Set(['false', '0', 'off', 'no']);
+
+// Is this document switched on in .env (its `enabledBy` variable)? On unless the
+// variable says false / 0 / off / no — so an unset variable leaves it on. Read on
+// every release: .env changes take effect when PM2 restarts the app.
+function isEnabled(doc) {
+  const value = doc.enabledBy ? process.env[doc.enabledBy] : undefined;
+  return !(value && OFF_VALUES.has(value.trim().toLowerCase()));
+}
+
+// The documents to make: switched on, and with their template present. An entry can
+// sit in the config before its template is written; it is skipped, with a warning,
+// until the file appears. `respectSwitches: false` (previews) ignores the switches.
+function activeDocuments(documents = DOCUMENTS, { reportId, respectSwitches = true } = {}) {
   return documents.filter((doc) => {
-    if (renderer.templateExists(doc.template)) return true;
-    log.warn('Client document skipped — template not found', {
-      document: doc.key, template: `jinja2-export-templates/${doc.template}`,
-    });
-    return false;
+    if (respectSwitches && !isEnabled(doc)) {
+      log.info(`Release export: ${doc.name} skipped — switched off`, {
+        report_id: reportId, switch: `${doc.enabledBy}=${process.env[doc.enabledBy]}`,
+      });
+      return false;
+    }
+    if (!renderer.templateExists(doc.template)) {
+      log.warn(`Release export: ${doc.name} skipped — template not found`, {
+        report_id: reportId, template: `jinja2-export-templates/${doc.template}`,
+      });
+      return false;
+    }
+    return true;
   });
 }
 
@@ -68,12 +87,16 @@ async function loadReportData({ clientId, reportId }) {
  * @param {Date}   args.exportedAt          the release's export time (issue date, filename)
  * @param {Array}  [args.documents]         defaults to config/client-documents.js
  * @param {'pdf'|'html'} [args.output='pdf']
+ * @param {boolean} [args.respectSwitches=true]  false = make switched-off documents too (previews)
  * @returns {Promise<Array<{doc, ok: boolean, buffer?: Buffer, filename?: string,
  *   warnings?: string[], error?: string}>>} one entry per active document, in config
- *   order. Rejects only if the Plextrac data can't be loaded.
+ *   order. Rejects only if the Plextrac data can't be loaded. With every document
+ *   switched off, returns [] without contacting Plextrac.
  */
-async function generateClientDocuments({ clientId, reportId, exportedAt, documents, output = 'pdf' }) {
-  const docs = activeDocuments(documents);
+async function generateClientDocuments({
+  clientId, reportId, exportedAt, documents, output = 'pdf', respectSwitches = true,
+}) {
+  const docs = activeDocuments(documents, { reportId, respectSwitches });
   if (!docs.length) return [];
 
   const context = data.templateContext({ ...(await loadReportData({ clientId, reportId })), exportedAt });
@@ -148,6 +171,7 @@ async function publishClientDocument({ document, folderId, clientId, reportId })
 }
 
 module.exports = {
+  isEnabled,
   activeDocuments,
   loadReportData,
   generateClientDocuments,

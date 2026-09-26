@@ -22,6 +22,28 @@ these steps:
 Success is silent in Slack. Anything that fails is listed in the release
 announcement's thread, saying what needs doing by hand.
 
+## Switching a document on or off
+
+Each document has its own switch in `.env`:
+
+```
+CLIENT_DOCS_EXEC_SUMMARY_ENABLED=true
+CLIENT_DOCS_LETTER_OF_ATTESTATION_ENABLED=true
+```
+
+- **Default:** both are on when unset.
+- **Turning one off:** `false`, `0`, `off` or `no` (any case) turns a document off. It isn't made at all on release: not rendered, not uploaded to Drive, not uploaded to Plextrac. The full report is still filed as normal. With both off, the release doesn't even fetch the extra Plextrac data.
+- **Applying a change:** restart the app (`pm2 restart <app>`) after changing a switch.
+- **What the log shows:** the startup log states which documents are on:
+  ```
+  [INFO] Client documents on release | exec-summary="on (CLIENT_DOCS_EXEC_SUMMARY_ENABLED)" | letter-of-attestation="OFF (CLIENT_DOCS_LETTER_OF_ATTESTATION_ENABLED)"
+  ```
+  Each release that skips a document says so in its trail:
+  ```
+  [INFO] Release export: Letter of Attestation skipped — switched off | report_id=277397777 | switch="CLIENT_DOCS_LETTER_OF_ATTESTATION_ENABLED=false"
+  ```
+- **Previews:** `scripts/preview-client-documents.js` ignores the switches, so a document can be checked before it's switched on.
+
 ## What each document contains
 
 **Executive Summary Report** (`cognisys-exec-summary.j2`) contains:
@@ -166,6 +188,19 @@ sudo apt install python3-venv libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subse
 npm install
 npm run setup:renderer        # creates renderer/.venv with the pinned Jinja2 + WeasyPrint
 ```
+
+At startup the service checks the renderer and logs one of these lines:
+
+```
+[INFO] PDF renderer ready | python="/var/app/api/renderer/.venv/bin/python" | jinja2="3.1.6" | weasyprint="70.0"
+[ERROR] PDF renderer NOT ready — client documents will fail on release until fixed | python="/usr/bin/python3" | reason="WeasyPrint is not installed for /usr/bin/python3 (No module named 'weasyprint') - run `npm run setup:renderer` on this server ..."
+```
+
+If the logged `python` isn't `renderer/.venv/bin/python`, the venv doesn't exist. A
+half-finished one gives the same error inside the venv. In either case, run `rm -rf
+renderer/.venv && npm run setup:renderer`. The interpreter is looked up on every
+render, so a fixed venv is used by the next release without a restart. Restart
+anyway to get a fresh `PDF renderer ready` line.
 
 Check the Plextrac service account can upload artifacts. Like the report export, this
 may need a permission granted to its role:

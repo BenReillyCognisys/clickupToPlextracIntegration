@@ -111,6 +111,19 @@ const hostRows = (html) => [...html.matchAll(/<tr class="list[^"]*">([\s\S]*?)<\
     assert.ok(/TemplateNotFound/.test(out.get('bad').error));
   }, { skip: noJinja });
 
+  await test('the startup check says whether PDFs can be made — and if not, why and how to fix it', async () => {
+    const c = await renderer.checkRenderer();
+    assert.strictEqual(typeof c.ok, 'boolean');
+    assert.ok(c.python, 'names the interpreter');
+    if (c.ok) {
+      assert.ok(c.jinja2 && c.weasyprint, JSON.stringify(c));
+    } else {
+      // A broken install is a readable one-liner (never "unreadable output"), naming the fix.
+      assert.ok(/setup:renderer|apt install/.test(c.error), c.error);
+    }
+    assert.strictEqual(c.ok, hasWeasy, `check says ok=${c.ok} but WeasyPrint importable=${hasWeasy}: ${c.error}`);
+  }, { skip: noJinja });
+
   console.log('\nrenderer — the real letter of attestation template:');
 
   await test('(CLIENT NAME) is the Plextrac client, in all four places', async () => {

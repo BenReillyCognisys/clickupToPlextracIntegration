@@ -8,6 +8,9 @@ const { runReportsDueCheck } = require('./pipeline/reports-due');
 const { runStartDateWatch } = require('./pipeline/start-date-watch');
 const { seedQaQueue } = require('./pipeline/qa-queue-seed');
 const { startAvailabilityCache, requireApiKey } = require('./lib/availability-cache');
+const { checkRenderer } = require('./lib/pdf-renderer');
+const { isEnabled: isDocumentEnabled } = require('./pipeline/client-documents');
+const CLIENT_DOCUMENTS = require('./config/client-documents');
 const log = require('./lib/logger');
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -227,4 +230,20 @@ app.listen(PORT, async () => {
   }
   // Warm + schedule the availability cache that backs /schedule/pentest.
   startAvailabilityCache();
+
+  // Which client documents a release will make (their .env switches)...
+  log.info('Client documents on release', Object.fromEntries(
+    CLIENT_DOCUMENTS.map((doc) => [doc.key, `${isDocumentEnabled(doc) ? 'on' : 'OFF'} (${doc.enabledBy})`]),
+  ));
+
+  // ...and can they be rendered to PDF here? Said once, at startup, so a missing
+  // `npm run setup:renderer` shows in the console before a release hits it.
+  const renderer = await checkRenderer();
+  if (renderer.ok) {
+    log.info('PDF renderer ready', { python: renderer.python, jinja2: renderer.jinja2, weasyprint: renderer.weasyprint });
+  } else {
+    log.error('PDF renderer NOT ready — client documents will fail on release until fixed', {
+      python: renderer.python, reason: renderer.error,
+    });
+  }
 });

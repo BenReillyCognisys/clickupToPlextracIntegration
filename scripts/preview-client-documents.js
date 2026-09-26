@@ -3,7 +3,8 @@
 // Builds the client documents (executive summary, letter of attestation) for a real
 // report exactly as a release would — same Plextrac data, same templates — and writes
 // them to disk. Nothing is uploaded: not to Drive, not to Plextrac. This is the loop
-// for working on a template.
+// for working on a template. The .env on/off switches are ignored here, so a document
+// can be checked before it is switched on.
 //
 // Options:
 //   --doc <key>     only this document (exec-summary, letter-of-attestation)
@@ -43,6 +44,7 @@ function parseArgs(argv) {
 
   const results = await clientDocuments.generateClientDocuments({
     clientId, reportId, exportedAt: new Date(), documents, output: args.html ? 'html' : 'pdf',
+    respectSwitches: false,
   });
 
   if (!results.length) {
