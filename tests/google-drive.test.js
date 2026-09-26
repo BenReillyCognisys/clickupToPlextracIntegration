@@ -271,6 +271,14 @@ function fakeDrive(tree, unreadable = []) {
     assert.strictEqual(drive.lists.every((p) => p.orderBy === 'createdTime'), true);
   });
 
+  await test('different clients under the same month folder resolve in parallel', async () => {
+    const drive = slowDrive();
+    const started = Date.now();
+    await Promise.all(['Acme', 'Beta', 'Gamma', 'Delta'].map((n) => ensureFolder(drive, 'MONTH', n)));
+    assert.ok(Date.now() - started < 60, `took ${Date.now() - started}ms`);
+    assert.strictEqual(drive.folders.length, 4);
+  });
+
   await test('folders under different parents still resolve in parallel', async () => {
     const drive = slowDrive();
     const started = Date.now();

@@ -153,6 +153,37 @@ function reportFilename({ date = new Date(), tz = REPORTS_TZ, format = EXPORT_FO
   return documentFilename('Plextrac Full Report', { date, tz, format });
 }
 
+// Timestamps claimed per Drive folder: "<folderId>|<timestamp>".
+//
+// The filename carries the time to the second, and a client's folder holds every
+// report for that client. Two of the client's reports released in the same second
+// would otherwise get IDENTICAL filenames in the same folder — and then no one could
+// tell which "Plextrac Full Report 2026-09-26 14-30-05.pdf" belongs to which report,
+// or which executive summary goes with which full report.
+//
+// Held for two hours: longer than any release takes, and long enough to cover the
+// clocks going back an hour in October, when the same wall-clock second happens twice.
+const claimedStamps = new Set();
+const CLAIM_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Claims a filename timestamp in `folderId` for one release and returns it as a Date:
+ * `date` itself, or the next second no other release has claimed in that folder.
+ * Every document of the release is named with the returned time, so the set stays
+ * together and never shares a name with another release's set.
+ *
+ * Synchronous check-and-claim, so concurrent releases can't claim the same second
+ * (in-process, like the other locks — the service runs as one process).
+ */
+function claimFileTime(folderId, date = new Date(), tz = REPORTS_TZ) {
+  let t = date.getTime();
+  while (claimedStamps.has(`${folderId}|${exportTimestamp(new Date(t), tz)}`)) t += 1000;
+  const key = `${folderId}|${exportTimestamp(new Date(t), tz)}`;
+  claimedStamps.add(key);
+  setTimeout(() => claimedStamps.delete(key), CLAIM_MS).unref();
+  return new Date(t);
+}
+
 // A PDF always starts "%PDF-". Plextrac can answer a 200 with a JSON job/error body,
 // which would otherwise be filed in Drive as a "PDF" nobody can open.
 function looksLikePdf(buffer) {
@@ -239,6 +270,8 @@ async function exportReleasedReport({
       filename,
       mimeType: MIME_TYPES[EXPORT_FORMAT] || 'application/octet-stream',
       ...(folderId ? { folderId } : spec),
+      // A same-named file here can only be ANOTHER release's — never replace it.
+      overwrite: false,
     });
 
     log.info('Released report exported to Drive', {
@@ -284,6 +317,7 @@ module.exports = {
   exportReleasedReport,
   resolveReleaseFolder,
   releaseFolderSpec,
+  claimFileTime,
   isConfigured,
   postToThread,
   monthLabel,

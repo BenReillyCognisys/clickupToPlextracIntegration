@@ -9,6 +9,9 @@
 // Guarantees against filing into the wrong place:
 //   * The release's details (client, report, export time) are captured once, frozen,
 //     and passed to every step. Nothing is read from shared state mid-flight.
+//   * Its filename timestamp is claimed within the client folder, so two of a client's
+//     reports released in the same second get distinct names, and uploads never
+//     overwrite a same-named file.
 //   * The Drive folder is resolved ONCE, before anything is uploaded, and that one id
 //     is handed to every upload. No step looks the folder up for itself.
 //   * Runs for the same report are serialised (per-report lock): a webhook delivered
@@ -18,7 +21,8 @@
 //     two releases for one client can't create two client folders.
 //
 // Speed: the full-report export (Plextrac renders the PDF) and the client documents
-// (Claude, then the renderer) are independent, so they run in parallel.
+// (the renderer, after Claude for a document that uses it) are independent, so they
+// run in parallel.
 //
 // Best-effort, like the export before it: failures are logged and reported in the
 // release announcement's Slack thread, and never thrown — the release has happened
@@ -40,7 +44,7 @@ const log = require('../lib/logger');
  */
 async function runReleaseExports({ clientId, reportId, clientName, reportName, channel, threadTs }) {
   return withTaskLock(`release-exports:${reportId}`, async () => {
-    const job = Object.freeze({ clientId, reportId, clientName, reportName, exportedAt: new Date() });
+    const startedAt = new Date();
     const problems = [];
 
     try {
@@ -48,7 +52,7 @@ async function runReleaseExports({ clientId, reportId, clientName, reportName, c
       let folderId = null;
       if (reportExport.isConfigured()) {
         try {
-          folderId = await reportExport.resolveReleaseFolder(job);
+          folderId = await reportExport.resolveReleaseFolder({ clientName, exportedAt: startedAt });
         } catch (err) {
           log.error('Could not resolve the release folder in Drive', { reason: err.message, report_id: reportId });
           problems.push(`Could not create the Drive folder, so nothing was filed in Drive: ${err.message}`);
@@ -57,21 +61,23 @@ async function runReleaseExports({ clientId, reportId, clientName, reportName, c
         log.warn('Drive filing skipped — GOOGLE_DRIVE_REPORTS_FOLDER_ID is not set', { report_id: reportId });
       }
 
-      if (!clientDocuments.isEnabled()) {
-        log.warn('Client documents skipped — EXEC_SUMMARY_EDIT_API_KEY is not set', { report_id: reportId });
-      }
+      // The release's details, frozen. exportedAt is the time every file is named
+      // with — claimed in the folder, so another of this client's reports released in
+      // the same second can't produce the same filenames (report-export.claimFileTime).
+      const job = Object.freeze({
+        clientId, reportId, clientName, reportName,
+        exportedAt: folderId ? reportExport.claimFileTime(folderId, startedAt) : startedAt,
+      });
 
       // 2. The full report and the client documents, side by side. The full report
       //    posts its own failure notice.
       const [, documents] = await Promise.all([
         folderId && reportExport.exportReleasedReport({ ...job, channel, threadTs, folderId }),
-        clientDocuments.isEnabled()
-          ? clientDocuments.generateClientDocuments(job).catch((err) => {
-            log.error('Client documents could not be generated', { reason: err.message, report_id: reportId });
-            problems.push(`Client documents could not be generated: ${err.message}`);
-            return [];
-          })
-          : [],
+        clientDocuments.generateClientDocuments(job).catch((err) => {
+          log.error('Client documents could not be generated', { reason: err.message, report_id: reportId });
+          problems.push(`Client documents could not be generated: ${err.message}`);
+          return [];
+        }),
       ]);
 
       // 3. File each document that was made, into the SAME folder as the full report.

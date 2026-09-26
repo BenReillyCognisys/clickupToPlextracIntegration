@@ -2,13 +2,11 @@ const assert = require('assert');
 
 // Read at require time / call time by the modules under test.
 process.env.GOOGLE_DRIVE_REPORTS_FOLDER_ID = 'FOLDER_REPORTS';
-process.env.EXEC_SUMMARY_EDIT_API_KEY = 'test-key';
 
 // ── Stub the outbound helpers ─────────────────────────────────────────────────
 // The pipeline calls through these module objects at runtime, so mutating their
-// exports keeps every test off Plextrac, Claude, Drive, Slack and the renderer.
+// exports keeps every test off Plextrac, Drive, Slack and the renderer.
 const api = require('../lib/plextrac-api');
-const aiClient = require('../lib/client-doc-ai');
 const renderer = require('../lib/pdf-renderer');
 const drive = require('../lib/google-drive');
 const slack = require('../lib/slack');
@@ -16,7 +14,6 @@ const reportExport = require('../pipeline/report-export');
 
 const fx = require('./fixtures/client-report');
 const data = require('../pipeline/client-documents/data');
-const { fillPrompt } = require('../lib/prompt-template');
 const clientDocuments = require('../pipeline/client-documents');
 const { runReleaseExports } = require('../pipeline/release-exports');
 
@@ -24,28 +21,18 @@ const PDF = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(32, 0x20)]);
 const EXPORTED_AT = new Date('2026-09-26T13:30:05Z');
 
 const DOCS = [
-  {
-    key: 'exec-summary', name: 'Executive Summary Report', template: 'exec.j2', prompt: 'exec-summary.md',
-    outputs: { executive_summary: 'x' }, replaceNarratives: { 'Executive Summary': 'executive_summary' },
-  },
-  {
-    key: 'letter-of-attestation', name: 'Letter of Attestation', template: 'loa.j2', prompt: 'letter-of-attestation.md',
-    outputs: { attestation_body: 'x' },
-  },
+  { key: 'exec-summary', name: 'Executive Summary Report', template: 'exec.j2' },
+  { key: 'letter-of-attestation', name: 'Letter of Attestation', template: 'loa.j2' },
 ];
 
 let calls;
 function reset() {
-  calls = { getReport: [], generate: [], render: [], uploads: [], artifacts: [], replies: [], resolveFolder: [], exportFull: [] };
+  calls = { getReport: [], render: [], uploads: [], artifacts: [], replies: [], resolveFolder: [], exportFull: [] };
   api.getReport = async (c, r) => { calls.getReport.push([c, r]); return structuredClone(fx.report); };
   api.getClient = async () => structuredClone(fx.clientRecord);
   api.listReportFindings = async () => structuredClone(fx.findings);
   api.uploadReportArtifact = async (c, r, file) => { calls.artifacts.push({ c, r, filename: file.filename }); return `ART-${calls.artifacts.length}`; };
   api.listReportArtifacts = async () => calls.artifacts.map((_, i) => ({ id: `ART-${i + 1}` }));
-  aiClient.generate = async ({ prompt, outputs }) => {
-    calls.generate.push(prompt);
-    return { values: Object.fromEntries(Object.keys(outputs).map((k) => [k, `<p>AI ${k}</p>`])), model: 'm', usage: {} };
-  };
   renderer.templateExists = () => true;
   renderer.renderTemplates = async (jobs) => {
     calls.render.push(jobs);
@@ -66,57 +53,35 @@ function test(description, fn) {
     .catch((err) => { console.error(`  ✗  ${description}\n       ${err.message}`); failed++; });
 }
 const eq = (a, b) => assert.deepStrictEqual(a, b);
-const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, findings: fx.findings, clientName: 'Acme Corp', exportedAt: EXPORTED_AT });
+const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, findings: fx.findings, exportedAt: EXPORTED_AT });
 
 (async () => {
-  console.log('prompt placeholders:');
+  console.log('Plextrac findings:');
 
-  await test('fills values, narratives and custom fields', () => {
-    const out = fillPrompt(
-      'For {{client_name}} ({{ start_date }} - {{end_date}}), by {{field:Author 1}}:\n{{narrative:Executive Summary}}',
-      data.promptResolvers(facts()),
-    );
-    eq(out, 'For Acme Corp (1 September 2026 - 5 September 2026), by Jane Tester:\n'
-      + '<p>ORIGINAL EXEC SUMMARY: two high-risk issues were found (see section 4.2).</p>');
+  await test("the list endpoint's positional rows become { severity, title }", () => {
+    const rows = [
+      { id: 'f1', doc_id: [1, 2], data: [101, 'High', 'SQL Injection', 'Open', 0, {}, 0, {}, 0, {}, 'x', ''] },
+      { id: 'f2', doc_id: [1, 2], data: [102, 'Low', 'Missing HSTS', 'Open', 0, {}, 0, {}, 0, {}, 'x', ''] },
+    ];
+    eq(data.normaliseFindings(rows), [
+      { flaw_id: 101, severity: 'High', title: 'SQL Injection', status: 'Open' },
+      { flaw_id: 102, severity: 'Low', title: 'Missing HSTS', status: 'Open' },
+    ]);
+    eq(data.findingSummary(data.normaliseFindings(rows)).high, { total: 1 });
   });
 
-  await test('narrative labels match like the template (case, trailing "s")', () => {
-    const r = data.promptResolvers(facts());
-    eq(r.narrative('limitation'), '<p>Testing was performed against staging.</p>');
-    eq(r.narrative('SCOPE').includes('portal.acme.example'), true);
-  });
-
-  await test('HTML comments are notes for the editor, not sent', () => {
-    eq(fillPrompt('<!-- {{nonsense}} -->Hello {{client_name}}', data.promptResolvers(facts())), 'Hello Acme Corp');
-  });
-
-  await test('an unknown placeholder is an error naming what is available', () => {
-    assert.throws(() => fillPrompt('{{client}}', data.promptResolvers(facts())), /unknown placeholder \{\{client\}\}.*\{\{client_name\}\}/);
-  });
-
-  await test('a narrative the report lacks is an error, not a blank', () => {
-    assert.throws(() => fillPrompt('{{narrative:Roadmap}}', data.promptResolvers(facts())), /no "Roadmap" narrative/);
-  });
-
-  await test('every problem is reported at once', () => {
-    assert.throws(() => fillPrompt('{{a}} {{b}}', data.promptResolvers(facts())), /\{\{a\}\}.*\{\{b\}\}/);
-  });
-
-  await test('finding counts and titles — never the write-ups', () => {
-    const r = data.promptResolvers(facts());
-    eq(r.finding_counts(), 'Critical: 0\nHigh: 2\nMedium: 0\nLow: 1\nInformational: 1\nTotal: 4');
-    eq(r.findings().split('\n')[0], '- [High] SQL Injection in login');
-    eq(r.findings().includes(fx.SECRET), false);
+  await test('object-shaped findings and { data: [...] } responses pass through', () => {
+    eq(data.normaliseFindings({ data: [{ title: 'A', severity: 'Low' }] }), [{ title: 'A', severity: 'Low' }]);
+    eq(data.normaliseFindings(null), []);
   });
 
   console.log('\ntemplate context — the client documents get a reduced report:');
 
-  const ctx = () => data.templateContext({
-    ...facts(), ai: { executive_summary: '<p>AI text</p>' }, replaceNarratives: { 'Executive Summary': 'executive_summary' },
-  });
+  const ctx = () => data.templateContext(facts());
 
-  await test('no findings, and no write-up text anywhere in the context', () => {
-    eq(ctx().FINDINGS, []);
+  await test('findings carry only title and severity — no write-up text anywhere in the context', () => {
+    eq(ctx().FINDINGS[0], { title: 'SQL Injection in login', severity: 'High' });
+    eq(ctx().FINDINGS.length, 4);
     eq(JSON.stringify(ctx()).includes(fx.SECRET), false);
   });
 
@@ -125,24 +90,16 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     eq(Object.keys(ctx().CLIENT_INFO).sort(), ['name', 'tags']);
   });
 
-  await test("Claude's text replaces the narrative; the others are untouched", () => {
-    const list = ctx().REPORT_INFO.exec_summary.custom_fields;
-    eq(list.find((f) => f.label === 'Executive Summary').text, '<p>AI text</p>');
-    eq(list.find((f) => f.label === 'Overview').text, fx.report.exec_summary.custom_fields[0].text);
+  await test('narratives are passed through unchanged, in full', () => {
+    eq(ctx().REPORT_INFO.exec_summary, fx.report.exec_summary);
   });
 
-  await test('the source report object is not modified', () => {
-    ctx();
+  await test('the source report object is not shared with the context', () => {
+    ctx().REPORT_INFO.exec_summary.custom_fields[5].text = 'changed';
     eq(fx.report.exec_summary.custom_fields[5].text.startsWith('<p>ORIGINAL'), true);
   });
 
-  await test('a missing narrative is added rather than silently dropped', () => {
-    const report = { ...fx.report, exec_summary: { custom_fields: [] } };
-    const c = data.templateContext({ ...facts(), report, ai: { executive_summary: '<p>x</p>' }, replaceNarratives: { 'Executive Summary': 'executive_summary' } });
-    eq(c.REPORT_INFO.exec_summary.custom_fields, [{ label: 'Executive Summary', text: '<p>x</p>' }]);
-  });
-
-  await test('cover date in the month-first shape the template parses (UK time)', () => {
+  await test('issue date in the month-first shape the templates parse (UK time)', () => {
     eq(ctx().REPORT_INFO.export_datetime_us, '09-26-2026 14:30');
   });
 
@@ -151,94 +108,47 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     eq(ctx().FINDING_SUMMARY.totals, { total_reported: 4 });
   });
 
-  await test('AI values are available to templates as AI', () => {
-    eq(ctx().AI, { executive_summary: '<p>AI text</p>' });
-  });
-
-  console.log("\ncleanHtml — Claude's output is cut to basic formatting:");
-
-  await test('keeps paragraphs, lists and emphasis', () => {
-    eq(data.cleanHtml('<p>A <strong>b</strong> <em>c</em></p><ul><li>d</li></ul>'), '<p>A <strong>b</strong> <em>c</em></p><ul><li>d</li></ul>');
-  });
-
-  await test('drops scripts, images, links, styles and every attribute', () => {
-    eq(data.cleanHtml('<p style="color:red" onclick="x()">A</p><script>alert(1)</script><img src="file:///etc/passwd"><a href="http://x">link</a>'),
-      '<p>A</p>link');
-  });
-
-  await test('plain text becomes escaped paragraphs', () => {
-    eq(data.cleanHtml('One & two\n\nThree'), '<p>One &amp; two</p><p>Three</p>');
-  });
-
-  console.log('\nClaude response handling:');
-
-  const reply = (text, extra = {}) => ({ stop_reason: 'end_turn', content: [{ type: 'text', text }], ...extra });
-
-  await test('returns the requested keys', () => {
-    eq(aiClient.parseResponse(reply('{"a":"<p>x</p>"}'), { a: '' }), { a: '<p>x</p>' });
-  });
-
-  await test('a refusal is an error naming its category', () => {
-    assert.throws(() => aiClient.parseResponse({ stop_reason: 'refusal', stop_details: { category: 'cyber' }, content: [] }, { a: '' }), /refusal, category cyber/);
-  });
-
-  await test('a truncated reply is an error', () => {
-    assert.throws(() => aiClient.parseResponse(reply('{"a":"', { stop_reason: 'max_tokens' }), { a: '' }), /cut off/);
-  });
-
-  await test('an empty value is an error', () => {
-    assert.throws(() => aiClient.parseResponse(reply('{"a":"  "}'), { a: '' }), /no text for "a"/);
-  });
-
-  await test('the schema requires exactly the output keys', () => {
-    const s = aiClient.outputSchema({ a: 'first', b: 'second' });
-    eq(s.required, ['a', 'b']);
-    eq(s.additionalProperties, false);
-    eq(s.properties.a, { type: 'string', description: 'first' });
-  });
-
   console.log('\ngenerateClientDocuments:');
 
-  const job = { clientId: 12, reportId: 34, clientName: 'Acme Corp', exportedAt: EXPORTED_AT, documents: DOCS };
+  const job = { clientId: 12, reportId: 34, exportedAt: EXPORTED_AT, documents: DOCS };
 
-  await test('drafts every document, renders them in ONE renderer run, names them by the release time', async () => {
+  await test('makes every document, renders them in ONE renderer run, names them by the release time', async () => {
     reset();
     const out = await clientDocuments.generateClientDocuments(job);
     eq(out.map((d) => [d.doc.key, d.ok, d.filename]), [
       ['exec-summary', true, 'Executive Summary Report 2026-09-26 14-30-05.pdf'],
       ['letter-of-attestation', true, 'Letter of Attestation 2026-09-26 14-30-05.pdf'],
     ]);
-    eq(calls.generate.length, 2);
     eq(calls.render.length, 1);
     eq(calls.render[0].map((j) => j.template), ['exec.j2', 'loa.j2']);
     eq(calls.getReport, [[12, 34]]);
   });
 
-  await test("the exec summary's context carries Claude's text in the narrative", async () => {
+  await test('both templates get the same reduced context, built from this report', async () => {
     reset();
     await clientDocuments.generateClientDocuments(job);
-    const list = calls.render[0][0].context.REPORT_INFO.exec_summary.custom_fields;
-    eq(list.find((f) => f.label === 'Executive Summary').text, '<p>AI executive_summary</p>');
+    const [a, b] = calls.render[0].map((j) => j.context);
+    eq(a, b);
+    eq(a.CLIENT_INFO.name, 'Acme Corp');
+    eq(a.FINDINGS.length, 4);
   });
 
   await test('a report that belongs to another client is refused outright', async () => {
     reset();
     api.getReport = async () => ({ ...fx.report, client_id: 99 });
     await assert.rejects(clientDocuments.generateClientDocuments(job), /belongs to client 99, not 12/);
-    eq(calls.generate.length, 0);
+    eq(calls.render.length, 0);
   });
 
   await test('one document failing leaves the other intact', async () => {
     reset();
-    aiClient.generate = async ({ outputs }) => {
-      if (outputs.attestation_body) throw new Error('refusal');
-      return { values: { executive_summary: '<p>ok</p>' }, model: 'm', usage: {} };
-    };
+    renderer.renderTemplates = async (jobs) => new Map(jobs.map((j) => [j.id, j.id === 'letter-of-attestation'
+      ? { ok: false, error: 'UndefinedError: boom' }
+      : { ok: true, buffer: PDF, warnings: [] }]));
     const out = await clientDocuments.generateClientDocuments(job);
     eq(out[0].ok, true);
     eq(out[1].ok, false);
-    eq(out[1].error.includes('refusal'), true);
-    eq(calls.render[0].length, 1);
+    eq(out[1].error, 'Rendering failed: UndefinedError: boom');
   });
 
   await test('a document without its template is skipped, not failed', async () => {
@@ -309,12 +219,27 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     eq(calls.replies, []);
   });
 
-  await test('one export time for the folder, the full report and every document', async () => {
+  await test('one export time for the full report and every document', async () => {
     reset(); stubDocuments();
     await runReleaseExports(release);
-    const t = calls.resolveFolder[0].exportedAt;
-    eq(calls.exportFull[0].exportedAt, t);
+    const t = calls.exportFull[0].exportedAt;
     eq(calls.uploads.every((u) => u.filename.includes(t.toISOString())), true);
+    // The filename time is claimed in the folder, so it may move on from the time
+    // the folder was resolved for — but never backwards.
+    eq(t >= calls.resolveFolder[0].exportedAt, true);
+  });
+
+  await test('two releases for one client in the same second get different filename times', async () => {
+    reset(); stubDocuments();
+    await Promise.all([runReleaseExports(release), runReleaseExports({ ...release, reportId: 35 })]);
+    const [a, b] = calls.exportFull.map((c) => reportExport.reportFilename({ date: c.exportedAt }));
+    eq(a === b, false);
+  });
+
+  await test('every Drive upload of a release refuses to overwrite', async () => {
+    reset(); stubDocuments();
+    await runReleaseExports(release);
+    eq(calls.uploads.every((u) => u.overwrite === false), true);
   });
 
   await test('two releases of the same report run one after the other, never interleaved', async () => {
@@ -358,11 +283,11 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
 
   await test('document failures are listed together in one thread reply', async () => {
     reset();
-    clientDocuments.generateClientDocuments = async () => DOCS.map((d) => ({ doc: d, ok: false, error: 'Drafting failed: refusal' }));
+    clientDocuments.generateClientDocuments = async () => DOCS.map((d) => ({ doc: d, ok: false, error: 'Rendering failed: boom' }));
     await runReleaseExports(release);
     eq(calls.replies.length, 1);
-    eq(calls.replies[0].includes('Executive Summary Report: Drafting failed'), true);
-    eq(calls.replies[0].includes('Letter of Attestation: Drafting failed'), true);
+    eq(calls.replies[0].includes('Executive Summary Report: Rendering failed'), true);
+    eq(calls.replies[0].includes('Letter of Attestation: Rendering failed'), true);
   });
 
   await test('Plextrac data failing is reported, never thrown into the webhook', async () => {
@@ -371,16 +296,6 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     await runReleaseExports(release);
     eq(/could not be generated: Plextrac 500/.test(calls.replies[0]), true);
     eq(calls.exportFull.length, 1);
-  });
-
-  await test('without the Claude key the client documents are skipped quietly', async () => {
-    reset(); stubDocuments();
-    delete process.env.EXEC_SUMMARY_EDIT_API_KEY;
-    await runReleaseExports(release);
-    process.env.EXEC_SUMMARY_EDIT_API_KEY = 'test-key';
-    eq(calls.exportFull.length, 1);
-    eq(calls.uploads.length, 0);
-    eq(calls.replies, []);
   });
 
   console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`);

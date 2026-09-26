@@ -106,7 +106,10 @@ def main():
     # (blocked URLs, unsupported CSS) without the INFO chatter.
     logging.getLogger("weasyprint").setLevel(logging.WARNING)
 
-    payload = json.load(sys.stdin)
+    # Bytes, decoded as UTF-8 explicitly: sys.stdin decodes with the OS locale, which
+    # is not UTF-8 everywhere (cp1252 on Windows, whatever LANG says on a server) and
+    # would garble every accent, curly quote and em dash in the report text.
+    payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     env = build_environment(args.templates)
     results = [run_job(env, args.templates, job) for job in payload.get("jobs", [])]
 

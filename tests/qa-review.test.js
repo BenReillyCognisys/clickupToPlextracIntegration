@@ -23,6 +23,9 @@ const replies = []; // { channel, threadTs, text } from postReply
 slack.postMessage = async (channel, text) => { posts.push({ channel, text }); return 'ts-1'; };
 slack.postReply = async (channel, threadTs, text) => { replies.push({ channel, threadTs, text }); };
 slack.lookupUserIdByEmail = async (email) => (email === 'ada@example.com' ? 'U777' : null);
+// The release also files the client documents (tests/client-documents.test.js covers
+// that); here only the announcement is under test.
+require('../pipeline/client-documents').generateClientDocuments = async () => [];
 users.cuidMap = async () => new Map([
   ['cuid-ada', { cuid: 'cuid-ada', name: 'Ada Lovelace', email: 'ada@example.com' }],
 ]);

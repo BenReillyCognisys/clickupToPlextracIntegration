@@ -12,98 +12,117 @@ Plextrac: the two made-here documents on the report's Artifacts tab
 ```
 
 The full report is exported by Plextrac. The two **client documents** are made by
-this service. Each one runs through four steps:
+this service, entirely from Plextrac data, with no AI involved. Each one goes through
+these steps:
 
 1. **Plextrac data.** The report, the client and the findings are fetched fresh for this release.
-2. **Claude.** The document's prompt (`prompts/*.md`) is filled in with that data and sent to Claude, which returns the document's text.
-3. **Template.** Claude's text and a reduced copy of the report go into the document's Jinja2 template (`jinja2-export-templates/*.j2`). Real Jinja2 and WeasyPrint render it to PDF, in Python (`renderer/render.py`).
-4. **Publish.** The PDF goes into the release's Drive folder and onto the report's Artifacts tab. The Artifacts tab is read back afterwards to confirm the file is attached to this report.
+2. **Template.** A reduced copy of that data goes into the document's Jinja2 template (`jinja2-export-templates/*.j2`), which fills itself from it. Real Jinja2 and WeasyPrint render it to PDF, in Python (`renderer/render.py`).
+3. **Publish.** The PDF goes into the release's Drive folder and onto the report's Artifacts tab. The Artifacts tab is read back afterwards to confirm the file is attached to this report.
 
 Success is silent in Slack. Anything that fails is listed in the release
 announcement's thread, saying what needs doing by hand.
 
-## Editing a prompt
+## What each document contains
 
-Prompts live in `prompts/`, one Markdown file per document. **The file is re-read on
-every release**, so saving a change is enough, with no restart or deploy. Comments
-(`<!-- ... -->`) are notes for whoever edits the prompt and are removed before sending.
+**Executive Summary Report** (`cognisys-exec-summary.j2`) contains:
 
-Data from the report goes in through placeholders:
+- a cover page
+- the Introduction narratives: Overview, Scope, Caveats, Disclaimer and Confidentiality Notice
+- the report's own **Executive Summary** narrative, printed in full as written in Plextrac
 
-| Placeholder | Value |
+**Letter of Attestation** (`cognisys-letter-of-attestation.j2`) fills five placeholders:
+
+| Placeholder | Filled from |
 |---|---|
-| `{{client_name}}` | the client's name |
-| `{{report_name}}` | the Plextrac report's name |
-| `{{start_date}}`, `{{end_date}}` | testing dates, e.g. `1 September 2026` |
-| `{{export_date}}` | the release date |
-| `{{narrative:<Label>}}` | any narrative, e.g. `{{narrative:Executive Summary}}`, `{{narrative:Scope}}` |
-| `{{field:<Label>}}` | any report custom field, e.g. `{{field:Author 1}}` |
-| `{{finding_counts}}` | findings per severity |
-| `{{findings}}` | `- [Severity] Title` per finding: titles only, never the write-ups |
+| (CLIENT NAME) | the Plextrac client's name, in all four places |
+| (MONTH YEAR) | the month the letter is issued (the release date, UK time), e.g. `September 2026` |
+| (LINKS and APP NAMES) | the **Scope** narrative's in-scope table, one row per host: the URL on the left, its notes (and any further columns, joined with " – ") on the right |
+| (TOTAL ISSUE COUNT) | the number of findings, e.g. `4 issues` |
+| (INSERT ISSUE COUNT HERE) | per severity, e.g. `1 Critical, 1 High, 1 Medium and 1 Informational`; a severity with no findings is left out |
 
-Claude only ever receives what the prompt references. A placeholder that is misspelt,
-or whose data is missing on the report, **stops that document** and says so in
-Slack, rather than sending Claude a blank. An automatic client document built from a
-half-empty prompt is worse than one made by hand.
+How the Scope narrative is read is set at the top of the template:
 
-What Claude must *return* is fixed in `config/client-documents.js` (`outputs`), and
-the request enforces it as a strict JSON schema. The prompt doesn't need to describe
-an output format, and editing the prompt can't break the pipeline's ability to place
-the text. Claude's text is cut down to basic HTML (paragraphs, lists, bold/italic)
-before it reaches the template.
+- **`SCOPE_END`:** everything from "The following activities were out of scope for this engagement" onwards is dropped.
+- **`SCOPE_DROP_LINES`:** the "In-Scope URLs" heading is removed.
+- **`SCOPE_TABLE_HEADERS`:** each table's first row is its header (URL | Notes) and isn't a host.
+- **Blank rows:** rows left blank in Plextrac's scope template are skipped.
+- **`SCOPE_STOP_HEADINGS`:** a section starting at one of these headings is left out. It defaults to `["User Authentication"]`, because that table lists the test accounts (emails and roles), not hosts, and doesn't belong in a letter sent to third parties. Set it to `[]` to include it.
+- **Scopes without a table:** a scope written as paragraphs or bullets gives one host per line.
 
-### Trying a prompt on a real report
+Anything the template can't fill prints its original placeholder **in red**, so a
+letter never goes out with a silent gap. This includes a report whose scope table was
+left blank, and a report with no findings. The template deliberately doesn't claim
+"no issues" for an empty list.
+
+## Previewing on a real report
 
 ```
-node scripts/preview-client-documents.js <clientId> <reportId> --prompt            # show the filled prompt; no Claude call
-node scripts/preview-client-documents.js <clientId> <reportId> --doc exec-summary  # full run; writes preview/*.pdf
-node scripts/preview-client-documents.js <clientId> <reportId> --no-ai             # template work: no Claude, no cost
+node scripts/preview-client-documents.js <clientId> <reportId>                   # both documents → preview/*.pdf
+node scripts/preview-client-documents.js <clientId> <reportId> --doc letter-of-attestation
+node scripts/preview-client-documents.js <clientId> <reportId> --html            # HTML instead; no WeasyPrint needed
 ```
 
-A preview does exactly what a release does, except upload anything. It prints
-Claude's output and token usage, and writes the PDF plus a `.json` of Claude's reply
-to `preview/`.
+A preview does exactly what a release does, except upload anything. For a look at
+what a template receives, set `DEBUG_CONTEXT = true` at its top. The letter's debug
+page also lists the host rows it read from the Scope narrative.
 
 ## Adding or changing a document
 
-Documents are listed in `config/client-documents.js`. Each entry names:
-
-- its template
-- its prompt
-- its `outputs`: what Claude returns, available in the template as `{{ AI.<key> }}`
-- optionally, `replaceNarratives`, which puts an output in place of a Plextrac narrative's text
-
-The executive summary uses `replaceNarratives` so the unchanged template prints Claude's Executive Summary.
-
-A document whose template file is missing is **skipped with a warning**. The Letter
-of Attestation is configured this way until `cognisys-letter-of-attestation.j2`
-arrives. To switch it on, drop the template in `jinja2-export-templates/`, then
-adjust its prompt and `outputs` to match.
+Documents are listed in `config/client-documents.js`: a key, a name (the filename
+prefix) and a template. A document whose template file is missing is **skipped with
+a warning**, so an entry can be added before its template exists.
 
 ### What the templates receive
 
-The templates get the variables Plextrac's own export gives them (`REPORT_INFO`,
-`CLIENT_INFO`, `FINDINGS`, `FINDING_SUMMARY`), plus `AI`. These are **deliberately
-reduced** (`pipeline/client-documents/data.js`):
+The templates get the variables Plextrac's own export gives them: `REPORT_INFO`,
+`CLIENT_INFO`, `FINDINGS` and `FINDING_SUMMARY`. These are **deliberately reduced**
+(`pipeline/client-documents/data.js`):
 
-- **`REPORT_INFO` and `CLIENT_INFO`:** only the allow-listed keys (`REPORT_KEYS`, `CLIENT_KEYS`).
-- **`FINDINGS`:** always empty. `FINDING_SUMMARY` holds counts only.
+- **`REPORT_INFO` and `CLIENT_INFO`:** only the allow-listed keys (`REPORT_KEYS`, `CLIENT_KEYS`). `REPORT_INFO.export_datetime_us` carries the release time.
+- **`FINDINGS`:** each finding's **title and severity only** (`FINDING_KEYS`), enough to count them. `FINDING_SUMMARY` holds the counts per severity.
 
 Because this is done in code rather than left to the template, no template edit can
 leak a finding write-up into a client document. That includes `DEBUG_CONTEXT`, which
 dumps the whole context into the PDF. A template that needs another field must be
 given it there, deliberately.
 
+Plextrac's findings list returns each finding as a positional row (`data: [id,
+severity, title, status, ...]`). `normaliseFindings` turns these into `{ severity,
+title }` so the templates can read them.
+
 ## How the wrong-folder and double-filing problems are prevented
 
 - **Details captured once.** A release's details (client, report, export time) are captured once, frozen, and passed to every step.
 - **One folder for everything.** The Drive folder is resolved once per release, before any upload, and the same folder id is handed to the full report and to every client document. No step looks the folder up for itself.
 - **One run per report at a time.** Runs for the same report are serialised, so a webhook delivered twice, or a quick re-release, waits for the first run to finish. Different reports run side by side.
-- **No duplicate folders.** Drive allows duplicate folder names, so folder creation is serialised per parent folder (`lib/google-drive.js`), and lookups take the oldest folder of a name. Two releases for one client can't create two client folders. If a duplicate exists anyway, everything still lands in the same, original folder.
+- **No duplicate folders.** Drive allows duplicate folder names, so creating a folder of a given name under a given parent is serialised (`lib/google-drive.js`), and lookups take the oldest folder of a name. Two releases for one client can't create two client folders. If a duplicate exists anyway, everything still lands in the same, original folder. Different clients don't wait for each other.
+- **No shared filenames.** Filenames carry the time to the second, and one client folder holds all of that client's reports. Each release therefore claims its timestamp within its folder (`claimFileTime` in `pipeline/report-export.js`). A second report for the same client released in the same second takes the next free second, and all three of its files use it, so each set stays together and distinct. Release uploads also never overwrite a file of the same name.
 - **Right report in Plextrac.** Plextrac data and artifact uploads are addressed by the release's own client and report ids. The fetched report must belong to that client, and every uploaded artifact is read back from the report's Artifacts tab.
 
-These locks are in-process. The service runs as a single process; if it is ever
-scaled to several, the locks need to move to MongoDB.
+These locks and claims are in-process. The service runs as a single process; if it is
+ever scaled to several, they need to move to MongoDB.
+
+### Many releases at once
+
+A burst of releases queues rather than piling up. At most `PDF_RENDER_CONCURRENCY`
+(default 4) PDF renders run at a time, because each WeasyPrint process uses 100 MB or
+more.
+
+`tests/release-stress.test.js` releases 100 reports at once, plus 5 webhooks delivered
+twice, across 30 clients with 3-4 reports each. Each report has its own hosts, its own
+test accounts and its own mix of finding severities. The test then reads every filed
+document back and checks:
+
+- every document holds one report's data, including its hosts and finding counts
+- no letter lists test accounts
+- every document is in that report's client folder
+- each release's three files share a timestamp
+- nothing was overwritten or duplicated
+- every artifact is on the right report
+
+It runs the real code, including a separate Python renderer process per release on
+both real templates. Only Drive and Plextrac are simulated, with random latency so the
+releases interleave as badly as possible.
 
 A re-release makes a new set of files with a new timestamp. Nothing is overwritten.
 
@@ -115,11 +134,6 @@ npm install
 npm run setup:renderer        # creates renderer/.venv with the pinned Jinja2 + WeasyPrint
 ```
 
-Then, in `.env` (see `.env.example` → "Client documents"):
-
-- `EXEC_SUMMARY_EDIT_API_KEY`: the Claude API key for these documents. Without it the client documents are skipped and the full report is still filed.
-- Optional: `EXEC_SUMMARY_EDIT_MODEL` (default `claude-opus-5`), `EXEC_SUMMARY_EDIT_EFFORT` (default `high`).
-
 Check the Plextrac service account can upload artifacts. Like the report export, this
 may need a permission granted to its role:
 
@@ -127,5 +141,5 @@ may need a permission granted to its role:
 node scripts/inspect-artifacts.js <clientId> <reportId> --test-upload
 ```
 
-`npm test` includes `tests/renderer.test.js`, which renders the real template. Its PDF
-checks are reported as SKIPPED where WeasyPrint isn't installed.
+`npm test` includes `tests/renderer.test.js`, which renders both real templates. Its
+PDF checks are reported as SKIPPED where WeasyPrint isn't installed.
