@@ -143,11 +143,7 @@ async function publishClientDocument({ document, folderId, clientId, reportId })
       .then((id) => { out.artifactId = id; }, (err) => { out.errors.push(`Plextrac artifact upload failed: ${err.message}`); }),
   ]);
 
-  log.info('Client document published', {
-    document: document.doc.key, file: document.filename, report_id: reportId,
-    drive_file_id: out.driveFile?.fileId || null, drive_folder_id: out.driveFile?.folderId || null,
-    artifact_id: out.artifactId, errors: out.errors.length,
-  });
+  // The outcome is logged by the caller (pipeline/release-exports), in the release's trail.
   return out;
 }
 

@@ -54,6 +54,39 @@ letter never goes out with a silent gap. This includes a report whose scope tabl
 left blank, and a report with no findings. The template deliberately doesn't claim
 "no issues" for an empty list.
 
+## Following an export in the console (PM2)
+
+Each release writes a trail to the console. Every line starts `Release export` and
+carries the `report_id`, so one release can be followed even when several run at once:
+
+```
+[INFO] Release export STARTED | client="Acme Corp" | report="Web Application Penetration Test" | client_id=39283 | report_id=277397777 | plextrac="https://cognisys.plextrac.com/client/39283/report/277397777"
+[INFO] Release export: Drive folder ready | report_id=277397777 | folder="003. September 2026/Acme Corp" | folder_id="1AbC..."
+[INFO] Release export: exporting full report from Plextrac | report_id=277397777 | format="pdf"
+[INFO] Release export: full report exported from Plextrac | report_id=277397777 | size="793 KB" | took="41.2s"
+[INFO] Release export: full report uploaded to Drive | report_id=277397777 | file="Plextrac Full Report 2026-09-27 14-30-05.pdf" | folder="003. September 2026/Acme Corp" | drive="https://drive.google.com/file/d/.../view"
+[INFO] Release export: Executive Summary Report rendered | report_id=277397777 | size="249 KB"
+[INFO] Release export: Executive Summary Report uploaded to Drive | report_id=277397777 | file="..." | folder="..." | drive="..."
+[INFO] Release export: Executive Summary Report uploaded to Plextrac | client="Acme Corp" | report="Web Application Penetration Test" | client_id=39283 | report_id=277397777 | plextrac="https://cognisys.plextrac.com/client/39283/report/277397777" | file="..." | artifact_id="..."
+  ... the same three lines for the Letter of Attestation ...
+[INFO] Release export FINISHED | report_id=277397777 | client="Acme Corp" | report="Web Application Penetration Test" | took="44.8s" | drive_files=3 | plextrac_artifacts=2
+```
+
+- **Plextrac links:** the start line and every Plextrac upload line name the Plextrac client and report, with a link to the report.
+- **Failures:** anything that fails is an `[ERROR] Release export: … FAILED` line with the reason.
+- **Problem runs:** a run with problems ends `[WARN] Release export FINISHED WITH PROBLEMS | … | problems=N`.
+
+Useful commands:
+
+```
+pm2 logs <app> | grep "Release export"          # every release, live
+pm2 logs <app> | grep "report_id=277397777"     # one release
+pm2 logs <app> | grep -E "FAILED|WITH PROBLEMS" # only what needs attention
+```
+
+The lines carry no timestamp of their own. Start the app with `pm2 start … --time`,
+or set `time: true` in the ecosystem file, and PM2 prefixes each line with the time.
+
 ## Previewing on a real report
 
 ```

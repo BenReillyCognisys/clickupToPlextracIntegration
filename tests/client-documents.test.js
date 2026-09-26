@@ -290,6 +290,67 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     eq(calls.replies[0].includes('Letter of Attestation: Rendering failed'), true);
   });
 
+  // Captures what a run writes to the console (PM2), as [level, message, data].
+  const captureLog = async (fn) => {
+    const log = require('../lib/logger');
+    const saved = { info: log.info, warn: log.warn, error: log.error };
+    const lines = [];
+    for (const level of ['info', 'warn', 'error']) log[level] = (message, data) => lines.push([level, message, data || {}]);
+    try { await fn(); } finally { Object.assign(log, saved); }
+    return lines.filter(([, m]) => m.startsWith('Release export'));
+  };
+
+  await test('the console shows the release start to finish, in order', async () => {
+    reset(); stubDocuments();
+    const lines = await captureLog(() => runReleaseExports(release));
+    eq(lines.map(([level, m]) => `${level} ${m}`), [
+      'info Release export STARTED',
+      'info Release export: Drive folder ready',
+      'info Release export: Executive Summary Report rendered',
+      'info Release export: Letter of Attestation rendered',
+      'info Release export: Executive Summary Report uploaded to Drive',
+      'info Release export: Executive Summary Report uploaded to Plextrac',
+      'info Release export: Letter of Attestation uploaded to Drive',
+      'info Release export: Letter of Attestation uploaded to Plextrac',
+      'info Release export FINISHED',
+    ]);
+    // Every line can be tied to its release.
+    eq(lines.every(([, , d]) => d.report_id === 34), true);
+  });
+
+  await test('the start and Plextrac upload lines name the Plextrac project, with a link', async () => {
+    reset(); stubDocuments();
+    const lines = await captureLog(() => runReleaseExports(release));
+    const project = {
+      client: 'Acme Corp', report: 'Web App', client_id: 12, report_id: 34,
+      plextrac: 'https://cognisys.plextrac.com/client/12/report/34',
+    };
+    eq(lines[0][2], project);
+    const upload = lines.find(([, m]) => m === 'Release export: Letter of Attestation uploaded to Plextrac')[2];
+    eq({ ...upload, file: undefined, artifact_id: undefined }, { ...project, file: undefined, artifact_id: undefined });
+    eq(typeof upload.artifact_id, 'string');
+  });
+
+  await test('the finish line totals what was filed', async () => {
+    reset(); stubDocuments();
+    const lines = await captureLog(() => runReleaseExports(release));
+    const done = lines[lines.length - 1][2];
+    eq([done.drive_files, done.plextrac_artifacts], [3, 2]);
+    eq(/^\d+\.\ds$/.test(done.took), true);
+  });
+
+  await test('a failure is an ERROR line, and the run finishes WITH PROBLEMS', async () => {
+    reset(); stubDocuments();
+    api.uploadReportArtifact = async () => { throw new Error('HTTP 400'); };
+    const lines = await captureLog(() => runReleaseExports(release));
+    eq(lines.filter(([level]) => level === 'error').map(([, m]) => m), [
+      'Release export: Executive Summary Report upload FAILED',
+      'Release export: Letter of Attestation upload FAILED',
+    ]);
+    const [level, message, data] = lines[lines.length - 1];
+    eq([level, message, data.problems, data.plextrac_artifacts], ['warn', 'Release export FINISHED WITH PROBLEMS', 2, 0]);
+  });
+
   await test('Plextrac data failing is reported, never thrown into the webhook', async () => {
     reset();
     clientDocuments.generateClientDocuments = async () => { throw new Error('Plextrac 500'); };

@@ -206,6 +206,18 @@ function releaseFolderSpec({ clientName, exportedAt }) {
   };
 }
 
+// The release folder as a readable path under the reports folder, for the logs:
+// "003. September 2026/Acme Corp".
+function releaseFolderPath({ clientName, exportedAt }) {
+  const { sequencedSubfolder: month, subfolder } = releaseFolderSpec({ clientName, exportedAt });
+  return [month && `${String(month.sequence).padStart(3, '0')}. ${month.label}`, subfolder].filter(Boolean).join('/');
+}
+
+// "245 KB" / "1.2 MB", for the logs.
+function formatSize(bytes) {
+  return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
 /**
  * Resolves — creating as needed — the Drive folder this release's documents belong in,
  * and returns its id. Resolved ONCE per release by pipeline/release-exports.js and
@@ -250,6 +262,8 @@ async function exportReleasedReport({
   const filename = reportFilename({ date: exportedAt });
 
   try {
+    log.info('Release export: exporting full report from Plextrac', { report_id: reportId, format: EXPORT_FORMAT });
+    const exportStarted = Date.now();
     const { buffer, contentType } = await api.exportReport(clientId, reportId, EXPORT_FORMAT);
 
     if (EXPORT_FORMAT === 'pdf' && !looksLikePdf(buffer)) {
@@ -262,34 +276,30 @@ async function exportReleasedReport({
       );
     }
 
-    const spec = releaseFolderSpec({ clientName, exportedAt });
-    const month = spec.sequencedSubfolder;
+    log.info('Release export: full report exported from Plextrac', {
+      report_id: reportId, size: formatSize(buffer.length), took: `${((Date.now() - exportStarted) / 1000).toFixed(1)}s`,
+    });
 
     const result = await drive.uploadFile({
       buffer,
       filename,
       mimeType: MIME_TYPES[EXPORT_FORMAT] || 'application/octet-stream',
-      ...(folderId ? { folderId } : spec),
+      ...(folderId ? { folderId } : releaseFolderSpec({ clientName, exportedAt })),
       // A same-named file here can only be ANOTHER release's — never replace it.
       overwrite: false,
     });
 
-    log.info('Released report exported to Drive', {
+    log.info('Release export: full report uploaded to Drive', {
       report_id: reportId,
-      report_name: reportName,
       file: result.name,
-      file_id: result.fileId,
-      month: month ? `${String(month.sequence).padStart(3, '0')}. ${month.label}` : null,
-      client_folder: clientFolderName(clientName),
-      folder_id: result.folderId,
-      replaced: result.replaced,
-      bytes: buffer.length,
+      folder: releaseFolderPath({ clientName, exportedAt }),
+      drive: result.url,
     });
 
     return result;
   } catch (err) {
-    log.error('Failed to export released report to Drive', {
-      reason: err.message, report_id: reportId, client_id: clientId, file: filename,
+    log.error('Release export: full report FAILED', {
+      report_id: reportId, report: reportName, file: filename, reason: err.message,
     });
     await postToThread(
       channel, threadTs,
@@ -317,6 +327,8 @@ module.exports = {
   exportReleasedReport,
   resolveReleaseFolder,
   releaseFolderSpec,
+  releaseFolderPath,
+  formatSize,
   claimFileTime,
   isConfigured,
   postToThread,
