@@ -10,14 +10,15 @@
 // Plextrac API.
 //
 // Releasing is also what triggers the report being exported to PDF and filed in Google
-// Drive (pipeline/report-export.js) — a released report is the version worth keeping.
+// Drive, along with the client documents (pipeline/release-exports.js) — a released
+// report is the version worth keeping.
 
 const slack = require('../lib/slack');
 const users = require('../lib/plextrac-users');
 const api = require('../lib/plextrac-api');
 const fields = require('./qa-review/report-fields');
 const { postEmptyFieldsNotice } = require('./qa-review/empty-fields');
-const { exportReleasedReport } = require('./report-export');
+const { runReleaseExports } = require('./release-exports');
 const log = require('../lib/logger');
 
 // Channel for the release announcement (shares #pt-second-round-qa by default; override).
@@ -101,10 +102,11 @@ async function postReleaseAnnouncement({ clientId, clientName, clientUrl, report
     report, channel: RELEASED_QA_CHANNEL, threadTs, actorCuid, reportId, round: 'released',
   });
 
-  // Export the released report to PDF and file it in Google Drive, linking it in this
-  // announcement's thread. Best-effort and self-logging — it never throws, and it
-  // no-ops (with a warning) until GOOGLE_DRIVE_REPORTS_FOLDER_ID is configured.
-  await exportReleasedReport({
+  // File the release: the full report PDF in Google Drive, plus the client documents
+  // (executive summary, letter of attestation) in the same Drive folder and on the
+  // report's Plextrac Artifacts tab. Problems are replied in this announcement's
+  // thread. Best-effort and self-logging — it never throws.
+  await runReleaseExports({
     clientId,
     reportId,
     clientName: resolvedClientName,

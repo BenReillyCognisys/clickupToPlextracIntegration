@@ -1,0 +1,8 @@
+# Python side of the client-document export (see renderer/render.py and
+# docs/client-documents.md). Pinned: the templates are laid out against WeasyPrint 70's
+# CSS support, and render.py uses its URLFetcher API.
+#
+# WeasyPrint also needs Pango from the OS. On Ubuntu:
+#   sudo apt install python3-venv libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0
+Jinja2==3.1.6
+weasyprint==70.0

@@ -2,3 +2,6 @@ node_modules/
 .env
 deploy.sh
 logs/
+renderer/.venv/
+preview/
+__pycache__/

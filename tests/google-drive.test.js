@@ -5,6 +5,7 @@ process.env.GOOGLE_DRIVE_AUTH_FORM_FOLDER_ID = 'FOLDER_AUTH';
 
 const {
   fileIdFromUrl, driveFileUrl, withinAuthFormFolder, resolveSequencedFolder,
+  ensureFolder, ensureSequencedFolder, ensureFolderPath,
 } = require('../lib/google-drive');
 
 let passed = 0, failed = 0;
@@ -197,6 +198,86 @@ function fakeDrive(tree, unreadable = []) {
     assert.strictEqual(
       resolveSequencedFolder([{ id: 'A' }, null, { id: 'B', name: '' }], 'August 2026', 2).name,
       '002. August 2026');
+  });
+
+  await test('with duplicate labels the first listed (oldest) folder wins', () => {
+    assert.strictEqual(
+      resolveSequencedFolder([{ id: 'OLD', name: '002. August 2026' }, { id: 'NEW', name: '002. August 2026' }], 'August 2026', 2).folderId,
+      'OLD');
+  });
+
+  console.log('\nfolder creation — concurrent releases share one folder:');
+
+  // A Drive whose list/create take a moment, like the real API, so two callers that
+  // aren't serialised would both list before either creates. Folders are kept in
+  // creation order, and `list` honours orderBy only if the code asks for it.
+  function slowDrive() {
+    const folders = [];
+    const lists = [];
+    const tick = () => new Promise((r) => setTimeout(r, 10));
+    return {
+      folders,
+      lists,
+      files: {
+        list: async (params) => {
+          lists.push(params);
+          await tick();
+          const parent = /'([^']+)' in parents/.exec(params.q)[1];
+          const named = /name = '([^']+)'/.exec(params.q)?.[1];
+          const hits = folders.filter((f) => f.parent === parent && (!named || f.name === named));
+          const ordered = params.orderBy === 'createdTime' ? hits : [...hits].reverse();
+          return { data: { files: ordered.slice(0, params.pageSize).map(({ id, name }) => ({ id, name })) } };
+        },
+        create: async ({ requestBody }) => {
+          await tick();
+          const id = `F${folders.length + 1}`;
+          folders.push({ id, name: requestBody.name, parent: requestBody.parents[0] });
+          return { data: { id } };
+        },
+      },
+    };
+  }
+
+  await test('two releases for one client create ONE client folder', async () => {
+    const drive = slowDrive();
+    const ids = await Promise.all([ensureFolder(drive, 'MONTH', 'Acme Corp'), ensureFolder(drive, 'MONTH', 'Acme Corp')]);
+    assert.strictEqual(drive.folders.length, 1);
+    assert.deepStrictEqual(ids, ['F1', 'F1']);
+  });
+
+  await test('two releases in a new month create ONE month folder', async () => {
+    const drive = slowDrive();
+    const month = { label: 'September 2026', sequence: 3 };
+    const ids = await Promise.all([
+      ensureSequencedFolder(drive, 'ROOT', month), ensureSequencedFolder(drive, 'ROOT', month),
+    ]);
+    assert.strictEqual(drive.folders.length, 1);
+    assert.strictEqual(drive.folders[0].name, '003. September 2026');
+    assert.deepStrictEqual(ids, ['F1', 'F1']);
+  });
+
+  await test('the full path resolves to the same folder for simultaneous callers', async () => {
+    const drive = slowDrive();
+    const spec = { sequencedSubfolder: { label: 'September 2026', sequence: 3 }, subfolder: 'Acme Corp' };
+    const ids = await Promise.all([1, 2, 3].map(() => ensureFolderPath(drive, 'ROOT', spec)));
+    assert.strictEqual(drive.folders.length, 2);
+    assert.deepStrictEqual(new Set(ids).size, 1);
+  });
+
+  await test('an existing duplicate resolves to the OLDEST copy, every time', async () => {
+    const drive = slowDrive();
+    drive.folders.push({ id: 'OLD', name: 'Acme Corp', parent: 'MONTH' }, { id: 'NEW', name: 'Acme Corp', parent: 'MONTH' });
+    assert.strictEqual(await ensureFolder(drive, 'MONTH', 'Acme Corp'), 'OLD');
+    assert.strictEqual(drive.lists.every((p) => p.orderBy === 'createdTime'), true);
+  });
+
+  await test('folders under different parents still resolve in parallel', async () => {
+    const drive = slowDrive();
+    const started = Date.now();
+    await Promise.all(['A', 'B', 'C', 'D'].map((p) => ensureFolder(drive, p, 'Acme Corp')));
+    // Serialised, four list+create rounds would take ~80ms; in parallel ~20ms.
+    assert.ok(Date.now() - started < 60, `took ${Date.now() - started}ms`);
+    assert.strictEqual(drive.folders.length, 4);
   });
 
   console.log(`\n${passed} passed, ${failed} failed\n`);

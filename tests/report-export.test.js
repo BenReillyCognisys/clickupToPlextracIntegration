@@ -28,7 +28,8 @@ slack.postReply = async (channel, threadTs, text) => { replies.push({ channel, t
 slack.postMessage = async (channel, text) => { replies.push({ channel, threadTs: null, text }); };
 
 const {
-  exportReleasedReport, monthLabel, monthFolder, reportFilename, safeFilename, looksLikePdf,
+  exportReleasedReport, monthLabel, monthFolder, reportFilename, exportTimestamp, clientFolderName,
+  safeFilename, looksLikePdf,
 } = require('../pipeline/report-export');
 
 let passed = 0, failed = 0;
@@ -142,20 +143,51 @@ const RELEASE = {
     eq(monthFolder(boundary, 'UTC'), { label: 'August 2026', sequence: 2 });
   });
 
+  console.log('\nexportTimestamp:');
+
+  await test('"YYYY-MM-DD HH-MM-SS", zero-padded, 24-hour', () => {
+    eq(exportTimestamp(new Date('2026-01-05T03:04:05Z'), 'UTC'), '2026-01-05 03-04-05');
+    eq(exportTimestamp(new Date('2026-01-05T23:59:59Z'), 'UTC'), '2026-01-05 23-59-59');
+  });
+
+  await test('midnight is 00, not 24', () => {
+    eq(exportTimestamp(new Date('2026-01-05T00:00:00Z'), 'UTC'), '2026-01-05 00-00-00');
+  });
+
+  await test('is wall-clock time in the configured timezone', () => {
+    // 23:30 UTC on 31 August is 00:30 BST on 1 September.
+    eq(exportTimestamp(new Date('2026-08-31T23:30:00Z'), 'Europe/London'), '2026-09-01 00-30-00');
+  });
+
+  await test('contains nothing a filesystem rejects', () => {
+    eq(/[<>:"/\\|?*]/.test(exportTimestamp()), false);
+  });
+
   console.log('\nreportFilename:');
 
-  await test('"<client> - <report>.pdf"', () => {
-    eq(reportFilename({ clientName: 'Acme Corp', reportName: 'Web App Pentest', reportId: 34 }),
-      'Acme Corp - Web App Pentest.pdf');
+  await test('"Plextrac Full Report <timestamp>.pdf"', () => {
+    eq(reportFilename({ date: new Date('2026-09-26T13:30:05Z'), tz: 'Europe/London' }),
+      'Plextrac Full Report 2026-09-26 14-30-05.pdf');
   });
 
-  await test('falls back to the report id when names are missing', () => {
-    eq(reportFilename({ reportId: 34 }), 'Unknown client - Report 34.pdf');
+  await test('carries the export format as the extension', () => {
+    eq(reportFilename({ date: new Date('2026-09-26T13:30:05Z'), tz: 'UTC', format: 'docx' }),
+      'Plextrac Full Report 2026-09-26 13-30-05.docx');
   });
 
-  await test('is deterministic, so a re-release replaces rather than duplicates', () => {
-    eq(reportFilename({ clientName: 'A', reportName: 'B', reportId: 1 }),
-      reportFilename({ clientName: 'A', reportName: 'B', reportId: 1 }));
+  await test('defaults to now', () => {
+    eq(reportFilename().startsWith('Plextrac Full Report '), true);
+  });
+
+  console.log('\nclientFolderName:');
+
+  await test('is the sanitised client name', () => {
+    eq(clientFolderName('Acme / Corp: Ltd'), 'Acme Corp Ltd');
+  });
+
+  await test('falls back when the client is unnamed', () => {
+    eq(clientFolderName(''), 'Unknown client');
+    eq(clientFolderName(undefined), 'Unknown client');
   });
 
   console.log('\nlooksLikePdf:');
@@ -169,17 +201,19 @@ const RELEASE = {
 
   console.log('\nexportReleasedReport:');
 
-  await test('exports the PDF and files it under the month folder, saying nothing in Slack', async () => {
+  const TIMESTAMPED = /^Plextrac Full Report \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\.pdf$/;
+
+  await test('files the PDF as <month>/<client>/Plextrac Full Report <timestamp>.pdf, silently', async () => {
     reset();
     const result = await exportReleasedReport(RELEASE);
     eq(exportCalls, [[12, 34, 'pdf']]);
     eq(uploads.length, 1);
-    eq(uploads[0].filename, 'Acme Corp - Web App Pentest.pdf');
+    eq(TIMESTAMPED.test(uploads[0].filename), true);
     eq(uploads[0].folderId, 'FOLDER_REPORTS');
     // { label, sequence } — lib/google-drive names it "<NNN>. <label>".
     eq(uploads[0].sequencedSubfolder, monthFolder());
-    // Per-client subfolders are off by default: the PDF sits in the month folder itself.
-    eq(uploads[0].subfolder, undefined);
+    // The client folder sits inside the month folder.
+    eq(uploads[0].subfolder, 'Acme Corp');
     eq(uploads[0].mimeType, 'application/pdf');
     eq(uploads[0].buffer, PDF);
     eq(result.fileId, 'FILE1');
@@ -217,11 +251,18 @@ const RELEASE = {
     drive.uploadFile = async (args) => { uploads.push(args); return { ...uploadResult, name: args.filename }; };
   });
 
-  await test('an unnamed client still files under a usable name', async () => {
+  await test('an unnamed client still files under a usable folder', async () => {
     reset();
     await exportReleasedReport({ ...RELEASE, clientName: '', reportName: '' });
     eq(uploads[0].sequencedSubfolder, monthFolder());
-    eq(uploads[0].filename, 'Unknown client - Report 34.pdf');
+    eq(uploads[0].subfolder, 'Unknown client');
+    eq(TIMESTAMPED.test(uploads[0].filename), true);
+  });
+
+  await test('the client name is sanitised into a safe folder name', async () => {
+    reset();
+    await exportReleasedReport({ ...RELEASE, clientName: 'Acme / Corp: "UK"' });
+    eq(uploads[0].subfolder, 'Acme Corp UK');
   });
 
   console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`);

@@ -11,13 +11,14 @@
 // but the announcement and any problem that needs a human.
 //
 // Configuration (see .env.example → "Released-report export"):
-//   GOOGLE_DRIVE_REPORTS_FOLDER_ID            destination folder — REQUIRED, else skipped
-//   GOOGLE_DRIVE_REPORTS_MONTH_FOLDERS        file under <folder>/<NNN. Month YYYY>/ (default on)
-//   GOOGLE_DRIVE_REPORTS_TZ                   timezone deciding which month (Europe/London)
-//   GOOGLE_DRIVE_REPORTS_EPOCH_MONTH          month numbered 001 (YYYY-MM, default 2026-07)
-//   GOOGLE_DRIVE_REPORTS_SUBFOLDER_BY_CLIENT  add a <client>/ level inside that (default off)
-//   PLEXTRAC_EXPORT_FORMAT                    export format (default pdf)
-//   PLEXTRAC_EXPORT_PATH                      export endpoint override (lib/plextrac-api)
+//   GOOGLE_DRIVE_REPORTS_FOLDER_ID      destination folder — REQUIRED, else skipped
+//   GOOGLE_DRIVE_REPORTS_MONTH_FOLDERS  file under <folder>/<NNN. Month YYYY>/ (default on)
+//   GOOGLE_DRIVE_REPORTS_TZ             timezone for the month and filename timestamp (Europe/London)
+//   GOOGLE_DRIVE_REPORTS_EPOCH_MONTH    month numbered 001 (YYYY-MM, default 2026-07)
+//   PLEXTRAC_EXPORT_FORMAT              export format (default pdf)
+//   PLEXTRAC_EXPORT_PATH                export endpoint override (lib/plextrac-api)
+//
+// Layout: <folder>/<NNN. Month YYYY>/<Client>/Plextrac Full Report <timestamp>.pdf
 // Drive auth reuses the existing service-account key (GOOGLE_SERVICE_ACCOUNT_KEY) and
 // optional impersonation (GOOGLE_DRIVE_SUBJECT).
 
@@ -52,11 +53,6 @@ const EPOCH_MONTH = process.env.GOOGLE_DRIVE_REPORTS_EPOCH_MONTH || '2026-07';
 // 00:30 BST on the 1st belongs to the new month, not to the previous one UTC still
 // says it is. Matches the timezone convention used by the rest of the schedulers.
 const REPORTS_TZ = process.env.GOOGLE_DRIVE_REPORTS_TZ || 'Europe/London';
-
-// Optional extra level under the month folder, created on first use:
-// <folder>/<NNN. Month YYYY>/<Client>/<file>.pdf. Off by default — reports are filed
-// by month, and the client is already in the filename.
-const SUBFOLDER_BY_CLIENT = process.env.GOOGLE_DRIVE_REPORTS_SUBFOLDER_BY_CLIENT === 'true';
 
 const EXPORT_FORMAT = (process.env.PLEXTRAC_EXPORT_FORMAT || 'pdf').trim().toLowerCase();
 
@@ -127,13 +123,34 @@ function safeFilename(name, fallback = 'report') {
   return (cleaned || fallback).slice(0, 120).trim();
 }
 
-// "<client> - <report>.<ext>", falling back to the report id when a name is missing.
-// Deterministic: re-releasing the same report produces the same name, so the Drive
-// copy is replaced in place instead of duplicated.
-function reportFilename({ clientName, reportName, reportId, format = EXPORT_FORMAT }) {
-  const client = safeFilename(clientName, 'Unknown client');
-  const report = safeFilename(reportName, `Report ${reportId}`);
-  return `${client} - ${report}.${format}`;
+// The client folder the report is filed in, under the month folder.
+function clientFolderName(clientName) {
+  return safeFilename(clientName, 'Unknown client');
+}
+
+// "2026-09-26 14-30-05" — the export time as wall-clock time in `tz`. Hyphens rather
+// than colons, which Windows/macOS reject in a filename once the PDF is downloaded.
+function exportTimestamp(date = new Date(), tz = REPORTS_TZ) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: tz, hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(date);
+  const v = (type) => parts.find((part) => part.type === type)?.value;
+  return `${v('year')}-${v('month')}-${v('day')} ${v('hour')}-${v('minute')}-${v('second')}`;
+}
+
+// "<name> <timestamp>.<ext>". The client is carried by the folder, and the timestamp
+// makes every export its own file: a re-release adds a new copy next to the old one
+// rather than overwriting it. Every document filed for one release shares the one
+// timestamp, so they read as a set.
+function documentFilename(name, { date = new Date(), tz = REPORTS_TZ, format = 'pdf' } = {}) {
+  return `${safeFilename(name, 'Document')} ${exportTimestamp(date, tz)}.${format}`;
+}
+
+// "Plextrac Full Report <timestamp>.<ext>".
+function reportFilename({ date = new Date(), tz = REPORTS_TZ, format = EXPORT_FORMAT } = {}) {
+  return documentFilename('Plextrac Full Report', { date, tz, format });
 }
 
 // A PDF always starts "%PDF-". Plextrac can answer a 200 with a JSON job/error body,
@@ -144,19 +161,51 @@ function looksLikePdf(buffer) {
     && buffer.subarray(0, 5).toString('latin1') === '%PDF-';
 }
 
+// True when there is somewhere in Drive to file released reports.
+function isConfigured() {
+  return Boolean(REPORTS_FOLDER_ID);
+}
+
+// The folder levels a release files into: <folder>/<NNN. Month YYYY>/<Client>/.
+function releaseFolderSpec({ clientName, exportedAt }) {
+  return {
+    folderId: REPORTS_FOLDER_ID,
+    sequencedSubfolder: MONTH_FOLDERS ? monthFolder(exportedAt) : undefined,
+    subfolder: clientFolderName(clientName),
+  };
+}
+
+/**
+ * Resolves — creating as needed — the Drive folder this release's documents belong in,
+ * and returns its id. Resolved ONCE per release by pipeline/release-exports.js and
+ * handed to every upload, so the full report and the client documents cannot end up
+ * in different folders. Throws on any Drive failure.
+ */
+async function resolveReleaseFolder({ clientName, exportedAt }) {
+  if (!REPORTS_FOLDER_ID) throw new Error('GOOGLE_DRIVE_REPORTS_FOLDER_ID is not set');
+  return drive.resolveFolder(releaseFolderSpec({ clientName, exportedAt }));
+}
+
 /**
  * Exports a released report and files it in Drive.
  *
  * @param {object} args
  * @param {number|string} args.clientId
  * @param {number|string} args.reportId
- * @param {string} args.clientName   canonical client name (used for the filename/subfolder)
- * @param {string} args.reportName
+ * @param {string} args.clientName   canonical client name (names the client folder)
+ * @param {string} args.reportName   logged only — the filename is a timestamp
  * @param {string} [args.channel]    Slack channel of the release announcement
  * @param {string} [args.threadTs]   its thread anchor — failures are replied there
+ * @param {Date}   [args.exportedAt] the release's export time (default now) — month
+ *                                   folder and filename timestamp
+ * @param {string} [args.folderId]   an already-resolved destination folder
+ *                                   (resolveReleaseFolder). Without it the month and
+ *                                   client folders are resolved here.
  * @returns {Promise<object|null>} the upload result, or null when skipped/failed
  */
-async function exportReleasedReport({ clientId, reportId, clientName, reportName, channel, threadTs }) {
+async function exportReleasedReport({
+  clientId, reportId, clientName, reportName, channel, threadTs, exportedAt = new Date(), folderId,
+}) {
   if (!REPORTS_FOLDER_ID) {
     log.warn('Released-report export skipped — GOOGLE_DRIVE_REPORTS_FOLDER_ID is not set', {
       report_id: reportId,
@@ -164,7 +213,10 @@ async function exportReleasedReport({ clientId, reportId, clientName, reportName
     return null;
   }
 
-  const filename = reportFilename({ clientName, reportName, reportId });
+  // "Based on export time" — one instant for both the month folder and the filename
+  // timestamp, so a report released just after midnight on the 1st lands in the new
+  // month and its name agrees.
+  const filename = reportFilename({ date: exportedAt });
 
   try {
     const { buffer, contentType } = await api.exportReport(clientId, reportId, EXPORT_FORMAT);
@@ -179,24 +231,23 @@ async function exportReleasedReport({ clientId, reportId, clientName, reportName
       );
     }
 
-    // "Based on export time" — resolved now, when the PDF is actually filed, so a
-    // report released just after midnight on the 1st lands in the new month.
-    const month = MONTH_FOLDERS ? monthFolder() : undefined;
+    const spec = releaseFolderSpec({ clientName, exportedAt });
+    const month = spec.sequencedSubfolder;
 
     const result = await drive.uploadFile({
       buffer,
       filename,
       mimeType: MIME_TYPES[EXPORT_FORMAT] || 'application/octet-stream',
-      folderId: REPORTS_FOLDER_ID,
-      sequencedSubfolder: month,
-      subfolder: SUBFOLDER_BY_CLIENT ? safeFilename(clientName, 'Unknown client') : undefined,
+      ...(folderId ? { folderId } : spec),
     });
 
     log.info('Released report exported to Drive', {
       report_id: reportId,
+      report_name: reportName,
       file: result.name,
       file_id: result.fileId,
       month: month ? `${String(month.sequence).padStart(3, '0')}. ${month.label}` : null,
+      client_folder: clientFolderName(clientName),
       folder_id: result.folderId,
       replaced: result.replaced,
       bytes: buffer.length,
@@ -231,9 +282,16 @@ async function postToThread(channel, threadTs, text) {
 
 module.exports = {
   exportReleasedReport,
+  resolveReleaseFolder,
+  releaseFolderSpec,
+  isConfigured,
+  postToThread,
   monthLabel,
   monthFolder,
   reportFilename,
+  documentFilename,
+  exportTimestamp,
+  clientFolderName,
   safeFilename,
   looksLikePdf,
 };

@@ -185,20 +185,25 @@ case-insensitive and substring-based ("Project Roadmap" matches "Roadmap",
 
 Releasing a report is also what files it. When a report reaches the released status,
 `pipeline/report-export.js` renders it to PDF via Plextrac and uploads that PDF to
-Google Drive, then posts the link as a reply in the release announcement's thread:
-
-```
-:page_facing_up: Report saved to Drive: <link|Acme Corp - Web App Pentest.pdf>
-```
+Google Drive. A successful export is silent in Slack; a failure is replied in the
+release announcement's thread. The client-facing Executive Summary and Letter of
+Attestation are made at the same time and filed in the same folder, see
+[client-documents.md](client-documents.md).
 
 - **Where it lands.** `GOOGLE_DRIVE_REPORTS_FOLDER_ID` is the destination folder.
-  Inside it, each report is filed under a **month folder** created on first use:
+  Inside it, each report is filed under a **month folder**, then a **client folder**,
+  both created on first use, and named `Plextrac Full Report <timestamp>.pdf`:
 
   ```
-  <folder>/001. July 2026/Acme Corp - Web App Pentest.pdf
-  <folder>/002. August 2026/Beta Ltd - Infrastructure Test.pdf
+  <folder>/001. July 2026/Acme Corp/Plextrac Full Report 2026-07-09 11-02-45.pdf
+  <folder>/002. August 2026/Beta Ltd/Plextrac Full Report 2026-08-14 15-42-07.pdf
   <folder>/003. September 2026/...
   ```
+
+  The timestamp is the export time as `YYYY-MM-DD HH-MM-SS` in
+  `GOOGLE_DRIVE_REPORTS_TZ` (hyphens, not colons, so the name survives a download to
+  Windows or macOS). The client folder is the client's name with filesystem-hostile
+  characters stripped, or `Unknown client` if it has none.
 
   The month is taken from **the time of the export** (i.e. when the report is
   released), read in `GOOGLE_DRIVE_REPORTS_TZ` — `Europe/London` by default, so a
@@ -221,15 +226,16 @@ Google Drive, then posts the link as a reply in the release announcement's threa
   whatever number it carries — so a second release in the same month never creates a
   duplicate, and a folder someone renumbered by hand is left alone rather than twinned.
 
-  Set `GOOGLE_DRIVE_REPORTS_MONTH_FOLDERS=false` for one flat folder, or
-  `GOOGLE_DRIVE_REPORTS_SUBFOLDER_BY_CLIENT=true` to add a per-client level *inside*
-  the month folder (`<folder>/002. August 2026/Acme Corp/...`).
-- **Re-releases replace, they don't duplicate.** The filename is derived from the
-  client and report names, so releasing the same report again **overwrites the Drive
-  file in place** — Drive keeps its own version history. That also makes a repeated
-  webhook delivery harmless. Note the replace is *within one month folder*: a report
-  first released in August and re-released in September is filed in both months, which
-  is usually what you want (the month folder records when it went out).
+  An existing client folder inside the month is reused the same way (matched on name),
+  so every report a client has released that month sits together.
+
+  Set `GOOGLE_DRIVE_REPORTS_MONTH_FOLDERS=false` to drop the month level
+  (`<folder>/Acme Corp/...`).
+- **Every export is a new file.** Because the filename is a timestamp, releasing the
+  same report again **adds another PDF** alongside the earlier one rather than
+  overwriting it, so each release is kept. A webhook delivered twice within the same
+  second resolves to the same name and replaces in place; a retry that arrives later
+  leaves two copies.
 - **Nothing is fatal.** A failed export never affects the release: it is logged, and
   a `:warning:` reply in the thread says the PDF needs saving manually and why.
   Until `GOOGLE_DRIVE_REPORTS_FOLDER_ID` is set the export no-ops with a warning.
