@@ -141,6 +141,9 @@ app.use('/api/deliveryflow', apiLimiter, require('./routes/deliveryflow'));
 //   POST /api/deliveryflow/merged-auth-form    — merged form link
 //   POST /api/deliveryflow/extra-urls          — Free Black Box scoped extra URLs
 //                                                (Slack alert + DeliveryFlow)
+//   POST /api/deliveryflow/link-auth-form      — a PM linked an engagement to a form
+//                                                in the portal: push the form link
+//                                                to DeliveryFlow
 // Auth is per route in both routers, so they can share the prefix.
 app.use('/api/deliveryflow', apiLimiter, require('./routes/deliveryflow-portal'));
 

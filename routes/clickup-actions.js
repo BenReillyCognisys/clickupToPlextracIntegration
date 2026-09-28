@@ -478,19 +478,22 @@ router.post('/extra-urls', async (req, res) => {
     }
   }
 
-  // 2) Slack alert — always. Link the ClickUp task too when we have one.
-  let slack = 'failed';
-  try {
-    // Free Black Box extra-URL alerts always go to this channel (hardcoded).
-    const channel = 'C0AA3SNQUKE';
-    const taskLink = clickupTaskId ? ` ClickUp task: ${clickupTaskUrl(clickupTaskId)}` : '';
-    await postMessage(channel, `${summary}${taskLink}`);
-    slack = 'sent';
-  } catch (err) {
-    log.error('Extra-URLs Slack alert failed', {
-      clientName, formToken: formToken || null, reason: err.message,
-    });
-    slack = 'failed';
+  // 2) Slack alert — always, unless the portal says another call for the same form
+  //    (its DeliveryFlow engagement) raises it. Link the ClickUp task when we have one.
+  let slack = 'skipped';
+  if (req.body.notifySlack !== false) {
+    try {
+      // Free Black Box extra-URL alerts always go to this channel (hardcoded).
+      const channel = 'C0AA3SNQUKE';
+      const taskLink = clickupTaskId ? ` ClickUp task: ${clickupTaskUrl(clickupTaskId)}` : '';
+      await postMessage(channel, `${summary}${taskLink}`);
+      slack = 'sent';
+    } catch (err) {
+      log.error('Extra-URLs Slack alert failed', {
+        clientName, formToken: formToken || null, reason: err.message,
+      });
+      slack = 'failed';
+    }
   }
 
   // "skipped" is not itself a failure, but if there was no comment to make AND

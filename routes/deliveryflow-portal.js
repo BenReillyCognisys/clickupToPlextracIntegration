@@ -23,7 +23,12 @@
  *        The merged form link, for each engagement it covers.
  *   POST /api/deliveryflow/extra-urls          → extra_urls
  *        A Free Black Box form scoped more than one URL. The Slack alert goes out
- *        regardless, as for ClickUp.
+ *        regardless, as for ClickUp (unless the portal sends notifySlack: false).
+ *   POST /api/deliveryflow/link-auth-form      → auth_form_linked
+ *        A PM linked the engagement to a form in the portal that break.services
+ *        didn't create for it: DeliveryFlow is sent the form link, and the
+ *        engagement is recorded so the portal's later updates reach DeliveryFlow.
+ *        Portal-only: /clickup/* has no equivalent.
  *
  * Engagement ids: `engagementId` / `engagementIds`, or the portal's existing
  * `clickupTaskId` / `clickupTaskIds` fields (the auth-form endpoint sends the
@@ -481,21 +486,85 @@ const extraUrls = handle('extra-urls', async (req, res) => {
     deliveryflowResult = 'failed';
   }
 
-  // 2) Slack — always, linking the engagement when DeliveryFlow gave us its URL.
-  let slack;
-  try {
-    const link = record?.engagement_url ? ` DeliveryFlow engagement: ${record.engagement_url}` : '';
-    await postMessage(EXTRA_URLS_CHANNEL, `${summary}${link}`);
-    slack = 'sent';
-  } catch (err) {
-    log.error('DeliveryFlow extra-urls — Slack alert failed', { clientName, engagementId, reason: err.message });
-    slack = 'failed';
+  // 2) Slack, linking the engagement when DeliveryFlow gave us its URL. Skipped when
+  //    the portal says so: a form linked to a ClickUp task too is reported for each,
+  //    and only one of those calls raises the alert.
+  let slack = 'skipped';
+  if (body.notifySlack !== false) {
+    try {
+      const link = record?.engagement_url ? ` DeliveryFlow engagement: ${record.engagement_url}` : '';
+      await postMessage(EXTRA_URLS_CHANNEL, `${summary}${link}`);
+      slack = 'sent';
+    } catch (err) {
+      log.error('DeliveryFlow extra-urls — Slack alert failed', { clientName, engagementId, reason: err.message });
+      slack = 'failed';
+    }
   }
 
   const anySuccess = deliveryflowResult === 'sent' || slack === 'sent';
   res.status(anySuccess ? 200 : 502).json({ ok: anySuccess, deliveryflow: deliveryflowResult, slack });
 });
 
+// ─── POST /api/deliveryflow/link-auth-form ────────────────────────────────────
+// A PM linked a DeliveryFlow engagement to an authorisation form in the portal — a
+// form break.services didn't create for it (made by hand, or for a ClickUp task).
+// DeliveryFlow never saw that form, so its link is pushed as an auth_form_linked
+// event. The engagement is recorded here as well, which routes the portal's later
+// updates for it to DeliveryFlow. A form break.services created for the engagement
+// is already in DeliveryFlow (it came back from /auth-form), so nothing is sent.
+
+const linkAuthForm = handle('link-auth-form', async (req, res) => {
+  if (!forwardingReady(res, 'link-auth-form')) return;
+  const body = req.body || {};
+  const engagementId = singleId(body);
+  if (!body.formUrl) throw new BadRequest('formUrl is required');
+  const formUrl = httpUrl(body.formUrl, 'formUrl');
+  const engagementUrl = body.engagementUrl ? httpUrl(body.engagementUrl, 'engagementUrl') : null;
+  const clientName = typeof body.clientName === 'string' ? body.clientName.trim().slice(0, 200) || null : null;
+  const formToken = body.formToken != null ? String(body.formToken).slice(0, 200) : null;
+  const testTypes = Array.isArray(body.testTypes) ? body.testTypes.map((t) => String(t).slice(0, 100)).slice(0, 30) : [];
+
+  const { status, payload } = await withTaskLock(`deliveryflow:${engagementId}`, async () => {
+    let existing;
+    try {
+      existing = await store.findByEngagementId(engagementId);
+    } catch (err) {
+      log.error('DeliveryFlow link-auth-form — could not read the engagement record', { engagementId, reason: err.message });
+      return { status: 500, payload: { ok: false, error: 'could not read the engagement record; safe to retry' } };
+    }
+
+    if (existing?.form_url === formUrl && existing.form_source !== 'portal') {
+      return { status: 200, payload: { ok: true, engagementId, deliveryflow: 'already_has_form' } };
+    }
+
+    try {
+      await store.linkAuthForm(engagementId, { formUrl, formToken, engagementUrl, clientName });
+    } catch (err) {
+      log.error('DeliveryFlow link-auth-form — could not record the link', { engagementId, reason: err.message });
+      return { status: 500, payload: { ok: false, error: 'could not record the link; safe to retry' } };
+    }
+
+    try {
+      await deliveryflow.sendEvent(
+        'auth_form_linked',
+        { engagementId, dealId: existing?.deal_id ?? null },
+        { formUrl, formToken, clientName, testTypes },
+      );
+    } catch (err) {
+      log.error('DeliveryFlow link-auth-form — could not forward to DeliveryFlow', { engagementId, reason: err.message });
+      return { status: 502, payload: { ok: false, engagementId, error: err.message, stage: 'deliveryflow' } };
+    }
+
+    log.info('DeliveryFlow link-auth-form — form link sent to DeliveryFlow', {
+      engagementId, form_url: formUrl, new_engagement: !existing,
+    });
+    return { status: 200, payload: { ok: true, engagementId, deliveryflow: 'sent' } };
+  });
+
+  res.status(status).json(payload);
+});
+
+router.post('/link-auth-form', requirePortalKey, linkAuthForm);
 router.post('/schedule-task', requirePortalKey, scheduleTask);
 router.post('/test-files-uploaded', requirePortalKey, testFilesUploaded);
 router.post('/finalised-auth-form', requirePortalKey, finalisedAuthForm);

@@ -41,6 +41,15 @@ store.findByEngagementId = async (id) => {
   if (storeMode === 'read-fail') throw new Error('mongo down');
   return records[id] || null;
 };
+let linkMode = 'ok'; // 'ok' | 'throw'
+store.linkAuthForm = async (id, { formUrl, formToken, engagementUrl, clientName }) => {
+  if (linkMode === 'throw') throw new Error('mongo down');
+  records[id] = {
+    ...records[id], engagement_id: id, form_url: formUrl, form_token: formToken ?? null, form_source: 'portal',
+    ...(engagementUrl ? { engagement_url: engagementUrl } : {}),
+    ...(clientName ? { form_client_name: clientName } : {}),
+  };
+};
 store.updateEngagement = async (id, set) => {
   if (!records[id]) return false;
   records[id] = { ...records[id], ...set };
@@ -161,6 +170,7 @@ function reset() {
   clickupWrites.length = 0;
   drivedownloads = 0;
   lookupMode = 'ok';
+  linkMode = 'ok';
   dfMode = 'ok';
   plextracMode = 'ok';
   slackMode = 'ok';
@@ -477,6 +487,85 @@ const S = '/api/deliveryflow/schedule-task';
     }
   });
 
+  await test('extra-urls: notifySlack false skips the alert (the ClickUp call raises it)', async () => {
+    reset();
+    const r = await request(X, { body: extra({ notifySlack: false }) });
+    assert.strictEqual(r.status, 200);
+    assert.deepStrictEqual(r.json, { ok: true, deliveryflow: 'sent', slack: 'skipped' });
+    assert.strictEqual(slackPosts.length, 0);
+  });
+
+  // ── link-auth-form: a PM linked an engagement in the portal ────────────────
+  const L = '/api/deliveryflow/link-auth-form';
+  const link = (over = {}) => ({
+    engagementId: '348669400292',
+    engagementUrl: 'https://deliveryflow.cognisys.info/engagements/348669400292',
+    clientName: 'Hand Made Ltd',
+    formUrl: 'https://portal.test/f/pm-form',
+    formToken: 'pm-tok',
+    testTypes: ['Paid Black Box Pentest', 'External'],
+    ...over,
+  });
+
+  await test('link-auth-form: pushes the form link to DeliveryFlow and records the engagement', async () => {
+    reset();
+    const r = await request(L, { body: link() });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.deliveryflow, 'sent');
+    assert.deepStrictEqual(events[0], {
+      event: 'auth_form_linked', engagementId: '348669400292', dealId: null,
+      data: { formUrl: 'https://portal.test/f/pm-form', formToken: 'pm-tok', clientName: 'Hand Made Ltd', testTypes: ['Paid Black Box Pentest', 'External'] },
+    });
+    assert.strictEqual(records['348669400292'].form_source, 'portal');
+  });
+
+  await test('link-auth-form: the engagement\'s later portal updates now reach DeliveryFlow', async () => {
+    events.length = 0;
+    clickupWrites.length = 0;
+    const r = await request('/clickup/schedule-task', {
+      body: { clickupTaskId: '348669400292', startDate: '2026-10-05', endDate: '2026-10-06' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(events[0].event, 'schedule_set');
+    assert.strictEqual(clickupWrites.length, 0);
+    assert.strictEqual(r.json.plextrac, 'no_report');
+  });
+
+  await test('link-auth-form: a form break.services created for the engagement is not pushed again', async () => {
+    reset();
+    records['eng-1'].form_url = 'https://portal.test/f/eng-1';
+    const r = await request(L, { body: link({ engagementId: 'eng-1', formUrl: 'https://portal.test/f/eng-1' }) });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.deliveryflow, 'already_has_form');
+    assert.strictEqual(events.length, 0);
+  });
+
+  await test('link-auth-form: a different form on a known engagement is pushed, with its deal', async () => {
+    reset();
+    records['eng-1'].form_url = 'https://portal.test/f/eng-1';
+    const r = await request(L, { body: link({ engagementId: 'eng-1' }) });
+    assert.strictEqual(r.json.deliveryflow, 'sent');
+    assert.strictEqual(events[0].dealId, 'deal-9');
+  });
+
+  await test('link-auth-form: 502 when DeliveryFlow fails (the link is kept, so a retry just resends)', async () => {
+    reset();
+    dfMode = 'throw';
+    const r = await request(L, { body: link({ engagementId: 'eng-new' }) });
+    assert.strictEqual(r.status, 502);
+    assert.strictEqual(r.json.stage, 'deliveryflow');
+    assert.strictEqual(records['eng-new'].form_url, 'https://portal.test/f/pm-form');
+  });
+
+  await test('link-auth-form: 400 without a usable form URL or id; 401 with DeliveryFlow\'s key', async () => {
+    reset();
+    assert.strictEqual((await request(L, { body: link({ formUrl: undefined }) })).status, 400);
+    assert.strictEqual((await request(L, { body: link({ formUrl: 'ftp://x' }) })).status, 400);
+    assert.strictEqual((await request(L, { body: link({ engagementId: 'bad id!' }) })).status, 400);
+    assert.strictEqual((await request(L, { headers: { 'X-API-Key': 'df-key' }, body: link() })).status, 401);
+    assert.strictEqual(events.length, 0);
+  });
+
   // ── The portal's existing /clickup/* calls ────────────────────────────────
   console.log('\n/clickup/* routing of DeliveryFlow ids:');
 
@@ -546,6 +635,17 @@ const S = '/api/deliveryflow/schedule-task';
     assert.strictEqual(r.status, 200);
     assert.strictEqual(events[0].engagementId, 'eng-2');
     assert.deepStrictEqual(clickupWrites, [{ taskId: '86c1ab2xy', op: 'comment' }]);
+  });
+
+  await test('/clickup/extra-urls with notifySlack false comments on the task without a second alert', async () => {
+    reset();
+    const r = await request('/clickup/extra-urls', {
+      body: { clientName: 'Beta', clickupTaskId: '86c1ab2xy', urls: ['https://a.test', 'https://b.test'], notifySlack: false },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.slack, 'skipped');
+    assert.deepStrictEqual(clickupWrites, [{ taskId: '86c1ab2xy', op: 'comment' }]);
+    assert.strictEqual(slackPosts.length, 0);
   });
 
   await test('a failed engagement lookup falls back to ClickUp for every id', async () => {

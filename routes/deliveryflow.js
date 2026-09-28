@@ -637,7 +637,12 @@ async function requestAuthForm(input, plextrac, existing) {
   let rescope = 'not_needed';
   let formFor = { formClientName: input.clientName, formTestType: input.testType };
 
-  if (needsRescope) {
+  // A PM linked this engagement to a form in the portal (see /link-auth-form). That
+  // form is the engagement's: reuse it rather than generate or re-scope another.
+  if (existing?.form_source === 'portal' && existing.form_url) {
+    result = { ok: true, created: false, formUrl: existing.form_url, formToken: existing.form_token };
+    formFor = { formClientName: existing.form_client_name ?? input.clientName, formTestType: existing.form_test_type ?? null };
+  } else if (needsRescope) {
     const r = await rescopeAuthForm(input, plextrac, previous);
     if (r.kind === 'failed') return { ok: false, status: r.status, error: r.error, code: r.code, stage: 'auth_form' };
     if (r.kind === 'rescoped') {

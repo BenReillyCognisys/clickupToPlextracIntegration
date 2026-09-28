@@ -618,6 +618,21 @@ const valid = (over = {}) => ({
     assert.strictEqual(r.json.stage, 'auth_form');
   });
 
+  await test('an engagement a PM linked to a portal form keeps that form', async () => {
+    reset();
+    records['eng-linked'] = {
+      engagement_id: 'eng-linked', form_url: 'https://portal.test/f/pm-form', form_token: 'pm-tok',
+      form_source: 'portal', form_client_name: 'Linked Ltd',
+    };
+    const r = await setUp({ engagementId: 'eng-linked', clientName: 'Linked Ltd', testType: 'External' });
+    assert.strictEqual(r.status, 201, 'the Plextrac report is new');
+    assert.strictEqual(r.json.formUrl, 'https://portal.test/f/pm-form');
+    assert.strictEqual(portalCalls.length + updateCalls.length, 0, 'no second form generated');
+    assert.strictEqual(r.json.plextrac.status, 'created');
+    assert.strictEqual(records['eng-linked'].form_source, 'portal');
+    assert.strictEqual(records['eng-linked'].deal_id, '123456789');
+  });
+
   await test('a missing test-files link is fetched on its own', async () => {
     reset();
     portalMode = 'intake-no-files';
