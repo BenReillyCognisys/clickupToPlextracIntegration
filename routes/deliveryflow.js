@@ -40,6 +40,7 @@
 
 const express = require('express');
 const crypto = require('crypto');
+const { deliveryFlowKey } = require('../lib/deliveryflow-api');
 const { createAuthForm } = require('../lib/secure-portal-api');
 const { findOrCreateClient } = require('../pipeline/plextrac-client');
 const { createPlextracReport, buildReportName } = require('../pipeline/plextrac-report');
@@ -65,9 +66,7 @@ function timingSafeMatch(a, b) {
 }
 
 function requireDeliveryFlowKey(req, res, next) {
-  // Read per request so a key rotated in the environment takes effect on restart
-  // without touching this file.
-  const expected = process.env.DELIVERYFLOW_API_KEY || process.env.AVAILABILITY_API_KEY;
+  const expected = deliveryFlowKey();
   const key = req.headers['x-api-key'];
   if (!expected || !key || !timingSafeMatch(key, expected)) {
     return res.status(401).json({ ok: false, error: 'Unauthorized: invalid or missing X-API-Key' });
@@ -75,7 +74,6 @@ function requireDeliveryFlowKey(req, res, next) {
   next();
 }
 
-router.use(requireDeliveryFlowKey);
 
 // ─── Validation ───────────────────────────────────────────────────────────────
 
@@ -208,7 +206,9 @@ function findBlacklistedWord(...texts) {
 
 // ─── POST /api/deliveryflow/auth-form ─────────────────────────────────────────
 
-router.post('/auth-form', async (req, res) => {
+// Auth is per route rather than router-wide: the portal's callbacks share this
+// prefix (routes/deliveryflow-portal.js) and authenticate with the portal's key.
+router.post('/auth-form', requireDeliveryFlowKey, async (req, res) => {
   let input;
   try {
     input = parseAuthFormRequest(req.body || {});
@@ -317,6 +317,7 @@ async function ensurePlextracReport(input, existing) {
   try {
     await store.saveReport({
       engagementId, dealId, clientName, testType,
+      scope: input.scope,
       plextracClientId: clientId,
       plextracReportId: report.reportId,
       plextracReportCuid: report.reportCuid,

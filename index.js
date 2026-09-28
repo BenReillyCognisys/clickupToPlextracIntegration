@@ -129,6 +129,21 @@ app.use('/clickup', apiLimiter, require('./routes/clickup-actions'));
 // Server-to-server, so no CORS; rate-limited like the /clickup actions above.
 app.use('/api/deliveryflow', apiLimiter, require('./routes/deliveryflow'));
 
+// SFE-portal → break.services callbacks for DeliveryFlow engagements (X-API-Key:
+// BREAK_SERVICES_API_KEY, as on /clickup/*). Same five paths and bodies as the
+// /clickup/* actions; each is forwarded to DeliveryFlow (DELIVERYFLOW_EVENTS_URL)
+// instead of written to a ClickUp task:
+//   POST /api/deliveryflow/schedule-task       — booked dates / report deadline; also
+//                                                renames a report created without a
+//                                                start date
+//   POST /api/deliveryflow/test-files-uploaded — client uploaded their test files
+//   POST /api/deliveryflow/finalised-auth-form — signed form's Drive link
+//   POST /api/deliveryflow/merged-auth-form    — merged form link
+//   POST /api/deliveryflow/extra-urls          — Free Black Box scoped extra URLs
+//                                                (Slack alert + DeliveryFlow)
+// Auth is per route in both routers, so they can share the prefix.
+app.use('/api/deliveryflow', apiLimiter, require('./routes/deliveryflow-portal'));
+
 // Manual repair endpoints for missed or mis-mapped automations (X-API-Key:
 // AVAILABILITY_API_KEY). Unlike the /jobs/* triggers below these answer
 // synchronously with what they did — see routes/task-admin.js.
