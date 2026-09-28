@@ -42,25 +42,63 @@ plextracReport.createPlextracReport = async (clientId, opts) => {
 const notices = [];
 log.notify = (message) => { notices.push(message); };
 
+const portalError = (status, message) => Object.assign(new Error(message), { status });
+
 const portalCalls = [];   // recorded createAuthForm payloads
 const forms = {};         // clickupTaskId -> { formUrl, formToken } (portal-side idempotency)
-let portalMode = 'ok';    // 'ok' | 'throw' | 'no-url' | 'no-files'
+// 'ok' | 'throw' | 'no-url' | 'no-files' (no link from either call) |
+// 'intake-no-files' (only the standalone call mints one) | 'bad-type' (400)
+let portalMode = 'ok';
 portal.createAuthForm = async (payload) => {
   portalCalls.push(payload);
   if (portalMode === 'throw') throw new Error('Secure portal 500 POST /api/clickup/auth-form: boom');
+  if (portalMode === 'bad-type') throw portalError(400, 'Secure portal 400 POST /api/clickup/auth-form: {"code":"unknown_test_type"}');
   if (portalMode === 'no-url') return { ok: true };
   const existed = Boolean(forms[payload.clickupTaskId]);
   forms[payload.clickupTaskId] ||= { formUrl: `https://portal.test/f/${payload.clickupTaskId}`, formToken: `tok-${payload.clickupTaskId}` };
+  const noFiles = portalMode === 'no-files' || portalMode === 'intake-no-files';
   return {
     ok: true,
     created: !existed,
     ...forms[payload.clickupTaskId],
-    ...(portalMode === 'no-files' ? {} : { testFilesUrl: `https://portal.test/u/${payload.clickupTaskId}`, testFilesToken: 'ft-1' }),
+    ...(noFiles ? {} : { testFilesUrl: `https://portal.test/u/${payload.clickupTaskId}`, testFilesToken: 'ft-1' }),
   };
 };
+portal.createTestFilesLink = async (payload) => {
+  if (portalMode === 'no-files') throw portalError(500, 'Secure portal 500 POST /api/clickup/test-files: boom');
+  return { ok: true, created: true, testFilesUrl: `https://portal.test/u/${payload.clickupTaskId}`, testFilesToken: 'ft-2' };
+};
 
+// Re-scope: 'ok' | 'signed' (409) | 'missing' (404) | 'unchanged-false' (updated:false)
+const updateCalls = [];
+let updateMode = 'ok';
+portal.updateAuthForm = async (payload) => {
+  updateCalls.push(payload);
+  if (updateMode === 'signed') throw portalError(409, 'Secure portal 409: form_signed');
+  if (updateMode === 'missing') throw portalError(404, 'Secure portal 404: form_not_found');
+  if (updateMode === 'unchanged-false') return { ok: true, updated: false, reason: 'another task holds the other Black Box tier', formUrl: `https://portal.test/f/${payload.clickupTaskId}` };
+  return { ok: true, updated: true, formUrl: `https://portal.test/f/${payload.clickupTaskId}-v2`, formToken: `tok-${payload.clickupTaskId}-v2` };
+};
+
+// Plextrac report renames, and the ClickUp client-rename helper the route reuses.
+const plextracApi = require('../lib/plextrac-api');
+const reportNames = {};   // reportId -> current name (defaults to what createPlextracReport made)
+const reportUpdates = [];
+plextracApi.getReport = async (clientId, reportId) => ({ name: reportNames[reportId] });
+plextracApi.updateReport = async (clientId, reportId, payload) => {
+  reportUpdates.push({ reportId, payload });
+  if (payload.name) reportNames[reportId] = payload.name;
+};
+const clientRenames = [];
+require('../pipeline/task-rename').syncClientName = async (mapping, newName, label, opts) => {
+  clientRenames.push({ clientId: mapping.plextrac_client_id, newName, ...opts });
+  return true;
+};
+
+// Mirrors lib/deliveryflow-store.js: snake_case fields; dates, the engagement URL,
+// consultants and the test-files link are only overwritten when a value is sent.
 const records = {};       // engagement_id -> saved record
-let storeMode = 'ok';     // 'ok' | 'read-fail' | 'write-fail'
+let storeMode = 'ok';     // 'ok' | 'read-fail' | 'write-fail' | 'report-write-fail'
 store.findByEngagementId = async (id) => {
   if (storeMode === 'read-fail') throw new Error('mongo down');
   return records[id] || null;
@@ -69,14 +107,32 @@ store.saveReport = async (rec) => {
   if (storeMode === 'report-write-fail') throw new Error('mongo down');
   records[rec.engagementId] = {
     ...records[rec.engagementId], engagement_id: rec.engagementId, deal_id: rec.dealId,
+    client_name: rec.clientName, test_type: rec.testType, scope: rec.scope ?? null,
     plextrac_client_id: rec.plextracClientId, plextrac_report_id: rec.plextracReportId,
     plextrac_report_cuid: rec.plextracReportCuid, report_name: rec.reportName,
     start_date_pending: rec.startDatePending,
   };
+  reportNames[rec.plextracReportId] = rec.reportName;
 };
 store.saveAuthForm = async (rec) => {
   if (storeMode === 'write-fail') throw new Error('mongo down');
-  records[rec.engagementId] = { ...records[rec.engagementId], ...rec, engagement_id: rec.engagementId, deal_id: rec.dealId };
+  records[rec.engagementId] = {
+    ...records[rec.engagementId],
+    engagement_id: rec.engagementId, deal_id: rec.dealId,
+    client_name: rec.clientName, test_type: rec.testType, scope: rec.scope ?? null,
+    form_url: rec.formUrl, form_token: rec.formToken ?? null,
+    form_client_name: rec.formClientName ?? rec.clientName, form_test_type: rec.formTestType ?? rec.testType,
+    ...(rec.engagementUrl ? { engagement_url: rec.engagementUrl } : {}),
+    ...(rec.startDate != null ? { start_date: rec.startDate } : {}),
+    ...(rec.endDate != null ? { end_date: rec.endDate } : {}),
+    ...(rec.consultantEmails?.length ? { consultant_emails: rec.consultantEmails } : {}),
+    ...(rec.testFilesUrl ? { test_files_url: rec.testFilesUrl, test_files_token: rec.testFilesToken ?? null } : {}),
+  };
+};
+store.updateEngagement = async (id, set) => {
+  if (!records[id]) return false;
+  records[id] = { ...records[id], ...set };
+  return true;
 };
 
 const router = require('../routes/deliveryflow');
@@ -229,7 +285,7 @@ const valid = (over = {}) => ({
     assert.strictEqual(sent.endDate, Date.parse('2026-10-07T00:00:00Z'));
 
     assert.strictEqual(records['eng-1'].deal_id, '123456789');
-    assert.strictEqual(records['eng-1'].formUrl, 'https://portal.test/f/eng-1');
+    assert.strictEqual(records['eng-1'].form_url, 'https://portal.test/f/eng-1');
 
     // Plextrac: new client, report named like the ClickUp pipeline names it, and the
     // consultants (lower-cased, de-duplicated) as the report operators.
@@ -404,7 +460,7 @@ const valid = (over = {}) => ({
     assert.strictEqual(r.json.stage, 'auth_form');
     assert.strictEqual(r.json.plextrac.status, 'created');
     assert.strictEqual(records['eng-pf'].plextrac_report_id, r.json.plextrac.reportId);
-    assert.strictEqual(records['eng-pf'].formUrl, undefined);
+    assert.strictEqual(records['eng-pf'].form_url, undefined);
     assert.strictEqual(notices.length, 1, 'the new report is still announced');
     assert.ok(!notices[0].includes('Auth form'));
 
@@ -446,6 +502,129 @@ const valid = (over = {}) => ({
     const r = await request(PATH, { headers: KEY, body: valid({ engagementId: 'eng-np' }) });
     process.env.SECURE_PORTAL_URL = saved;
     assert.strictEqual(r.status, 503);
+  });
+
+  // ── Repeat calls: DeliveryFlow changed the engagement ─────────────────────
+  console.log('\nRepeat calls for a changed engagement:');
+
+  const reset = () => {
+    notices.length = 0; reportUpdates.length = 0; updateCalls.length = 0;
+    clientRenames.length = 0; portalCalls.length = 0; reportCalls.length = 0;
+    updateMode = 'ok'; portalMode = 'ok';
+  };
+  const setUp = (over) => request(PATH, { headers: KEY, body: valid(over) });
+
+  await test('a testing type change re-scopes the form and renames the report', async () => {
+    reset();
+    await setUp({ engagementId: 'eng-ch1', clientName: 'Change Co', testType: 'Black Box' });
+    reset();
+    const r = await setUp({ engagementId: 'eng-ch1', clientName: 'Change Co', testType: 'Grey Box' });
+    assert.strictEqual(r.status, 200);
+    assert.deepStrictEqual(r.json.changes, [{ field: 'testType', from: 'Black Box', to: 'Grey Box' }]);
+    assert.strictEqual(r.json.formRescope, 'rescoped');
+    assert.strictEqual(r.json.formUrl, 'https://portal.test/f/eng-ch1-v2');
+
+    // The portal is told what the form was for, so it can drop exactly that element.
+    assert.strictEqual(updateCalls[0].previousTestType, 'Black Box');
+    assert.strictEqual(updateCalls[0].testType, 'Grey Box');
+    assert.strictEqual(portalCalls.length, 0, 'no second form created');
+
+    assert.strictEqual(r.json.plextrac.reportRenamed, true);
+    assert.strictEqual(r.json.plextrac.reportName, 'Grey Box | October 2026');
+    assert.strictEqual(reportCalls.length, 0, 'no second report');
+    assert.strictEqual(records['eng-ch1'].form_test_type, 'Grey Box');
+    assert.strictEqual(records['eng-ch1'].report_name, 'Grey Box | October 2026');
+    assert.ok(notices.some((n) => n.includes('re-scoped')));
+    assert.ok(notices.some((n) => n.includes('report renamed')));
+  });
+
+  await test('a client name change renames the Plextrac client (via the ClickUp rules) and re-scopes', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-ch1', clientName: 'Change Company Ltd', testType: 'Grey Box' });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(clientRenames[0].newName, 'Change Company Ltd');
+    assert.strictEqual(clientRenames[0].oldClientName, 'Change Co');
+    assert.strictEqual(clientRenames[0].source, 'DeliveryFlow');
+    assert.strictEqual(updateCalls[0].previousClientName, 'Change Co');
+    assert.strictEqual(r.json.plextrac.reportRenamed, false, 'type and scope unchanged');
+  });
+
+  await test('a scope change renames the report but leaves the form alone', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-ch1', clientName: 'Change Company Ltd', testType: 'Grey Box', scope: 'Portal' });
+    assert.strictEqual(r.json.plextrac.reportName, 'Grey Box (Portal) | October 2026');
+    assert.strictEqual(r.json.formRescope, 'not_needed');
+    assert.strictEqual(updateCalls.length, 0);
+  });
+
+  await test('the same call again changes nothing', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-ch1', clientName: 'Change Company Ltd', testType: 'Grey Box', scope: 'Portal' });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.changes, undefined);
+    assert.strictEqual(updateCalls.length + reportUpdates.length + clientRenames.length + notices.length, 0);
+  });
+
+  await test('a signed form is never rewritten: Slack is told and the old scope is kept on record', async () => {
+    reset();
+    await setUp({ engagementId: 'eng-signed', clientName: 'Signed Ltd', testType: 'External' });
+    reset();
+    updateMode = 'signed';
+    const r = await setUp({ engagementId: 'eng-signed', clientName: 'Signed Ltd', testType: 'Internal' });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.formRescope, 'refused');
+    assert.strictEqual(r.json.formUrl, 'https://portal.test/f/eng-signed');
+    assert.ok(notices.some((n) => n.includes('already been signed')));
+    assert.strictEqual(records['eng-signed'].test_type, 'Internal');
+    assert.strictEqual(records['eng-signed'].form_test_type, 'External', 'the live form is still External');
+  });
+
+  await test('no open form to re-scope: a new one is created at the new scope', async () => {
+    reset();
+    await setUp({ engagementId: 'eng-gone', clientName: 'Gone Ltd', testType: 'External' });
+    reset();
+    updateMode = 'missing';
+    const r = await setUp({ engagementId: 'eng-gone', clientName: 'Gone Ltd', testType: 'Internal' });
+    assert.strictEqual(r.json.formRescope, 'recreated');
+    assert.strictEqual(portalCalls.length, 1);
+    assert.strictEqual(portalCalls[0].testType, 'Internal');
+  });
+
+  await test('a first startDate renames a pending report for that month and fills in its dates', async () => {
+    reset();
+    await setUp({ engagementId: 'eng-late', clientName: 'Late Ltd', startDate: null, endDate: null });
+    reset();
+    const r = await setUp({ engagementId: 'eng-late', clientName: 'Late Ltd', startDate: '2026-12-07', endDate: '2026-12-09' });
+    assert.strictEqual(r.json.plextrac.reportName, 'Black Box | December 2026');
+    assert.strictEqual(r.json.plextrac.startDatePending, false);
+    assert.strictEqual(reportUpdates[0].payload.start_date, '2026-12-07T00:00:00.000Z');
+    assert.strictEqual(records['eng-late'].start_date_pending, false);
+    assert.strictEqual(records['eng-late'].start_date, Date.parse('2026-12-07T00:00:00Z'));
+  });
+
+  await test('a call without dates keeps the dates already on record', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-late', clientName: 'Late Ltd', startDate: null, endDate: null });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(records['eng-late'].start_date, Date.parse('2026-12-07T00:00:00Z'));
+  });
+
+  await test('422 when the portal does not recognise the testing type', async () => {
+    reset();
+    portalMode = 'bad-type';
+    const r = await setUp({ engagementId: 'eng-mcp', clientName: 'Mcp Ltd', testType: 'MCP Integration' });
+    assert.strictEqual(r.status, 422);
+    assert.strictEqual(r.json.error, 'test_type_not_on_auth_form');
+    assert.strictEqual(r.json.stage, 'auth_form');
+  });
+
+  await test('a missing test-files link is fetched on its own', async () => {
+    reset();
+    portalMode = 'intake-no-files';
+    const r = await setUp({ engagementId: 'eng-files', clientName: 'Files Ltd' });
+    assert.strictEqual(r.status, 201);
+    assert.strictEqual(r.json.testFilesUrl, 'https://portal.test/u/eng-files');
+    assert.strictEqual(records['eng-files'].test_files_url, 'https://portal.test/u/eng-files');
   });
 
   console.log(`\n${passed} passed, ${failed} failed\n`);

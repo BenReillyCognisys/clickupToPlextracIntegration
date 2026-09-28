@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node tests/parse-task.test.js && node tests/task-rename.test.js && node tests/qa-review.test.js && node tests/free-blackbox.test.js && node tests/qa-kpi.test.js && node tests/report-lateness.test.js && node tests/google-drive.test.js && node tests/clickup-actions.test.js && node tests/deliveryflow-auth-form.test.js && node tests/deliveryflow-portal.test.js && node tests/auth-form-rename.test.js && node tests/vmaas.test.js && node tests/task-admin.test.js && node tests/report-export.test.js && node tests/test-files.test.js && node tests/client-documents.test.js && node tests/renderer.test.js && node tests/release-stress.test.js",
+    "test": "node tests/parse-task.test.js && node tests/task-rename.test.js && node tests/qa-review.test.js && node tests/free-blackbox.test.js && node tests/qa-kpi.test.js && node tests/report-lateness.test.js && node tests/google-drive.test.js && node tests/clickup-actions.test.js && node tests/deliveryflow-auth-form.test.js && node tests/deliveryflow-portal.test.js && node tests/deliveryflow-availability.test.js && node tests/auth-form-rename.test.js && node tests/vmaas.test.js && node tests/task-admin.test.js && node tests/report-export.test.js && node tests/test-files.test.js && node tests/client-documents.test.js && node tests/renderer.test.js && node tests/release-stress.test.js",
     "setup:renderer": "python3 -m venv renderer/.venv && renderer/.venv/bin/pip install -r renderer/requirements.txt"
   },
   "dependencies": {

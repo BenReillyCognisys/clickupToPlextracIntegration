@@ -28,6 +28,19 @@
  * the same form. An engagement stays on the deal it was first created under; a call
  * naming a different deal is refused with a 409 before anything is touched.
  *
+ * DeliveryFlow calls again whenever the engagement changes, and a repeat call
+ * carries what the ClickUp rename sync (pipeline/task-rename.js) does for a renamed
+ * task:
+ *   • client name changed — the Plextrac client is renamed when that is safe (same
+ *     rules as ClickUp: only when this is its sole report and the name is free);
+ *   • testing type or scope changed — the report is renamed;
+ *   • a first start date for a report created without one — the report is renamed
+ *     for that month and its dates filled in;
+ *   • client name or testing type changed — the portal re-scopes the form. A signed
+ *     form is never rewritten; that is posted to Slack for someone to reissue.
+ * New dates and consultants are kept on the record, which is what the availability
+ * cache reads when AVAILABILITY_SOURCE=deliveryflow.
+ *
  * DeliveryFlow authenticates with a shared secret in the X-API-Key header:
  * DELIVERYFLOW_API_KEY when it is set, otherwise AVAILABILITY_API_KEY (the key the
  * scheduling and /tasks/* endpoints use). Setting DELIVERYFLOW_API_KEY later gives
@@ -41,9 +54,11 @@
 const express = require('express');
 const crypto = require('crypto');
 const { deliveryFlowKey } = require('../lib/deliveryflow-api');
-const { createAuthForm } = require('../lib/secure-portal-api');
+const { createAuthForm, updateAuthForm, createTestFilesLink } = require('../lib/secure-portal-api');
 const { findOrCreateClient } = require('../pipeline/plextrac-client');
-const { createPlextracReport, buildReportName } = require('../pipeline/plextrac-report');
+const { createPlextracReport, buildReportName, epochToISO } = require('../pipeline/plextrac-report');
+const { syncClientName } = require('../pipeline/task-rename');
+const plextracApi = require('../lib/plextrac-api');
 const store = require('../lib/deliveryflow-store');
 const { withTaskLock } = require('../lib/task-lock');
 const TESTING_TYPES = require('../config/testing-types');
@@ -202,6 +217,180 @@ function parseAuthFormRequest(body) {
 function findBlacklistedWord(...texts) {
   const lower = texts.filter(Boolean).join(' ').toLowerCase();
   return BLACKLIST.find((word) => lower.includes(word.toLowerCase())) || null;
+}
+
+// ─── Changes to an engagement already set up ──────────────────────────────────
+
+// Case- and whitespace-insensitive, as the ClickUp rename sync and the portal compare.
+const sameText = (a, b) => {
+  const norm = (s) => String(s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+  return norm(a) === norm(b);
+};
+
+// What DeliveryFlow changed since the last call: [{ field, from, to }]. Empty for an
+// engagement being set up for the first time.
+function describeChanges(existing, input) {
+  if (!existing?.client_name) return [];
+  const changes = [];
+  if (!sameText(existing.client_name, input.clientName)) {
+    changes.push({ field: 'clientName', from: existing.client_name, to: input.clientName });
+  }
+  if (existing.test_type !== input.testType) {
+    changes.push({ field: 'testType', from: existing.test_type, to: input.testType });
+  }
+  if (!sameText(existing.scope, input.scope)) {
+    changes.push({ field: 'scope', from: existing.scope ?? null, to: input.scope });
+  }
+  return changes;
+}
+
+const describe = (changes) => changes.map((c) => `${c.field} "${c.from ?? ''}" → "${c.to ?? ''}"`).join(', ');
+
+/**
+ * Brings a linked Plextrac report (and its client) in line with the engagement.
+ * Best-effort, like the ClickUp rename sync: failures are logged and, where someone
+ * has to act, posted to Slack — never failed back to DeliveryFlow, whose change has
+ * already happened. Returns { clientRenamed, reportRenamed, reportName, startDatePending }.
+ */
+async function syncLinkedReport(existing, input, changes) {
+  const clientId = existing.plextrac_client_id;
+  const reportId = existing.plextrac_report_id;
+  const label = `${input.clientName} (DeliveryFlow engagement ${input.engagementId})`;
+  const changed = (field) => changes.some((c) => c.field === field);
+  const out = {
+    clientRenamed: false,
+    reportRenamed: false,
+    reportName: existing.report_name ?? null,
+    startDatePending: Boolean(existing.start_date_pending),
+  };
+
+  if (changed('clientName')) {
+    out.clientRenamed = await syncClientName(
+      { plextrac_client_id: clientId }, input.clientName, label,
+      { oldClientName: existing.client_name, source: 'DeliveryFlow' },
+    );
+  }
+
+  // A pentest re-typed as VMaaS: VMaaS has no report, but this one may already hold
+  // work, so it is left for a person to decide about.
+  if (input.testType === VMAAS_TEST_TYPE) {
+    if (changed('testType')) {
+      log.notify(`${label} changed from ${existing.test_type} to VMaaS — its Plextrac report <${reportUrl(clientId, reportId)}|${out.reportName}> was left in place; please remove it if it isn't needed.`);
+    }
+    return out;
+  }
+
+  const datesArrived = Boolean(existing.start_date_pending) && input.startDate != null;
+  if (!changed('testType') && !changed('scope') && !datesArrived) return out;
+
+  const startMs = input.startDate ?? existing.start_date ?? null;
+  const name = buildReportName(input.testType, startMs, input.scope);
+  try {
+    const report = await plextracApi.getReport(clientId, reportId);
+    const current = report?.name ?? null;
+    const payload = {};
+    if (current == null || current.toLowerCase() !== name.toLowerCase()) payload.name = name;
+    if (datesArrived) {
+      payload.start_date = epochToISO(input.startDate);
+      payload.end_date = epochToISO(input.endDate ?? existing.end_date);
+    }
+    if (Object.keys(payload).length) await plextracApi.updateReport(clientId, reportId, payload);
+
+    out.reportName = name;
+    if (datesArrived) out.startDatePending = false;
+    if (payload.name) {
+      out.reportRenamed = true;
+      log.info('DeliveryFlow auth-form — Plextrac report renamed', {
+        engagementId: input.engagementId, report_id: reportId, old_name: current, new_name: name,
+      });
+      log.notify(`DeliveryFlow change synced for ${label} — report renamed from "${current}" to <${reportUrl(clientId, reportId)}|${name}>.`);
+    }
+  } catch (err) {
+    log.error('DeliveryFlow auth-form — could not update the Plextrac report', {
+      engagementId: input.engagementId, client_id: clientId, report_id: reportId, reason: err.message,
+    });
+    return out;
+  }
+
+  try {
+    await store.updateEngagement(input.engagementId, {
+      report_name: out.reportName, start_date_pending: out.startDatePending,
+    });
+  } catch (err) {
+    log.error('DeliveryFlow auth-form — could not record the report update', { engagementId: input.engagementId, reason: err.message });
+  }
+  return out;
+}
+
+/**
+ * Asks the portal to re-scope an existing form for a new client name or testing
+ * type — what pipeline/auth-form-rename.js does for a renamed ClickUp task. Returns:
+ *   { kind: 'rescoped', result } — the form now matches
+ *   { kind: 'missing' }          — the portal has no open form; create one instead
+ *   { kind: 'refused', … }       — signed, or the portal can't apply it (Slack told)
+ *   { kind: 'failed', status, error, code? }
+ */
+async function rescopeAuthForm(input, plextrac, previous) {
+  const { engagementId } = input;
+  const label = `${input.clientName} (DeliveryFlow engagement ${engagementId})`;
+  const change = [
+    previous.testType !== input.testType ? `testing type "${previous.testType}" → "${input.testType}"` : null,
+    !sameText(previous.clientName, input.clientName) ? `client "${previous.clientName}" → "${input.clientName}"` : null,
+  ].filter(Boolean).join(' and ');
+
+  let result;
+  try {
+    result = await updateAuthForm({
+      clientName: input.clientName,
+      testType: input.testType,
+      previousClientName: previous.clientName ?? null,
+      previousTestType: previous.testType ?? null,
+      clickupTaskId: engagementId,
+      clickupTaskUrl: input.engagementUrl,
+      plextracClientId: plextrac.clientId ?? null,
+      plextracReportId: plextrac.reportId ?? null,
+      startDate: input.startDate,
+      endDate: input.endDate,
+      source: 'deliveryflow',
+      engagementId,
+      engagementUrl: input.engagementUrl,
+      dealId: input.dealId,
+    });
+  } catch (err) {
+    if (err.status === 404) {
+      log.info('DeliveryFlow auth-form — no open form to re-scope; creating one', { engagementId, change });
+      return { kind: 'missing' };
+    }
+    if (err.status === 409) {
+      log.warn('DeliveryFlow auth-form — form already signed; not re-scoped', { engagementId, change });
+      log.notify(`${label} changed (${change}) but its authorisation form has already been signed, so it was not changed. Please issue a new form for the new scope.`);
+      return { kind: 'refused', reason: 'form_signed' };
+    }
+    if (err.status === 400) {
+      return { kind: 'failed', status: 422, code: 'test_type_not_on_auth_form', error: err.message };
+    }
+    log.error('DeliveryFlow auth-form — portal re-scope failed', { engagementId, change, reason: err.message });
+    return { kind: 'failed', status: 502, error: `auth-form re-scope failed: ${err.message}` };
+  }
+
+  if (!result?.ok) {
+    log.error('DeliveryFlow auth-form — portal re-scope reported failure', {
+      engagementId, response: JSON.stringify(result ?? null).slice(0, 200),
+    });
+    return { kind: 'failed', status: 502, error: 'auth-form re-scope failed' };
+  }
+  if (result.updated === false) {
+    const reason = result.reason || 'no reason given';
+    log.warn('DeliveryFlow auth-form — portal left the form unchanged', { engagementId, change, reason });
+    log.notify(`${label} changed (${change}) but its authorisation form was left unchanged (${reason}) — please check whether it needs reissuing.`);
+    return { kind: 'refused', reason, formUrl: result.formUrl, formToken: result.formToken };
+  }
+
+  if (!result.unchanged) {
+    const link = result.formUrl ? ` <${result.formUrl}|Updated form>.` : '';
+    log.notify(`Authorisation form re-scoped for ${label} — ${change}.${link}`);
+  }
+  return { kind: 'rescoped', result };
 }
 
 // ─── POST /api/deliveryflow/auth-form ─────────────────────────────────────────
@@ -375,8 +564,18 @@ async function setUpEngagement(input) {
   if (!plextracResult.ok) return { status: plextracResult.status, body: plextracResult.body };
   const { plextrac } = plextracResult;
 
+  // A repeat call for an engagement DeliveryFlow has since changed.
+  const changes = describeChanges(existing, input);
+  if (plextrac.status === 'already_linked' && (changes.length || existing.start_date_pending)) {
+    const synced = await syncLinkedReport(existing, input, changes);
+    Object.assign(plextrac, synced);
+  }
+  if (changes.length) {
+    log.info('DeliveryFlow auth-form — engagement changed', { engagementId, changes: describe(changes) });
+  }
+
   // ── Phase 4: authorisation form ───────────────────────────────────────────
-  const authForm = await requestAuthForm(input, plextrac);
+  const authForm = await requestAuthForm(input, plextrac, existing);
 
   // ── Phase 5: announce a report we actually created ────────────────────────
   // Same notice as the ClickUp pipeline, sent whether or not the form came back —
@@ -388,7 +587,10 @@ async function setUpEngagement(input) {
   }
 
   if (!authForm.ok) {
-    return { status: authForm.status, body: { ok: false, error: authForm.error, stage: authForm.stage, plextrac } };
+    return {
+      status: authForm.status,
+      body: { ok: false, error: authForm.code || authForm.error, detail: authForm.code ? authForm.error : undefined, stage: authForm.stage, plextrac },
+    };
   }
 
   log.info('DeliveryFlow engagement set up', {
@@ -407,53 +609,116 @@ async function setUpEngagement(input) {
       formToken: authForm.formToken,
       testFilesUrl: authForm.testFilesUrl,
       testFilesToken: authForm.testFilesToken,
+      // Only on a repeat call that changed something: what changed, and whether the
+      // form now reflects it ('rescoped' | 'recreated' | 'refused' | 'not_needed').
+      ...(changes.length ? { changes, formRescope: authForm.rescope } : {}),
       plextrac,
     },
   };
 }
 
-// Asks the portal for the form and records it. Returns { ok: true, ...form } or
-// { ok: false, status, error, stage }. Retrying after a failure is safe: the report
-// is already linked, and the portal hands back the same form for the same engagement.
-async function requestAuthForm(input, plextrac) {
+// Asks the portal for the form — re-scoping the existing one when the client name or
+// testing type changed — and records it. Returns { ok: true, ...form, rescope } or
+// { ok: false, status, error, stage, code? }. Retrying after a failure is safe: the
+// report is already linked, and the portal hands back the same form for the same
+// engagement.
+async function requestAuthForm(input, plextrac, existing) {
   const { engagementId, dealId } = input;
 
-  let result;
-  try {
-    result = await createAuthForm({
-      clientName: input.clientName,
-      testType: input.testType,
-      // The portal keys forms on clickupTaskId; the engagement id stands in for it.
-      clickupTaskId: engagementId,
-      clickupTaskUrl: input.engagementUrl,
-      plextracClientId: plextrac.clientId ?? null,
-      plextracReportId: plextrac.reportId ?? null,
-      startDate: input.startDate,
-      endDate: input.endDate,
-      source: 'deliveryflow',
-      engagementId,
-      engagementUrl: input.engagementUrl,
-      dealId,
-    });
-  } catch (err) {
-    log.error('DeliveryFlow auth-form — portal generation failed', { engagementId, dealId, reason: err.message });
-    return { ok: false, status: 502, error: `auth-form generation failed: ${err.message}`, stage: 'auth_form' };
+  // What the current form was generated for (see lib/deliveryflow-store.js).
+  const previous = {
+    clientName: existing?.form_client_name ?? existing?.client_name,
+    testType: existing?.form_test_type ?? existing?.test_type,
+  };
+  const needsRescope = Boolean(existing?.form_url)
+    && (!sameText(previous.clientName, input.clientName) || previous.testType !== input.testType);
+
+  let result = null;
+  let rescope = 'not_needed';
+  let formFor = { formClientName: input.clientName, formTestType: input.testType };
+
+  if (needsRescope) {
+    const r = await rescopeAuthForm(input, plextrac, previous);
+    if (r.kind === 'failed') return { ok: false, status: r.status, error: r.error, code: r.code, stage: 'auth_form' };
+    if (r.kind === 'rescoped') {
+      result = { ...r.result, created: false };
+      rescope = 'rescoped';
+    } else if (r.kind === 'refused') {
+      // The live form still carries the old scope; keep recording it as such.
+      result = { ok: true, created: false, formUrl: r.formUrl || existing.form_url, formToken: r.formToken ?? existing.form_token };
+      rescope = 'refused';
+      formFor = { formClientName: previous.clientName, formTestType: previous.testType };
+    } else {
+      rescope = 'recreated'; // the portal had no open form: create one below
+    }
   }
 
-  if (!result?.ok || !result.formUrl) {
-    log.error('DeliveryFlow auth-form — portal returned no form URL', {
-      engagementId, dealId, response: JSON.stringify(result ?? null).slice(0, 200),
-    });
-    return { ok: false, status: 502, error: 'auth-form generation returned no form URL', stage: 'auth_form' };
+  if (!result) {
+    try {
+      result = await createAuthForm({
+        clientName: input.clientName,
+        testType: input.testType,
+        // The portal keys forms on clickupTaskId; the engagement id stands in for it.
+        clickupTaskId: engagementId,
+        clickupTaskUrl: input.engagementUrl,
+        plextracClientId: plextrac.clientId ?? null,
+        plextracReportId: plextrac.reportId ?? null,
+        startDate: input.startDate,
+        endDate: input.endDate,
+        source: 'deliveryflow',
+        engagementId,
+        engagementUrl: input.engagementUrl,
+        dealId,
+      });
+    } catch (err) {
+      // 400: the portal can't place this testing type on a form. Retrying won't
+      // change that, so it isn't reported as a temporary failure.
+      if (err.status === 400) {
+        log.error('DeliveryFlow auth-form — portal does not recognise the testing type', { engagementId, testType: input.testType, reason: err.message });
+        return { ok: false, status: 422, code: 'test_type_not_on_auth_form', error: err.message, stage: 'auth_form' };
+      }
+      log.error('DeliveryFlow auth-form — portal generation failed', { engagementId, dealId, reason: err.message });
+      return { ok: false, status: 502, error: `auth-form generation failed: ${err.message}`, stage: 'auth_form' };
+    }
+
+    if (!result?.ok || !result.formUrl) {
+      log.error('DeliveryFlow auth-form — portal returned no form URL', {
+        engagementId, dealId, response: JSON.stringify(result ?? null).slice(0, 200),
+      });
+      return { ok: false, status: 502, error: 'auth-form generation returned no form URL', stage: 'auth_form' };
+    }
+  }
+
+  // The intake call normally returns the test-files link too; when it didn't (and none
+  // is on record), ask for it on its own, as the ClickUp flow does. Best-effort: the
+  // next call tries again.
+  let testFilesUrl = result.testFilesUrl ?? existing?.test_files_url ?? null;
+  let testFilesToken = result.testFilesToken ?? existing?.test_files_token ?? null;
+  if (!testFilesUrl) {
+    try {
+      const files = await createTestFilesLink({
+        clientName: input.clientName,
+        clickupTaskId: engagementId,
+        clickupTaskUrl: input.engagementUrl,
+        plextracClientId: plextrac.clientId ?? null,
+      });
+      if (files?.ok && files.testFilesUrl) {
+        testFilesUrl = files.testFilesUrl;
+        testFilesToken = files.testFilesToken ?? null;
+      }
+    } catch (err) {
+      log.warn('DeliveryFlow auth-form — no test-files link this time', { engagementId, reason: err.message });
+    }
   }
 
   try {
     await store.saveAuthForm({
       ...input,
+      ...formFor,
       formUrl: result.formUrl,
       formToken: result.formToken,
-      testFilesUrl: result.testFilesUrl,
-      testFilesToken: result.testFilesToken,
+      testFilesUrl,
+      testFilesToken,
     });
   } catch (err) {
     log.error('DeliveryFlow auth-form — could not record the auth form', { engagementId, dealId, reason: err.message });
@@ -463,10 +728,11 @@ async function requestAuthForm(input, plextrac) {
   return {
     ok: true,
     created: result.created !== false,
+    rescope,
     formUrl: result.formUrl,
     formToken: result.formToken ?? null,
-    testFilesUrl: result.testFilesUrl ?? null,
-    testFilesToken: result.testFilesToken ?? null,
+    testFilesUrl,
+    testFilesToken,
   };
 }
 

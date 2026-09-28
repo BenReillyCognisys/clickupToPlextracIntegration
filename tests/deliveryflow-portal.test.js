@@ -79,9 +79,43 @@ slack.postMessage = async (channel, text) => {
 const notices = [];
 log.notify = (message) => { notices.push(message); };
 
+// The /clickup/* routes the portal already calls hand DeliveryFlow ids to the
+// handlers above; the ClickUp side records what reached it instead of calling out.
+const clickupApi = require('../lib/clickup-api');
+const googleDrive = require('../lib/google-drive');
+const clickupWrites = []; // { taskId, op }
+let drivedownloads = 0;
+let lookupMode = 'ok';    // 'ok' | 'throw'
+store.findEngagementIds = async (ids) => {
+  if (lookupMode === 'throw') throw new Error('mongo down');
+  return new Set(ids.filter((id) => records[id]));
+};
+clickupApi.getTask = async (id) => ({
+  id, name: 'Acme Ltd | External', status: { status: 'not started' }, checklists: [],
+  custom_fields: [{ id: 'f-auth', name: 'Authorisation Forms', type: 'attachment' }],
+});
+clickupApi.uploadCustomFieldAttachment = async () => ({ id: 'att-1' });
+clickupApi.setTaskCustomField = async (taskId) => { clickupWrites.push({ taskId, op: 'field' }); };
+clickupApi.getTaskDescription = async () => '';
+clickupApi.updateTaskDescription = async (taskId) => { clickupWrites.push({ taskId, op: 'description' }); };
+clickupApi.updateTaskStatus = async (taskId) => { clickupWrites.push({ taskId, op: 'status' }); };
+clickupApi.updateTaskSchedule = async (taskId) => { clickupWrites.push({ taskId, op: 'schedule' }); };
+clickupApi.createTaskComment = async (taskId) => { clickupWrites.push({ taskId, op: 'comment' }); return 'c1'; };
+clickupApi.listTaskComments = async () => [];
+clickupApi.updateComment = async () => {};
+googleDrive.downloadDriveFile = async () => {
+  drivedownloads++;
+  return {
+    buffer: Buffer.from('%PDF'), filename: 'Signed form.pdf', mimeType: 'application/pdf',
+    fileId: 'AbC123_x', canonicalUrl: 'https://drive.google.com/file/d/AbC123_x/view',
+  };
+};
+process.env.CLICKUP_TEAM_ID = 'team-1';
+
 // Mounted as index.js mounts them, so the per-route auth of each is exercised together.
 const authFormRouter = require('../routes/deliveryflow');
 const portalRouter = require('../routes/deliveryflow-portal');
+const clickupRouter = require('../routes/clickup-actions');
 
 // ── Test harness ──────────────────────────────────────────────────────────────
 let passed = 0, failed = 0;
@@ -98,6 +132,7 @@ function request(path, { headers = { 'X-API-Key': 'portal-key' }, body } = {}) {
     app.use(express.json());
     app.use('/api/deliveryflow', authFormRouter);
     app.use('/api/deliveryflow', portalRouter);
+    app.use('/clickup', clickupRouter);
     const server = app.listen(0, () => {
       const { port } = server.address();
       const payload = body != null ? JSON.stringify(body) : null;
@@ -123,6 +158,9 @@ function reset() {
   slackPosts.length = 0;
   notices.length = 0;
   failFor.clear();
+  clickupWrites.length = 0;
+  drivedownloads = 0;
+  lookupMode = 'ok';
   dfMode = 'ok';
   plextracMode = 'ok';
   slackMode = 'ok';
@@ -437,6 +475,88 @@ const S = '/api/deliveryflow/schedule-task';
     } finally {
       process.env.DELIVERYFLOW_EVENTS_URL = 'https://deliveryflow.test/events';
     }
+  });
+
+  // ── The portal's existing /clickup/* calls ────────────────────────────────
+  console.log('\n/clickup/* routing of DeliveryFlow ids:');
+
+  await test('/clickup/schedule-task with an engagement id goes to DeliveryFlow, not ClickUp', async () => {
+    reset();
+    const r = await request('/clickup/schedule-task', {
+      body: { clickupTaskId: 'eng-1', startDate: '2026-10-05', endDate: '2026-10-07', reportDeadline: '2026-10-20' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.deliveryflow, 'sent');
+    assert.strictEqual(events[0].event, 'schedule_set');
+    assert.strictEqual(clickupWrites.length, 0);
+  });
+
+  await test('/clickup/schedule-task with a ClickUp id still books the ClickUp task', async () => {
+    reset();
+    const r = await request('/clickup/schedule-task', {
+      body: { clickupTaskId: '86c1ab2xy', startDate: '2026-10-05', endDate: '2026-10-07' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.deepStrictEqual(clickupWrites.map((w) => w.op), ['schedule']);
+    assert.strictEqual(events.length, 0);
+  });
+
+  await test('/clickup/test-files-uploaded and /clickup/extra-urls route an engagement to DeliveryFlow', async () => {
+    reset();
+    const t = await request('/clickup/test-files-uploaded', { body: { clickupTaskId: 'eng-1', fileCount: 1 } });
+    assert.strictEqual(t.status, 200);
+    const x = await request('/clickup/extra-urls', {
+      body: { clientName: 'Beta', clickupTaskId: 'eng-1', urls: ['https://a.test', 'https://b.test'] },
+    });
+    assert.strictEqual(x.status, 200);
+    assert.deepStrictEqual(events.map((e) => e.event), ['test_files_uploaded', 'extra_urls']);
+    assert.strictEqual(slackPosts.length, 1);
+    assert.strictEqual(clickupWrites.length, 0, 'no ClickUp comment for an engagement');
+  });
+
+  await test('/clickup/finalised-auth-form splits one form across DeliveryFlow and ClickUp', async () => {
+    reset();
+    const r = await request('/clickup/finalised-auth-form', {
+      body: { clientName: 'Acme Ltd', driveUrl: drive, clickupTaskIds: ['eng-1', '86c1ab2xy'] },
+    });
+    assert.strictEqual(r.status, 200);
+    const byId = Object.fromEntries(r.json.results.map((x) => [x.taskId, x]));
+    assert.strictEqual(byId['eng-1'].action, 'sent');
+    assert.strictEqual(byId['eng-1'].destination, 'deliveryflow');
+    assert.strictEqual(byId['86c1ab2xy'].action, 'attached');
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].engagementId, 'eng-1');
+    assert.ok(clickupWrites.every((w) => w.taskId === '86c1ab2xy'));
+    assert.strictEqual(drivedownloads, 1);
+  });
+
+  await test('/clickup/finalised-auth-form for engagements only downloads nothing', async () => {
+    reset();
+    const r = await request('/clickup/finalised-auth-form', { body: { driveUrl: drive, clickupTaskIds: ['eng-1', 'eng-2'] } });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(events.length, 2);
+    assert.strictEqual(drivedownloads, 0);
+  });
+
+  await test('/clickup/merged-auth-form splits the same way', async () => {
+    reset();
+    const r = await request('/clickup/merged-auth-form', {
+      body: { clientName: 'Acme Ltd', mergedFormUrl: 'https://portal.test/m/1', mergedFormToken: 'm1', clickupTaskIds: ['eng-2', '86c1ab2xy'] },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(events[0].engagementId, 'eng-2');
+    assert.deepStrictEqual(clickupWrites, [{ taskId: '86c1ab2xy', op: 'comment' }]);
+  });
+
+  await test('a failed engagement lookup falls back to ClickUp for every id', async () => {
+    reset();
+    lookupMode = 'throw';
+    const r = await request('/clickup/schedule-task', {
+      body: { clickupTaskId: 'eng-1', startDate: '2026-10-05', endDate: '2026-10-07' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.deepStrictEqual(clickupWrites.map((w) => w.op), ['schedule']);
+    assert.strictEqual(events.length, 0);
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

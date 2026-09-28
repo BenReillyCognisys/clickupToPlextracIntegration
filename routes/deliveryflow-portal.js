@@ -31,6 +31,11 @@
  * unchanged). An id break.services didn't set up is refused (404 / per-id failure):
  * it is either a ClickUp task sent to the wrong prefix or a typo.
  *
+ * The portal doesn't have to pick the path itself: routes/clickup-actions.js looks
+ * each id up and hands DeliveryFlow engagements to the handlers exported here, so the
+ * portal's existing /clickup/* calls work for both — including one signed form that
+ * covers a ClickUp task and a DeliveryFlow engagement together.
+ *
  * DeliveryFlow is the system of record, so forwarding is the part that has to land:
  * when it fails the call answers 502 and the portal should retry. Every event is
  * safe to resend.
@@ -70,12 +75,16 @@ function requirePortalKey(req, res, next) {
 }
 
 // Forwarding is the job of every endpoint but extra-urls (which still alerts Slack),
-// so without a DeliveryFlow URL there is nothing useful to do.
-function requireForwarding(req, res, next) {
-  if (deliveryflow.isConfigured()) return next();
-  log.error('DeliveryFlow portal callback — DELIVERYFLOW_EVENTS_URL is not set', { path: req.path });
-  return res.status(503).json({ ok: false, error: 'DeliveryFlow forwarding is not configured' });
+// so without a DeliveryFlow URL there is nothing useful to do. Checked inside each
+// handler rather than as middleware, so /clickup/* can delegate to the handlers.
+function forwardingReady(res, name) {
+  if (deliveryflow.isConfigured()) return true;
+  log.error(`DeliveryFlow ${name} — DELIVERYFLOW_EVENTS_URL is not set`);
+  res.status(503).json({ ok: false, error: 'DeliveryFlow forwarding is not configured' });
+  return false;
 }
+
+const NOT_CONFIGURED = 'DeliveryFlow forwarding is not configured';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -191,6 +200,7 @@ async function forwardToEach(name, ids, event, dataFor, mirrorFor) {
   const results = [];
   for (const engagementId of ids) {
     try {
+      if (!deliveryflow.isConfigured()) throw new Error(NOT_CONFIGURED);
       const record = await store.findByEngagementId(engagementId);
       if (!record) throw new Error('unknown engagement');
       await deliveryflow.sendEvent(event, { engagementId, dealId: record.deal_id }, dataFor(record));
@@ -250,7 +260,8 @@ async function resolvePendingReport(record, startMs, endMs) {
   }
 }
 
-router.post('/schedule-task', requirePortalKey, requireForwarding, handle('schedule-task', async (req, res) => {
+const scheduleTask = handle('schedule-task', async (req, res) => {
+  if (!forwardingReady(res, 'schedule-task')) return;
   const body = req.body || {};
   const engagementId = singleId(body);
 
@@ -317,7 +328,8 @@ router.post('/schedule-task', requirePortalKey, requireForwarding, handle('sched
     }
 
     await mirror('schedule-task', engagementId, {
-      ...(booking ? { start_date: startMs, end_date: endMs, consultant } : {}),
+      // Read back by the availability cache, so the consultant shows as busy.
+      ...(booking ? { start_date: startMs, end_date: endMs, consultant, days: data.days } : {}),
       ...(deadlineMs != null ? { report_deadline: deadlineMs } : {}),
     });
 
@@ -343,11 +355,12 @@ router.post('/schedule-task', requirePortalKey, requireForwarding, handle('sched
   });
 
   if (status != null) res.status(status).json(payload);
-}));
+});
 
 // ─── POST /api/deliveryflow/test-files-uploaded ───────────────────────────────
 
-router.post('/test-files-uploaded', requirePortalKey, requireForwarding, handle('test-files-uploaded', async (req, res) => {
+const testFilesUploaded = handle('test-files-uploaded', async (req, res) => {
+  if (!forwardingReady(res, 'test-files-uploaded')) return;
   const body = req.body || {};
   const engagementId = singleId(body);
 
@@ -370,57 +383,65 @@ router.post('/test-files-uploaded', requirePortalKey, requireForwarding, handle(
   await mirror('test-files-uploaded', engagementId, { test_files_last_uploaded_at: data.submittedAt });
   log.info('DeliveryFlow test-files upload forwarded', { engagementId, client: record.client_name, ...data });
   res.status(200).json({ ok: true, engagementId, deliveryflow: 'sent' });
-}));
+});
 
 // ─── POST /api/deliveryflow/finalised-auth-form ───────────────────────────────
 // Unlike ClickUp, nothing is downloaded: DeliveryFlow gets the signed form's link,
 // rebuilt from the Drive file id so no caller-supplied text is passed on.
 
-router.post('/finalised-auth-form', requirePortalKey, requireForwarding, handle('finalised-auth-form', async (req, res) => {
-  const body = req.body || {};
-  const ids = idList(body);
-
-  const fileId = fileIdFromUrl(body.driveUrl);
+// Per-engagement results for a signed form. Exported for /clickup/finalised-auth-form,
+// which sends a form's DeliveryFlow engagements here and its ClickUp tasks to ClickUp.
+async function forwardFinalisedForm(ids, driveUrl) {
+  const fileId = fileIdFromUrl(driveUrl);
   if (!fileId) throw new BadRequest('driveUrl is not a valid Google Drive file link');
   const signedFormUrl = driveFileUrl(fileId);
-
-  const results = await forwardToEach(
+  return forwardToEach(
     'finalised-auth-form', ids, 'auth_form_finalised',
     () => ({ signedFormUrl, driveFileId: fileId }),
     () => ({ signed_form_url: signedFormUrl }),
   );
+}
 
+const finalisedAuthForm = handle('finalised-auth-form', async (req, res) => {
+  if (!forwardingReady(res, 'finalised-auth-form')) return;
+  const body = req.body || {};
+  const ids = idList(body);
+  const results = await forwardFinalisedForm(ids, body.driveUrl);
   const allFailed = results.every((r) => r.action === 'failed');
   res.status(allFailed ? 502 : 200).json({ ok: !allFailed, results });
-}));
+});
 
 // ─── POST /api/deliveryflow/merged-auth-form ──────────────────────────────────
 
-router.post('/merged-auth-form', requirePortalKey, requireForwarding, handle('merged-auth-form', async (req, res) => {
-  const body = req.body || {};
+// Per-engagement results for a merged form; exported for /clickup/merged-auth-form.
+async function forwardMergedForm(ids, body) {
   if (!body.mergedFormUrl) throw new BadRequest('mergedFormUrl is required');
   const mergedFormUrl = httpUrl(body.mergedFormUrl, 'mergedFormUrl');
-  const ids = idList(body);
-
   const mergedFormToken = body.mergedFormToken != null ? String(body.mergedFormToken).slice(0, 200) : null;
   const testTypes = Array.isArray(body.testTypes) ? body.testTypes.map((t) => String(t).slice(0, 100)).slice(0, 20) : [];
   const dayCount = body.dayCount != null && Number.isFinite(Number(body.dayCount)) ? Number(body.dayCount) : null;
 
-  const results = await forwardToEach(
+  return forwardToEach(
     'merged-auth-form', ids, 'merged_auth_form',
     () => ({ mergedFormUrl, mergedFormToken, testTypes, dayCount, engagementIds: ids }),
     () => ({ merged_form_url: mergedFormUrl, merged_form_token: mergedFormToken }),
   );
+}
 
+const mergedAuthForm = handle('merged-auth-form', async (req, res) => {
+  if (!forwardingReady(res, 'merged-auth-form')) return;
+  const body = req.body || {};
+  if (!body.mergedFormUrl) throw new BadRequest('mergedFormUrl is required');
+  const results = await forwardMergedForm(idList(body), body);
   const allFailed = results.every((r) => r.action === 'failed');
   res.status(allFailed ? 502 : 200).json({ ok: !allFailed, results });
-}));
+});
 
 // ─── POST /api/deliveryflow/extra-urls ────────────────────────────────────────
 // Slack and DeliveryFlow are independent, as ClickUp's comment and Slack are: one
 // failing never stops the other, and only both failing is a 502.
 
-router.post('/extra-urls', requirePortalKey, handle('extra-urls', async (req, res) => {
+const extraUrls = handle('extra-urls', async (req, res) => {
   const body = req.body || {};
   const clientName = typeof body.clientName === 'string' ? body.clientName.trim().slice(0, 200) : '';
   if (!clientName || !Array.isArray(body.urls) || body.urls.length === 0) {
@@ -473,6 +494,16 @@ router.post('/extra-urls', requirePortalKey, handle('extra-urls', async (req, re
 
   const anySuccess = deliveryflowResult === 'sent' || slack === 'sent';
   res.status(anySuccess ? 200 : 502).json({ ok: anySuccess, deliveryflow: deliveryflowResult, slack });
-}));
+});
+
+router.post('/schedule-task', requirePortalKey, scheduleTask);
+router.post('/test-files-uploaded', requirePortalKey, testFilesUploaded);
+router.post('/finalised-auth-form', requirePortalKey, finalisedAuthForm);
+router.post('/merged-auth-form', requirePortalKey, mergedAuthForm);
+router.post('/extra-urls', requirePortalKey, extraUrls);
 
 module.exports = router;
+// For routes/clickup-actions.js, which has already checked the portal's key.
+module.exports.handlers = { scheduleTask, testFilesUploaded, extraUrls };
+module.exports.forwardFinalisedForm = forwardFinalisedForm;
+module.exports.forwardMergedForm = forwardMergedForm;

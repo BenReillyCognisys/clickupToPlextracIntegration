@@ -94,8 +94,12 @@ async function countClientReports(clientId) {
 // when this report is the only one under it, so a shared client is never renamed out
 // from under its other reports. Shared / unverifiable cases post a Slack notice for
 // manual handling. Returns true if the Plextrac client was renamed.
-async function syncClientName(mapping, newClientName, taskName) {
-  const oldClientName = parseTaskName(mapping.task_name || '').client_name;
+//
+// Also used for DeliveryFlow engagements (routes/deliveryflow.js), which have no task
+// name to parse: they pass the old client name directly, and `source` labels the
+// Slack notices.
+async function syncClientName(mapping, newClientName, taskName, { oldClientName: previous, source = 'ClickUp' } = {}) {
+  const oldClientName = previous ?? parseTaskName(mapping.task_name || '').client_name;
   if (normalise(oldClientName) === normalise(newClientName)) {
     return false; // client portion unchanged — only the type (or nothing) changed
   }
@@ -124,7 +128,7 @@ async function syncClientName(mapping, newClientName, taskName) {
       existing_ids: otherWithNewName, verified: clientsWithNewName != null,
     });
     log.notify(
-      `ClickUp client renamed from "${oldClientName}" to "${newClientName}" for "${taskName}", but ` +
+      `${source} client renamed from "${oldClientName}" to "${newClientName}" for "${taskName}", but ` +
       `${reason} — not renaming automatically to avoid a duplicate. Please move the report to the ` +
       `correct client in Plextrac and tidy up the old one manually.`
     );
@@ -138,7 +142,7 @@ async function syncClientName(mapping, newClientName, taskName) {
       client_id: clientId, old_client: oldClientName, new_client: newClientName,
     });
     log.notify(
-      `ClickUp client renamed to "${newClientName}" for "${taskName}", but the Plextrac client ` +
+      `${source} client renamed to "${newClientName}" for "${taskName}", but the Plextrac client ` +
       `(id ${clientId}) rename was skipped — couldn't confirm it isn't shared. Please check it manually.`
     );
     return false;
@@ -149,7 +153,7 @@ async function syncClientName(mapping, newClientName, taskName) {
       client_id: clientId, reports: reportCount, old_client: oldClientName, new_client: newClientName,
     });
     log.notify(
-      `ClickUp client renamed from "${oldClientName}" to "${newClientName}" for "${taskName}", but the ` +
+      `${source} client renamed from "${oldClientName}" to "${newClientName}" for "${taskName}", but the ` +
       `Plextrac client (id ${clientId}) has ${reportCount} reports under it — not renaming automatically. ` +
       `Please update it in Plextrac if appropriate.`
     );
@@ -163,7 +167,7 @@ async function syncClientName(mapping, newClientName, taskName) {
       reason: err.message, client_id: clientId, new_client: newClientName,
     });
     log.notify(
-      `ClickUp client renamed to "${newClientName}" for "${taskName}" but the Plextrac client ` +
+      `${source} client renamed to "${newClientName}" for "${taskName}" but the Plextrac client ` +
       `(id ${clientId}) rename failed — please update it manually.`
     );
     return false;
@@ -172,7 +176,7 @@ async function syncClientName(mapping, newClientName, taskName) {
   log.info('Task rename — Plextrac client renamed', {
     client_id: clientId, old_client: oldClientName, new_client: newClientName, task: taskName,
   });
-  log.notify(`ClickUp client rename synced — Plextrac client renamed from "${oldClientName}" to "${newClientName}".`);
+  log.notify(`${source} client rename synced — Plextrac client renamed from "${oldClientName}" to "${newClientName}".`);
   return true;
 }
 

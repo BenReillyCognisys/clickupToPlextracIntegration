@@ -30,6 +30,10 @@
  *                                      Called on every upload, so re-ticking is a
  *                                      no-op.
  *
+ * Every endpoint also serves DeliveryFlow engagements: an id the DeliveryFlow
+ * auth-form endpoint set up is handed to routes/deliveryflow-portal.js (forwarded to
+ * DeliveryFlow) instead of ClickUp, so the portal needs no second set of URLs.
+ *
  * Idempotent-comment strategy (endpoint 1): the portal re-sends the same merged
  * form every time a new task for that client arrives, so this endpoint is called
  * repeatedly for the same set of tasks. To avoid stacking a fresh comment on each
@@ -58,6 +62,8 @@ const {
 const { downloadDriveFile, fileIdFromUrl } = require('../lib/google-drive');
 const { cache, getMembersMap, findUserInMap } = require('../lib/availability-cache');
 const { postMessage } = require('../lib/slack');
+const deliveryflowStore = require('../lib/deliveryflow-store');
+const deliveryflowPortal = require('./deliveryflow-portal');
 const log = require('../lib/logger');
 
 const router = express.Router();
@@ -83,6 +89,49 @@ function requireBreakServicesKey(req, res, next) {
 }
 
 router.use(requireBreakServicesKey);
+
+// ─── DeliveryFlow engagements ─────────────────────────────────────────────────
+// The portal keeps DeliveryFlow engagement ids in the same clickupTaskId(s) fields
+// as ClickUp task ids, and one client's form can carry both. Every endpoint below
+// therefore sorts the ids it is given: DeliveryFlow engagements (any id the
+// DeliveryFlow auth-form endpoint set up) go to routes/deliveryflow-portal.js, the
+// rest to ClickUp as before. So the portal keeps calling these paths for everything.
+
+// Splits ids into { deliveryflowIds, clickupIds }. A failed lookup sends every id to
+// ClickUp — what happened before DeliveryFlow existed — and is logged.
+async function splitBySource(ids) {
+  let known;
+  try {
+    known = await deliveryflowStore.findEngagementIds(ids);
+  } catch (err) {
+    log.error('Could not check for DeliveryFlow engagements — treating every id as a ClickUp task', {
+      ids, reason: err.message,
+    });
+    known = new Set();
+  }
+  return {
+    deliveryflowIds: ids.filter((id) => known.has(String(id))),
+    clickupIds: ids.filter((id) => !known.has(String(id))),
+  };
+}
+
+async function isDeliveryFlowId(id) {
+  if (!id) return false;
+  return (await splitBySource([String(id)])).deliveryflowIds.length > 0;
+}
+
+// Runs a DeliveryFlow forward for `ids` and returns its per-engagement results in the
+// shape the ClickUp results use. A throw (a malformed link, say) fails each id rather
+// than the request, so the form's ClickUp tasks are still updated.
+async function forwardToDeliveryFlow(ids, forward) {
+  try {
+    const results = await forward();
+    return results.map(({ engagementId, ...rest }) => ({ taskId: engagementId, destination: 'deliveryflow', ...rest }));
+  } catch (err) {
+    log.error('DeliveryFlow forward failed', { ids, reason: err.message });
+    return ids.map((taskId) => ({ taskId, destination: 'deliveryflow', action: 'failed', error: err.message }));
+  }
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -251,8 +300,15 @@ router.post('/merged-auth-form', async (req, res) => {
   const daysText = dayCount != null ? `, ~${dayCount} days` : '';
   const commentText = `${marker} Merged authorisation form for ${clientName} (${typesText}${daysText}): ${mergedFormUrl}`;
 
+  const { deliveryflowIds, clickupIds } = await splitBySource(clickupTaskIds.map(String));
   const results = [];
-  for (const taskId of clickupTaskIds) {
+  if (deliveryflowIds.length) {
+    results.push(...await forwardToDeliveryFlow(
+      deliveryflowIds, () => deliveryflowPortal.forwardMergedForm(deliveryflowIds, req.body),
+    ));
+  }
+
+  for (const taskId of clickupIds) {
     try {
       const comments = await listTaskComments(taskId);
       const existing = comments.find((c) => (c.comment_text || '').includes(marker));
@@ -299,6 +355,28 @@ router.post('/finalised-auth-form', async (req, res) => {
     return res.status(400).json({ error: 'driveUrl is not a valid Google Drive file link' });
   }
 
+  // DeliveryFlow engagements on the form get the signed form's link; nothing is
+  // downloaded for them. The ClickUp tasks carry on below.
+  const { deliveryflowIds, clickupIds } = await splitBySource(taskIds.map(String));
+  const results = deliveryflowIds.length
+    ? await forwardToDeliveryFlow(
+      deliveryflowIds, () => deliveryflowPortal.forwardFinalisedForm(deliveryflowIds, driveUrl),
+    )
+    : [];
+  const respond = () => {
+    const allFailed = results.every((r) => r.action === 'failed');
+    return res.status(allFailed ? 502 : 200).json({ ok: !allFailed, results });
+  };
+  if (!clickupIds.length) return respond();
+
+  // A failure before the per-task loop fails every ClickUp task. With no DeliveryFlow
+  // engagements on the form it keeps its original response.
+  const failClickup = (status, error) => {
+    if (!deliveryflowIds.length) return res.status(status).json({ ok: false, error });
+    results.push(...clickupIds.map((taskId) => ({ taskId, action: 'failed', error })));
+    return respond();
+  };
+
   // Fetch the finalised form from Drive once — every related task gets the same file.
   // A download failure is fatal here: there's nothing to attach.
   let file;
@@ -306,7 +384,7 @@ router.post('/finalised-auth-form', async (req, res) => {
     file = await downloadDriveFile(driveUrl);
   } catch (err) {
     log.error('Finalised auth-form download failed', { driveUrl, reason: err.message });
-    return res.status(502).json({ ok: false, error: `could not download auth form: ${err.message}` });
+    return failClickup(502, `could not download auth form: ${err.message}`);
   }
 
   const filename = authFormFilename(file.filename, clientName);
@@ -314,14 +392,13 @@ router.post('/finalised-auth-form', async (req, res) => {
   const workspaceId = process.env.CLICKUP_TEAM_ID;
   if (!workspaceId) {
     log.error('Finalised auth-form cannot upload — CLICKUP_TEAM_ID is not set');
-    return res.status(500).json({ ok: false, error: 'CLICKUP_TEAM_ID is not set' });
+    return failClickup(500, 'CLICKUP_TEAM_ID is not set');
   }
 
   // For each task: resolve the "Authorisation Forms" File custom field, upload the
   // file to that field (V3), then associate the resulting attachment with the task.
   // Uploading per task keeps each task's field pointing at its own attachment.
-  const results = [];
-  for (const taskId of taskIds) {
+  for (const taskId of clickupIds) {
     try {
       const task = await getTask(taskId);
       const fieldId = findCustomFieldId(task, AUTH_FORM_FILE_FIELD_NAME);
@@ -356,8 +433,7 @@ router.post('/finalised-auth-form', async (req, res) => {
     }
   }
 
-  const allFailed = results.every((r) => r.action === 'failed');
-  res.status(allFailed ? 502 : 200).json({ ok: !allFailed, results });
+  return respond();
 });
 
 // ─── POST /clickup/extra-urls ─────────────────────────────────────────────────
@@ -373,6 +449,9 @@ router.post('/extra-urls', async (req, res) => {
     urls,
     urlCount,
   } = req.body || {};
+
+  // A DeliveryFlow engagement's form: Slack alert plus DeliveryFlow, no ClickUp comment.
+  if (await isDeliveryFlowId(clickupTaskId)) return deliveryflowPortal.handlers.extraUrls(req, res);
 
   if (!clientName || !Array.isArray(urls) || urls.length === 0) {
     return res.status(400).json({ error: 'clientName and a non-empty urls array are required' });
@@ -478,6 +557,9 @@ router.post('/schedule-task', async (req, res) => {
     reportDeadline,
     note,
   } = req.body || {};
+
+  // A DeliveryFlow engagement: the booking goes to DeliveryFlow instead of a task.
+  if (await isDeliveryFlowId(clickupTaskId)) return deliveryflowPortal.handlers.scheduleTask(req, res);
 
   const hasDates = startDate != null && endDate != null;
   if (!clickupTaskId || (!hasDates && !reportDeadline)) {
@@ -681,6 +763,9 @@ router.post('/test-files-uploaded', async (req, res) => {
   if (!clickupTaskId) {
     return res.status(400).json({ error: 'clickupTaskId is required' });
   }
+
+  // A DeliveryFlow engagement: DeliveryFlow records the upload instead.
+  if (await isDeliveryFlowId(clickupTaskId)) return deliveryflowPortal.handlers.testFilesUploaded(req, res);
 
   // The task read resolves the completion box (custom field or checklist item) and
   // tells us whether it's already ticked. Fatal — without it there's nothing to act on.

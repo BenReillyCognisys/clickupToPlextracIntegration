@@ -14,6 +14,9 @@ const clickupApi = require('../lib/clickup-api');
 const slack      = require('../lib/slack');
 const availability = require('../lib/availability-cache');
 const googleDrive  = require('../lib/google-drive');
+// No DeliveryFlow engagements here: every id is a ClickUp task (routing to
+// DeliveryFlow is covered in tests/deliveryflow-portal.test.js).
+require('../lib/deliveryflow-store').findEngagementIds = async () => new Set();
 
 // In-memory comment store keyed by task id; a task id of 'FAIL' throws.
 const comments = {};   // taskId -> [{ id, comment_text }]
