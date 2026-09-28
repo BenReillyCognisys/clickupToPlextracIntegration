@@ -483,6 +483,111 @@ router.post('/auth-form', requireDeliveryFlowKey, async (req, res) => {
   }
 });
 
+// ─── POST /api/deliveryflow/auth-form/update ──────────────────────────────────
+// DeliveryFlow's test selector moved an engagement to a different testing type. The
+// DeliveryFlow counterpart of a renamed ClickUp task (pipeline/task-rename.js): the
+// portal re-scopes the form (the old type's element out, the new one in), the
+// Plextrac report is renamed for the new type — or created, if the old type had
+// none — and a signed form is never rewritten (Slack is asked to reissue it).
+//
+//   { engagementId, testType, previousTestType?, engagementCost?, clientName?, dealId? }
+//
+// Only the engagement and the new type are needed; everything else defaults to what
+// break.services recorded when the engagement was set up. previousTestType is what
+// DeliveryFlow had selected before. What is actually on the form, as recorded here,
+// wins over it when the two disagree; it matters for a form a PM linked by hand,
+// whose type break.services never saw. The engagement must already have been set up
+// (POST /auth-form) or linked in the portal; otherwise 404 — call /auth-form.
+
+const toYmd = (ms) => (ms == null ? null : new Date(Number(ms)).toISOString().slice(0, 10));
+
+router.post('/auth-form/update', requireDeliveryFlowKey, async (req, res) => {
+  const body = req.body || {};
+  let engagementId;
+  try {
+    engagementId = requiredId(body, 'engagementId');
+    if (typeof body.testType !== 'string' || !body.testType.trim()) {
+      throw new ValidationError('testType', 'testType is required');
+    }
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: err.message, field: err.field });
+  }
+
+  if (!process.env.SECURE_PORTAL_URL) {
+    log.error('DeliveryFlow auth-form update — SECURE_PORTAL_URL is not set', { engagementId });
+    return res.status(503).json({ ok: false, error: 'auth-form generation is not configured' });
+  }
+
+  try {
+    const { status, body: out } = await withTaskLock(`deliveryflow:${engagementId}`, async () => {
+      let existing;
+      try {
+        existing = await store.findByEngagementId(engagementId);
+      } catch (err) {
+        log.error('DeliveryFlow auth-form update — could not read the engagement record', { engagementId, reason: err.message });
+        return { status: 500, body: { ok: false, error: 'could not read the engagement record; safe to retry' } };
+      }
+      if (!existing) {
+        return {
+          status: 404,
+          body: { ok: false, error: 'unknown_engagement', engagementId, detail: 'No auth form has been generated for this engagement yet — call /api/deliveryflow/auth-form.' },
+        };
+      }
+
+      // The engagement as recorded, with the new type (and anything else sent) on top.
+      let input;
+      try {
+        input = parseAuthFormRequest({
+          engagementId,
+          dealId: body.dealId ?? existing.deal_id,
+          clientName: body.clientName ?? existing.client_name ?? existing.form_client_name,
+          testType: body.testType,
+          engagementCost: body.engagementCost ?? existing.engagement_cost,
+          scope: existing.scope ?? null,
+          startDate: toYmd(existing.start_date),
+          endDate: toYmd(existing.end_date),
+        });
+      } catch (err) {
+        if (err instanceof ValidationError) {
+          return { status: 400, body: { ok: false, error: err.message, field: err.field } };
+        }
+        throw err;
+      }
+
+      // The type the form was generated for: our record, else what DeliveryFlow says.
+      const hinted = typeof body.previousTestType === 'string'
+        ? KNOWN_TYPES.find((t) => t.testType.toLowerCase() === body.previousTestType.trim().toLowerCase())?.testType
+          ?? body.previousTestType.trim()
+        : null;
+      const onRecord = existing.form_test_type ?? existing.test_type ?? null;
+      if (hinted && onRecord && hinted !== onRecord) {
+        log.warn('DeliveryFlow auth-form update — previousTestType differs from the recorded form; using the record', {
+          engagementId, sent: hinted, recorded: onRecord,
+        });
+      }
+      const previousTestType = onRecord ?? hinted;
+
+      log.info('DeliveryFlow auth-form update — testing type change', {
+        engagementId, from: previousTestType, to: input.testType,
+      });
+      const result = await setUpEngagement(input, { previousTestType, rescopeLinkedForm: true });
+      if (result.body?.ok) {
+        result.body = {
+          ...result.body,
+          previousTestType,
+          changed: previousTestType !== input.testType,
+          formRescope: result.body.formRescope ?? 'not_needed',
+        };
+      }
+      return result;
+    });
+    res.status(status).json(out);
+  } catch (err) {
+    log.error('DeliveryFlow auth-form update — unexpected failure', { engagementId, reason: err.message });
+    res.status(500).json({ ok: false, error: 'unexpected error' });
+  }
+});
+
 /**
  * Phases 2–3: the engagement's Plextrac client and report. Returns
  * { ok: true, plextrac } or { ok: false, status, body }. `plextrac.status`:
@@ -587,7 +692,8 @@ async function ensurePlextracReport(input, existing) {
   return { ok: true, plextrac };
 }
 
-async function setUpEngagement(input) {
+// `opts` is passed through to requestAuthForm (see there); /auth-form sends none.
+async function setUpEngagement(input, opts = {}) {
   const { engagementId, dealId, clientName, testType } = input;
 
   // ── Deal check ────────────────────────────────────────────────────────────
@@ -645,7 +751,7 @@ async function setUpEngagement(input) {
   }
 
   // ── Phase 4: authorisation form ───────────────────────────────────────────
-  const authForm = await requestAuthForm(input, plextrac, existing);
+  const authForm = await requestAuthForm(input, plextrac, existing, opts);
 
   // ── Phase 5: announce a report we actually created ────────────────────────
   // Same notice as the ClickUp pipeline, sent whether or not the form came back —
@@ -686,7 +792,8 @@ async function setUpEngagement(input) {
       // decided, which may differ from the one sent.
       testType,
       ...(input.blackBox ? { blackBox: input.blackBox } : {}),
-      ...(changes.length ? { changes, formRescope: authForm.rescope } : {}),
+      ...(changes.length ? { changes } : {}),
+      ...(changes.length || authForm.rescope !== 'not_needed' ? { formRescope: authForm.rescope } : {}),
       plextrac,
     },
   };
@@ -697,13 +804,18 @@ async function setUpEngagement(input) {
 // { ok: false, status, error, stage, code? }. Retrying after a failure is safe: the
 // report is already linked, and the portal hands back the same form for the same
 // engagement.
-async function requestAuthForm(input, plextrac, existing) {
+//
+// opts (from POST /auth-form/update — DeliveryFlow changed the testing type):
+//   previousTestType  — the type DeliveryFlow says the engagement had. Used when our
+//                       record doesn't know what's on the form (a form a PM linked).
+//   rescopeLinkedForm — re-scope a PM-linked form too, rather than leave it as it is.
+async function requestAuthForm(input, plextrac, existing, opts = {}) {
   const { engagementId, dealId } = input;
 
   // What the current form was generated for (see lib/deliveryflow-store.js).
   const previous = {
     clientName: existing?.form_client_name ?? existing?.client_name,
-    testType: existing?.form_test_type ?? existing?.test_type,
+    testType: existing?.form_test_type ?? opts.previousTestType ?? existing?.test_type,
   };
   const needsRescope = Boolean(existing?.form_url)
     && (!sameText(previous.clientName, input.clientName) || previous.testType !== input.testType);
@@ -713,8 +825,9 @@ async function requestAuthForm(input, plextrac, existing) {
   let formFor = { formClientName: input.clientName, formTestType: input.testType };
 
   // A PM linked this engagement to a form in the portal (see /link-auth-form). That
-  // form is the engagement's: reuse it rather than generate or re-scope another.
-  if (existing?.form_source === 'portal' && existing.form_url) {
+  // form is the engagement's: reuse it rather than generate another — and only
+  // re-scope it when DeliveryFlow explicitly changed the testing type.
+  if (existing?.form_source === 'portal' && existing.form_url && !(opts.rescopeLinkedForm && needsRescope)) {
     result = { ok: true, created: false, formUrl: existing.form_url, formToken: existing.form_token };
     formFor = { formClientName: existing.form_client_name ?? input.clientName, formTestType: existing.form_test_type ?? null };
   } else if (needsRescope) {

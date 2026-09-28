@@ -724,6 +724,108 @@ const valid = (over = {}) => ({
     }
   });
 
+  // ── POST /auth-form/update: the test selector changed ─────────────────────
+  const U = '/api/deliveryflow/auth-form/update';
+  const update = (b) => request(U, { headers: KEY, body: b });
+
+  await test('update: 400 without the new type, 404 for an engagement never set up, 401 without the key', async () => {
+    reset();
+    assert.strictEqual((await update({ engagementId: 'eng-up1' })).status, 400);
+    const r = await update({ engagementId: 'nope-1', testType: 'Internal' });
+    assert.strictEqual(r.status, 404);
+    assert.strictEqual(r.json.error, 'unknown_engagement');
+    assert.strictEqual((await request(U, { body: { engagementId: 'eng-up1', testType: 'Internal' } })).status, 401);
+  });
+
+  await test('update: the old type\'s element is swapped for the new one and the report renamed', async () => {
+    reset();
+    await setUp({ engagementId: 'eng-up1', clientName: 'Update Ltd', testType: 'External' });
+    reset();
+    const r = await update({ engagementId: 'eng-up1', previousTestType: 'External', testType: 'Internal' });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.changed, true);
+    assert.strictEqual(r.json.previousTestType, 'External');
+    assert.strictEqual(r.json.testType, 'Internal');
+    assert.strictEqual(r.json.formRescope, 'rescoped');
+    assert.strictEqual(updateCalls[0].previousTestType, 'External');
+    assert.strictEqual(updateCalls[0].testType, 'Internal');
+    assert.strictEqual(updateCalls[0].clientName, 'Update Ltd', 'the rest comes from the record');
+    assert.strictEqual(r.json.plextrac.reportName, 'Internal | October 2026');
+    assert.strictEqual(records['eng-up1'].test_type, 'Internal');
+    assert.strictEqual(records['eng-up1'].deal_id, '123456789');
+    assert.strictEqual(records['eng-up1'].start_date, Date.parse('2026-10-05T00:00:00Z'), 'dates kept');
+  });
+
+  await test('update: the same type again changes nothing', async () => {
+    reset();
+    const r = await update({ engagementId: 'eng-up1', previousTestType: 'Internal', testType: 'Internal' });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.changed, false);
+    assert.strictEqual(r.json.formRescope, 'not_needed');
+    assert.strictEqual(updateCalls.length + reportUpdates.length, 0);
+  });
+
+  await test('update: what is on the form wins over a stale previousTestType', async () => {
+    reset();
+    const r = await update({ engagementId: 'eng-up1', previousTestType: 'Wireless', testType: 'External' });
+    assert.strictEqual(r.json.previousTestType, 'Internal');
+    assert.strictEqual(updateCalls[0].previousTestType, 'Internal');
+  });
+
+  await test('update: a signed form is not rewritten; the type still changes and Slack is told', async () => {
+    reset();
+    updateMode = 'signed';
+    const r = await update({ engagementId: 'eng-up1', previousTestType: 'External', testType: 'Wireless' });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.formRescope, 'refused');
+    assert.ok(notices.some((n) => n.includes('already been signed')));
+    assert.strictEqual(records['eng-up1'].test_type, 'Wireless');
+    assert.strictEqual(records['eng-up1'].form_test_type, 'External');
+  });
+
+  await test('update: from VMaaS to a pentest creates the Plextrac report the new type needs', async () => {
+    reset();
+    await setUp({ engagementId: 'eng-up-vm', clientName: 'Scan Ltd', testType: 'VMaaS' });
+    reset();
+    const r = await update({ engagementId: 'eng-up-vm', previousTestType: 'VMaaS', testType: 'External' });
+    assert.strictEqual(r.status, 201, 'the report is new');
+    assert.strictEqual(r.json.plextrac.status, 'created');
+    assert.strictEqual(r.json.plextrac.reportName, 'External | October 2026');
+    assert.strictEqual(r.json.formRescope, 'rescoped');
+  });
+
+  await test('update: a Black Box choice is still tiered by the engagement cost', async () => {
+    reset();
+    await setUp({ engagementId: 'eng-up-bb', clientName: 'Tier Ltd', testType: 'External', engagementCost: 0 });
+    reset();
+    const r = await update({ engagementId: 'eng-up-bb', previousTestType: 'External', testType: 'Black Box' });
+    assert.strictEqual(r.json.testType, 'Free Black Box Web App', 'recorded cost of £0');
+    assert.strictEqual(updateCalls[0].testType, 'Free Black Box Web App');
+  });
+
+  await test('update: a form a PM linked in the portal is re-scoped, using previousTestType', async () => {
+    reset();
+    records['eng-up-pm'] = {
+      engagement_id: 'eng-up-pm', form_url: 'https://portal.test/f/pm-form-2', form_token: 'pm2',
+      form_source: 'portal', form_client_name: 'Hand Made Ltd',
+    };
+    const r = await update({
+      engagementId: 'eng-up-pm', dealId: 'deal-77', previousTestType: 'Paid Black Box Pentest', testType: 'Grey Box Web App',
+    });
+    assert.strictEqual(r.json.formRescope, 'rescoped');
+    assert.strictEqual(updateCalls[0].previousTestType, 'Paid Black Box Pentest');
+    assert.strictEqual(updateCalls[0].clientName, 'Hand Made Ltd');
+    assert.strictEqual(portalCalls.length, 0, 'no second form');
+  });
+
+  await test('update: a PM-linked engagement with no deal on record needs dealId', async () => {
+    reset();
+    records['eng-up-nodeal'] = { engagement_id: 'eng-up-nodeal', form_url: 'https://portal.test/f/x', form_source: 'portal', form_client_name: 'X Ltd' };
+    const r = await update({ engagementId: 'eng-up-nodeal', testType: 'Internal' });
+    assert.strictEqual(r.status, 400);
+    assert.strictEqual(r.json.field, 'dealId');
+  });
+
   await test('an engagement a PM linked to a portal form keeps that form', async () => {
     reset();
     records['eng-linked'] = {
