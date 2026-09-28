@@ -238,7 +238,9 @@ async function resolvePendingReport(record, startMs, endMs) {
   try {
     const report = await api.getReport(clientId, reportId);
     const currentName = report?.name ?? null;
-    const resolvedName = buildReportName(record.test_type, startMs, record.scope);
+    // plextrac_type names the report (config/portal-test-types.js); records written
+    // before it existed only have test_type.
+    const resolvedName = buildReportName(record.plextrac_type ?? record.test_type, startMs, record.scope);
     const nameChanged = currentName == null || currentName.toLowerCase() !== resolvedName.toLowerCase();
 
     const payload = { start_date: epochToISO(startMs), end_date: epochToISO(endMs) };
@@ -288,7 +290,11 @@ const scheduleTask = handle('schedule-task', async (req, res) => {
     const record = await loadEngagement(res, 'schedule-task', engagementId);
     if (!record) return { status: null };
 
-    const freeBlackBox = record.test_type === FREE_TYPE || FREE_BLACK_BOX_RE.test(String(body.testType || ''));
+    // The record holds the portal's name ("Free Black Box Web App") or, from older
+    // callers, break.services' ("Free Black Box Test"); the portal's testType too.
+    const freeBlackBox = record.test_type === FREE_TYPE
+      || FREE_BLACK_BOX_RE.test(String(record.test_type || ''))
+      || FREE_BLACK_BOX_RE.test(String(body.testType || ''));
 
     // A Free Black Box is a half-day: one day, whatever end date was sent.
     if (hasDates && freeBlackBox && endMs !== startMs) {
@@ -320,7 +326,10 @@ const scheduleTask = handle('schedule-task', async (req, res) => {
       endDate: booking ? toYmd(endMs) : null,
       consultant: booking ? consultant : null,
       reportDeadline: toYmd(deadlineMs),
-      days: booking && body.days != null && Number.isFinite(Number(body.days)) ? Number(body.days) : null,
+      // The engagement's length, which the portal sizes from the submitted scope (a
+      // Paid Black Box: 1 URL → 0.5 days, 2 → 1, more → 2). Sent even when no slot was
+      // booked, so DeliveryFlow always has the day count.
+      days: body.days != null && Number.isFinite(Number(body.days)) && Number(body.days) > 0 ? Number(body.days) : null,
       testType: typeof body.testType === 'string' ? body.testType.slice(0, 100) : null,
       clientNote: note,
     };

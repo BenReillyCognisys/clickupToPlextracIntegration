@@ -108,6 +108,7 @@ store.saveReport = async (rec) => {
   records[rec.engagementId] = {
     ...records[rec.engagementId], engagement_id: rec.engagementId, deal_id: rec.dealId,
     client_name: rec.clientName, test_type: rec.testType, scope: rec.scope ?? null,
+    plextrac_type: rec.plextracType ?? rec.testType,
     plextrac_client_id: rec.plextracClientId, plextrac_report_id: rec.plextracReportId,
     plextrac_report_cuid: rec.plextracReportCuid, report_name: rec.reportName,
     start_date_pending: rec.startDatePending,
@@ -126,6 +127,7 @@ store.saveAuthForm = async (rec) => {
     ...(rec.startDate != null ? { start_date: rec.startDate } : {}),
     ...(rec.endDate != null ? { end_date: rec.endDate } : {}),
     ...(rec.consultantEmails?.length ? { consultant_emails: rec.consultantEmails } : {}),
+    ...(rec.engagementCost != null ? { engagement_cost: rec.engagementCost } : {}),
     ...(rec.testFilesUrl ? { test_files_url: rec.testFilesUrl, test_files_token: rec.testFilesToken ?? null } : {}),
   };
 };
@@ -233,11 +235,12 @@ const valid = (over = {}) => ({
     });
   }
 
-  await test('400 on an unknown testType, listing the allowed values', async () => {
-    const r = await request(PATH, { headers: KEY, body: valid({ testType: 'Wireless' }) });
+  await test('400 on an unknown testType, listing the portal\'s types', async () => {
+    const r = await request(PATH, { headers: KEY, body: valid({ testType: 'Underwater Basket Weaving' }) });
     assert.strictEqual(r.status, 400);
     assert.strictEqual(r.json.field, 'testType');
-    assert.ok(r.json.error.includes('Black Box'));
+    assert.ok(r.json.error.includes('Paid Black Box Pentest'));
+    assert.ok(r.json.error.includes('Code Review - White Box'));
     assert.ok(r.json.error.includes('VMaaS'));
   });
 
@@ -616,6 +619,109 @@ const valid = (over = {}) => ({
     assert.strictEqual(r.status, 422);
     assert.strictEqual(r.json.error, 'test_type_not_on_auth_form');
     assert.strictEqual(r.json.stage, 'auth_form');
+  });
+
+  // ── The portal's own testing types ────────────────────────────────────────
+  await test('a portal type goes to the portal exactly and names the report the ClickUp way', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-pt1', clientName: 'Portal Types Ltd', testType: 'paid black box pentest' });
+    assert.strictEqual(r.status, 201);
+    assert.strictEqual(portalCalls[0].testType, 'Paid Black Box Pentest', 'exact portal name, canonical casing');
+    assert.strictEqual(reportCalls[0].testingType, 'Black Box', 'template chosen from the Plextrac type');
+    assert.strictEqual(r.json.plextrac.reportName, 'Black Box | October 2026');
+    assert.strictEqual(records['eng-pt1'].test_type, 'Paid Black Box Pentest');
+    assert.strictEqual(records['eng-pt1'].plextrac_type, 'Black Box');
+  });
+
+  await test('a portal type break.services has no name for uses the portal name for the report', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-pt2', clientName: 'Portal Types Ltd', testType: 'Red Team' });
+    assert.strictEqual(r.status, 201);
+    assert.strictEqual(portalCalls[0].testType, 'Red Team');
+    assert.strictEqual(r.json.plextrac.reportName, 'Red Team | October 2026');
+  });
+
+  await test('Signature Only and VMaaS Web App Scanning get a form but no Plextrac report', async () => {
+    for (const [id, type] of [['eng-sig', 'Signature Only'], ['eng-vws', 'VMaaS Web App Scanning']]) {
+      reset();
+      const r = await setUp({ engagementId: id, clientName: 'No Report Ltd', testType: type });
+      assert.strictEqual(r.status, 201, type);
+      assert.strictEqual(r.json.plextrac.status, 'skipped', type);
+      assert.strictEqual(reportCalls.length, 0, type);
+      assert.strictEqual(portalCalls[0].testType, type);
+    }
+  });
+
+  await test('changing between portal types renames the report from the Plextrac types', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-pt1', clientName: 'Portal Types Ltd', testType: 'Grey Box Web App' });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(updateCalls[0].previousTestType, 'Paid Black Box Pentest');
+    assert.strictEqual(updateCalls[0].testType, 'Grey Box Web App');
+    assert.strictEqual(r.json.plextrac.reportName, 'Grey Box | October 2026');
+    assert.strictEqual(records['eng-pt1'].plextrac_type, 'Grey Box');
+  });
+
+  // ── Free or paid Black Box, from engagementCost ───────────────────────────
+  await test('a £0 Black Box is the Free Black Box Web App', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-bb0', clientName: 'Cost Ltd', testType: 'Black Box', engagementCost: 0 });
+    assert.strictEqual(r.status, 201);
+    assert.strictEqual(r.json.testType, 'Free Black Box Web App');
+    assert.deepStrictEqual(r.json.blackBox, { tier: 'free', decidedBy: 'engagementCost', requestedTestType: 'Black Box' });
+    assert.strictEqual(portalCalls[0].testType, 'Free Black Box Web App');
+    assert.strictEqual(r.json.plextrac.reportName, 'Free Black Box Test | October 2026');
+    assert.strictEqual(records['eng-bb0'].engagement_cost, 0);
+    assert.strictEqual(notices.filter((n) => n.includes('Please check the engagement')).length, 0, 'nothing contradicted');
+  });
+
+  await test('a priced Black Box is the Paid Black Box Pentest (cost as a £ string too)', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-bb1', clientName: 'Cost Ltd', testType: 'Black Box', engagementCost: '£1,250.50' });
+    assert.strictEqual(r.json.testType, 'Paid Black Box Pentest');
+    assert.strictEqual(r.json.blackBox.tier, 'paid');
+    assert.strictEqual(r.json.plextrac.reportName, 'Black Box | October 2026');
+    assert.strictEqual(records['eng-bb1'].engagement_cost, 1250.5);
+  });
+
+  await test('the cost overrides a contradicting tier, and Slack is asked to check it', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-bb2', clientName: 'Mislabelled Ltd', testType: 'Paid Black Box Pentest', engagementCost: 0 });
+    assert.strictEqual(r.json.testType, 'Free Black Box Web App');
+    assert.ok(notices.some((n) => n.includes('sent "Paid Black Box Pentest" for Mislabelled Ltd') && n.includes('£0')));
+  });
+
+  await test('without a cost the Black Box name sent is used as it is', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-bb3', clientName: 'Cost Ltd', testType: 'Free Black Box Web App' });
+    assert.strictEqual(r.json.testType, 'Free Black Box Web App');
+    assert.deepStrictEqual(r.json.blackBox, { tier: null, decidedBy: 'testType', requestedTestType: 'Free Black Box Web App' });
+  });
+
+  await test('a price change on a repeat call moves the engagement to the other tier', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-bb0', clientName: 'Cost Ltd', testType: 'Black Box', engagementCost: 2400 });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.testType, 'Paid Black Box Pentest');
+    assert.deepStrictEqual(r.json.changes, [{ field: 'testType', from: 'Free Black Box Web App', to: 'Paid Black Box Pentest' }]);
+    assert.strictEqual(updateCalls[0].previousTestType, 'Free Black Box Web App');
+    assert.strictEqual(r.json.plextrac.reportName, 'Black Box | October 2026');
+  });
+
+  await test('other testing types keep their type and just record the cost', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-ext-c', clientName: 'Cost Ltd', testType: 'External', engagementCost: 3000 });
+    assert.strictEqual(r.json.testType, 'External');
+    assert.strictEqual(r.json.blackBox, undefined);
+    assert.strictEqual(records['eng-ext-c'].engagement_cost, 3000);
+  });
+
+  await test('400 on a negative or non-numeric cost', async () => {
+    for (const engagementCost of [-5, 'free', '12abc']) {
+      const r = await setUp({ engagementId: 'eng-badcost', testType: 'Black Box', engagementCost });
+      assert.strictEqual(r.status, 400, String(engagementCost));
+      assert.strictEqual(r.json.field, 'engagementCost');
+    }
   });
 
   await test('an engagement a PM linked to a portal form keeps that form', async () => {

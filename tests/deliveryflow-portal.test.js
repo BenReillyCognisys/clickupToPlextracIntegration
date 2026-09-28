@@ -285,6 +285,23 @@ const S = '/api/deliveryflow/schedule-task';
     assert.strictEqual(r.json.plextrac, 'no_report');
   });
 
+  await test('schedule-task: a Paid Black Box half-day is forwarded as 0.5 days and counts half a day', async () => {
+    reset();
+    const r = await request(S, {
+      body: { engagementId: 'eng-2', startDate: '2026-10-05', endDate: '2026-10-05', testType: 'Paid Black Box Pentest', days: 0.5 },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(events[0].data.days, 0.5);
+    assert.strictEqual(records['eng-2'].days, 0.5, 'the availability cache reads this');
+  });
+
+  await test('schedule-task: the day count is forwarded even when no slot was booked', async () => {
+    reset();
+    await request(S, { body: { engagementId: 'eng-2', reportDeadline: '2026-11-01', testType: 'Paid Black Box Pentest', days: 2 } });
+    assert.strictEqual(events[0].data.startDate, null);
+    assert.strictEqual(events[0].data.days, 2);
+  });
+
   await test('schedule-task: a deadline on its own is forwarded with no dates', async () => {
     reset();
     const r = await request(S, { body: { engagementId: 'eng-1', reportDeadline: '2026-11-01', consultant: 'Jane' } });
@@ -320,6 +337,19 @@ const S = '/api/deliveryflow/schedule-task';
     assert.strictEqual(events[0].data.startDate, null, 'the booking is not resent');
     assert.strictEqual(events[0].data.reportDeadline, '2026-10-30');
     assert.strictEqual(records['eng-free'].start_date, Date.parse('2026-10-05T00:00:00Z'));
+  });
+
+  await test('schedule-task: a portal-named Free Black Box is one day, and the report is named from its Plextrac type', async () => {
+    reset();
+    records['eng-pfree'] = {
+      engagement_id: 'eng-pfree', deal_id: 'deal-5', client_name: 'Gamma', test_type: 'Free Black Box Web App',
+      plextrac_type: 'Free Black Box Test', plextrac_client_id: 9, plextrac_report_id: 503, start_date_pending: true,
+    };
+    reports[503] = 'Free Black Box Test | September 2026';
+    const r = await request(S, { body: { engagementId: 'eng-pfree', startDate: '2026-10-05', endDate: '2026-10-06' } });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(events[0].data.endDate, '2026-10-05');
+    assert.strictEqual(reportUpdates[0].payload.name, 'Free Black Box Test | October 2026');
   });
 
   await test('schedule-task: 502 when DeliveryFlow fails, and nothing is recorded or renamed', async () => {

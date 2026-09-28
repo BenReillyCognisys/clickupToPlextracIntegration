@@ -62,6 +62,7 @@ const plextracApi = require('../lib/plextrac-api');
 const store = require('../lib/deliveryflow-store');
 const { withTaskLock } = require('../lib/task-lock');
 const TESTING_TYPES = require('../config/testing-types');
+const PORTAL_TEST_TYPES = require('../config/portal-test-types');
 const BLACKLIST = require('../config/blacklist');
 const { FREE_TYPE } = require('../config/free-markers');
 const { VMAAS_TEST_TYPE } = require('../pipeline/vmaas');
@@ -92,9 +93,21 @@ function requireDeliveryFlowKey(req, res, next) {
 
 // ─── Validation ───────────────────────────────────────────────────────────────
 
-// Every testing type the portal has a form element for: the canonical pentest
-// types, the free half-day Black Box, and VMaaS.
-const ALLOWED_TEST_TYPES = [...TESTING_TYPES.map((t) => t.type), FREE_TYPE, VMAAS_TEST_TYPE];
+// DeliveryFlow sends the portal's own testing types (config/portal-test-types.js):
+// passed to the portal exactly, with plextracType naming the report and choosing its
+// template. The break.services names that ClickUp tasks resolve to (the canonical
+// pentest types, the free half-day Black Box, VMaaS) are still accepted for callers
+// built against them; those reach the portal through its fuzzy matcher, as ClickUp's
+// do.
+const PORTAL_TYPES = PORTAL_TEST_TYPES.map((t) => ({
+  testType: t.name,
+  plextracType: t.plextracType || t.name,
+  skipPlextrac: Boolean(t.skipPlextrac),
+}));
+const LEGACY_TYPES = [...TESTING_TYPES.map((t) => t.type), FREE_TYPE, VMAAS_TEST_TYPE]
+  .filter((name) => !PORTAL_TYPES.some((p) => p.testType === name))
+  .map((name) => ({ testType: name, plextracType: name, skipPlextrac: name === VMAAS_TEST_TYPE }));
+const KNOWN_TYPES = [...PORTAL_TYPES, ...LEGACY_TYPES];
 
 // Ids are opaque to us but end up in a Mongo key and the portal's form key, so keep
 // them to URL-safe characters (covers UUIDs and numeric CRM ids).
@@ -157,6 +170,42 @@ function optionalUrl(body, field) {
   return url.toString();
 }
 
+// The engagement's price in pounds, as DeliveryFlow holds it: a number, or a numeric
+// string (commas and a leading £ are tolerated). null when not sent.
+const MAX_COST = 10_000_000;
+function optionalCost(body, field) {
+  const raw = body[field];
+  if (raw == null || raw === '') return null;
+  const cleaned = typeof raw === 'string' ? raw.trim().replace(/^£/, '').replace(/,/g, '') : raw;
+  const n = typeof cleaned === 'number' ? cleaned : (/^\d+(\.\d+)?$/.test(cleaned) ? Number(cleaned) : NaN);
+  if (!Number.isFinite(n) || n < 0 || n > MAX_COST) {
+    throw new ValidationError(field, `${field} must be a number of pounds, 0 or more`);
+  }
+  return n;
+}
+
+// ── Free or paid Black Box ─────────────────────────────────────────────────────
+// The two tiers are different auth-form elements (a free half-day on one URL, or a
+// paid test sized by the client's scope) and are booked and reported differently,
+// so picking the wrong one is costly. The engagement's price settles it: £0 is the
+// Free Black Box, anything more is the Paid Black Box Pentest. Any Black Box name
+// DeliveryFlow sends — either tier, or plain "Black Box" — is resolved this way when
+// engagementCost is present; without it the name sent is used as it is.
+const FREE_BLACK_BOX = 'Free Black Box Web App';
+const PAID_BLACK_BOX = 'Paid Black Box Pentest';
+const BLACK_BOX_NAMES = new Set([FREE_BLACK_BOX, PAID_BLACK_BOX, 'Black Box', FREE_TYPE].map((n) => n.toLowerCase()));
+
+function resolveBlackBoxTier(known, engagementCost) {
+  if (!BLACK_BOX_NAMES.has(known.testType.toLowerCase())) return { known, blackBox: null };
+  if (engagementCost == null) return { known, blackBox: { tier: null, decidedBy: 'testType', requestedTestType: known.testType } };
+  const tier = engagementCost > 0 ? 'paid' : 'free';
+  const name = tier === 'paid' ? PAID_BLACK_BOX : FREE_BLACK_BOX;
+  return {
+    known: PORTAL_TYPES.find((t) => t.testType === name),
+    blackBox: { tier, decidedBy: 'engagementCost', requestedTestType: known.testType },
+  };
+}
+
 // The consultants delivering the engagement — they become the Plextrac report's
 // operators, as a ClickUp task's assignees do. Plextrac validates the addresses
 // itself; this only rejects values that aren't email-shaped at all.
@@ -185,13 +234,18 @@ function parseAuthFormRequest(body) {
 
   const wanted = typeof body.testType === 'string' ? body.testType.trim().toLowerCase() : '';
   if (!wanted) throw new ValidationError('testType', 'testType is required');
-  const testType = ALLOWED_TEST_TYPES.find((t) => t.toLowerCase() === wanted);
-  if (!testType) {
+  const requested = KNOWN_TYPES.find((t) => t.testType.toLowerCase() === wanted);
+  if (!requested) {
     throw new ValidationError(
       'testType',
-      `testType "${body.testType}" is not recognised. Allowed: ${ALLOWED_TEST_TYPES.join(', ')}`,
+      `testType "${body.testType}" is not recognised. Use one of the portal's testing types: ${PORTAL_TYPES.map((t) => t.testType).join(', ')}`,
     );
   }
+  const engagementCost = optionalCost(body, 'engagementCost');
+  const { known, blackBox } = resolveBlackBoxTier(requested, engagementCost);
+  // testType: what the portal gets and the record keeps. plextracType: the report's
+  // name and template. skipPlextrac: no report at all (VMaaS, Signature Only).
+  const { testType, plextracType, skipPlextrac } = known;
 
   const startDate = optionalDate(body, 'startDate');
   const endDate = optionalDate(body, 'endDate');
@@ -204,6 +258,10 @@ function parseAuthFormRequest(body) {
     dealId,
     clientName,
     testType,
+    plextracType,
+    skipPlextrac,
+    engagementCost,
+    blackBox,
     scope: optionalText(body, 'scope', MAX_SCOPE),
     consultantEmails: optionalEmails(body, 'consultantEmails'),
     engagementUrl: optionalUrl(body, 'engagementUrl'),
@@ -271,11 +329,11 @@ async function syncLinkedReport(existing, input, changes) {
     );
   }
 
-  // A pentest re-typed as VMaaS: VMaaS has no report, but this one may already hold
-  // work, so it is left for a person to decide about.
-  if (input.testType === VMAAS_TEST_TYPE) {
+  // Re-typed to something with no report (VMaaS, Signature Only): this report may
+  // already hold work, so it is left for a person to decide about.
+  if (input.skipPlextrac) {
     if (changed('testType')) {
-      log.notify(`${label} changed from ${existing.test_type} to VMaaS — its Plextrac report <${reportUrl(clientId, reportId)}|${out.reportName}> was left in place; please remove it if it isn't needed.`);
+      log.notify(`${label} changed from ${existing.test_type} to ${input.testType}, which has no Plextrac report — its report <${reportUrl(clientId, reportId)}|${out.reportName}> was left in place; please remove it if it isn't needed.`);
     }
     return out;
   }
@@ -284,7 +342,7 @@ async function syncLinkedReport(existing, input, changes) {
   if (!changed('testType') && !changed('scope') && !datesArrived) return out;
 
   const startMs = input.startDate ?? existing.start_date ?? null;
-  const name = buildReportName(input.testType, startMs, input.scope);
+  const name = buildReportName(input.plextracType, startMs, input.scope);
   try {
     const report = await plextracApi.getReport(clientId, reportId);
     const current = report?.name ?? null;
@@ -314,7 +372,7 @@ async function syncLinkedReport(existing, input, changes) {
 
   try {
     await store.updateEngagement(input.engagementId, {
-      report_name: out.reportName, start_date_pending: out.startDatePending,
+      report_name: out.reportName, start_date_pending: out.startDatePending, plextrac_type: input.plextracType,
     });
   } catch (err) {
     log.error('DeliveryFlow auth-form — could not record the report update', { engagementId: input.engagementId, reason: err.message });
@@ -436,9 +494,9 @@ router.post('/auth-form', requireDeliveryFlowKey, async (req, res) => {
  *                    the ClickUp pipeline does
  */
 async function ensurePlextracReport(input, existing) {
-  const { engagementId, dealId, clientName, testType } = input;
+  const { engagementId, dealId, clientName, testType, plextracType } = input;
 
-  if (testType === VMAAS_TEST_TYPE) {
+  if (input.skipPlextrac) {
     return { ok: true, plextrac: { status: 'skipped', clientId: null, reportId: null } };
   }
 
@@ -468,7 +526,7 @@ async function ensurePlextracReport(input, existing) {
   // No start date: the name falls back to the current month, exactly as a ClickUp
   // task without one does, and the record is flagged so it can be renamed later.
   const startDatePending = input.startDate == null;
-  const name = buildReportName(testType, input.startDate, input.scope);
+  const name = buildReportName(plextracType, input.startDate, input.scope);
   if (startDatePending) {
     log.warn('DeliveryFlow engagement has no startDate — using current month/year for report name', {
       engagementId, report: name,
@@ -479,7 +537,7 @@ async function ensurePlextracReport(input, existing) {
   try {
     report = await createPlextracReport(clientId, {
       name,
-      testingType: testType,
+      testingType: plextracType,
       operatorEmails: input.consultantEmails,
       startDateMs: input.startDate,
       endDateMs: input.endDate,
@@ -505,7 +563,7 @@ async function ensurePlextracReport(input, existing) {
 
   try {
     await store.saveReport({
-      engagementId, dealId, clientName, testType,
+      engagementId, dealId, clientName, testType, plextracType,
       scope: input.scope,
       plextracClientId: clientId,
       plextracReportId: report.reportId,
@@ -549,6 +607,18 @@ async function setUpEngagement(input) {
       status: 409,
       body: { ok: false, error: 'deal_id_conflict', engagementId, dealId, existingDealId: existing.deal_id },
     };
+  }
+
+  // The price contradicted the Black Box tier DeliveryFlow picked: the price wins,
+  // but someone should check the engagement in DeliveryFlow is set up right.
+  const bb = input.blackBox;
+  if (bb?.decidedBy === 'engagementCost'
+    && [FREE_BLACK_BOX, PAID_BLACK_BOX].includes(bb.requestedTestType)
+    && bb.requestedTestType !== testType) {
+    log.warn('DeliveryFlow auth-form — Black Box tier set from engagementCost, not the type sent', {
+      engagementId, requested: bb.requestedTestType, used: testType, engagement_cost: input.engagementCost,
+    });
+    log.notify(`DeliveryFlow sent "${bb.requestedTestType}" for ${clientName} (engagement ${engagementId}) but the engagement cost is £${input.engagementCost}, so it was set up as "${testType}". Please check the engagement in DeliveryFlow.`);
   }
 
   // ── Phase 1: blacklist ────────────────────────────────────────────────────
@@ -595,6 +665,7 @@ async function setUpEngagement(input) {
 
   log.info('DeliveryFlow engagement set up', {
     engagementId, dealId, client: clientName, testType,
+    ...(input.engagementCost != null ? { engagement_cost: input.engagementCost } : {}),
     plextrac: plextrac.status, report_id: plextrac.reportId, form_url: authForm.formUrl, form_created: authForm.created,
   });
 
@@ -611,6 +682,10 @@ async function setUpEngagement(input) {
       testFilesToken: authForm.testFilesToken,
       // Only on a repeat call that changed something: what changed, and whether the
       // form now reflects it ('rescoped' | 'recreated' | 'refused' | 'not_needed').
+      // The testing type actually used — for a Black Box, the tier engagementCost
+      // decided, which may differ from the one sent.
+      testType,
+      ...(input.blackBox ? { blackBox: input.blackBox } : {}),
       ...(changes.length ? { changes, formRescope: authForm.rescope } : {}),
       plextrac,
     },
