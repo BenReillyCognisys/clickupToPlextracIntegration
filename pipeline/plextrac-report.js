@@ -70,18 +70,18 @@ function resolveOperators(assignees) {
     .filter(Boolean);
 }
 
-// ── Main export ───────────────────────────────────────────────────────────────
+// ── Main exports ──────────────────────────────────────────────────────────────
 
-async function createReport(clientId, task, testingType) {
-  if (!task.start_date) {
-    log.warn('Task has no start_date — using current month/year for report name', {
-      task: task.name,
-    });
-  }
-
-  const { scope } = parseTaskName(task.name);
-  const name = buildReportName(testingType, task.start_date, scope);
-
+/**
+ * Creates a Plextrac report under `clientId`, or finds the one already carrying
+ * `name`. Source-agnostic: the ClickUp pipeline (createReport below) and the
+ * DeliveryFlow endpoint (routes/deliveryflow.js) both create reports through here.
+ *
+ * Returns { name, reportId, reportCuid, existed }. `existed` means a report with
+ * this name was already under the client, so nothing was created (and reportCuid is
+ * null — the caller decides whether to adopt it).
+ */
+async function createPlextracReport(clientId, { name, testingType, operatorEmails = [], startDateMs = null, endDateMs = null }) {
   // Idempotency: skip if a report with this exact name already exists under the client
   const existingReports = await api.listClientReports(clientId);
   const duplicate = (existingReports || []).find(r => {
@@ -98,7 +98,7 @@ async function createReport(clientId, task, testingType) {
     // `existed` tells the caller this is the report we found, not one we made — the
     // create pipeline stays quiet about it, and a manual replay can offer to adopt
     // it when the task lost its mapping (see pipeline/task-admin.js).
-    return { name, reportId, existed: true };
+    return { name, reportId, reportCuid: null, existed: true };
   }
 
   // Resolve names → IDs; fail loudly if template or layout can't be found
@@ -115,10 +115,8 @@ async function createReport(clientId, task, testingType) {
     throw new Error(`Layout resolution failed | ${err.message}`);
   }
 
-  const operators = await resolveOperators(task.assignees);
-
-  const year = task.start_date
-    ? new Date(Number(task.start_date)).getFullYear()
+  const year = startDateMs
+    ? new Date(Number(startDateMs)).getFullYear()
     : new Date().getFullYear();
 
   const payload = {
@@ -126,10 +124,10 @@ async function createReport(clientId, task, testingType) {
     status: 'Draft',
     template: templateId,
     fields_template: layoutId,
-    operators,
+    operators: operatorEmails,
     reviewers: REVIEWER_EMAILS,
-    start_date: epochToISO(task.start_date),
-    end_date: epochToISO(task.due_date),
+    start_date: epochToISO(startDateMs),
+    end_date: epochToISO(endDateMs),
     tags: [String(year)],
   };
 
@@ -144,6 +142,36 @@ async function createReport(clientId, task, testingType) {
   const fullReport = await api.getReport(clientId, result.report_id);
   const reportCuid = fullReport?.cuid || null;
 
+  log.info('Plextrac Report created', {
+    report: name,
+    report_id: result.report_id,
+    client_id: clientId,
+  });
+
+  return { name, reportId: result.report_id, reportCuid, existed: false };
+}
+
+// ClickUp create pipeline: builds the report name from the task, creates the report,
+// then records the ClickUp task → report mapping the reverse webhook relies on.
+async function createReport(clientId, task, testingType) {
+  if (!task.start_date) {
+    log.warn('Task has no start_date — using current month/year for report name', {
+      task: task.name,
+    });
+  }
+
+  const { scope } = parseTaskName(task.name);
+  const name = buildReportName(testingType, task.start_date, scope);
+
+  const report = await createPlextracReport(clientId, {
+    name,
+    testingType,
+    operatorEmails: resolveOperators(task.assignees),
+    startDateMs: task.start_date,
+    endDateMs: task.due_date,
+  });
+  if (report.existed) return { name, reportId: report.reportId, existed: true };
+
   // Store the ClickUp task → Plextrac report mapping so the reverse webhook
   // (Plextrac → ClickUp) can look up which task to update later.
   //
@@ -155,8 +183,8 @@ async function createReport(clientId, task, testingType) {
   await store.saveMapping({
     clickupTaskId:      task.id,
     plextracClientId:   clientId,
-    plextracReportId:   result.report_id,
-    plextracReportCuid: reportCuid,
+    plextracReportId:   report.reportId,
+    plextracReportCuid: report.reportCuid,
     taskName:           task.name,
     testingType,
     startDatePending,
@@ -164,18 +192,12 @@ async function createReport(clientId, task, testingType) {
   if (startDatePending) {
     log.info('Report created without a start date — will watch ClickUp for one', {
       report: name,
-      report_id: result.report_id,
+      report_id: report.reportId,
       clickup_task_id: task.id,
     });
   }
 
-  log.info('Plextrac Report created', {
-    report: name,
-    report_id: result.report_id,
-    client_id: clientId,
-  });
-
-  return { name, reportId: result.report_id, existed: false };
+  return { name, reportId: report.reportId, existed: false };
 }
 
-module.exports = { createReport, buildReportName, epochToISO };
+module.exports = { createReport, createPlextracReport, buildReportName, epochToISO };
