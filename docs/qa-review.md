@@ -181,11 +181,14 @@ wording. Sections matching `config/dejargon-excluded-sections.js` (override via
 case-insensitive and substring-based ("Project Roadmap" matches "Roadmap",
 "Limitation" matches both the singular and "Limitations").
 
-## Released-report export (PDF → Google Drive)
+## Released-report export (PDF → Google Drive + Plextrac Artifacts)
 
 Releasing a report is also what files it. When a report reaches the released status,
-`pipeline/report-export.js` renders it to PDF via Plextrac and uploads that PDF to
-Google Drive. A successful export is silent in Slack; a failure is replied in the
+`pipeline/report-export.js` renders it to PDF via Plextrac, uploads that PDF to
+Google Drive, and uploads the same file to the report's **Artifacts** tab in Plextrac
+(read back afterwards to confirm it's attached; `PLEXTRAC_EXPORT_ARTIFACTS=false` turns
+this off). The two uploads are independent, so one failing doesn't stop the other. A
+successful export is silent in Slack; a failure is replied in the
 release announcement's thread. The client-facing Executive Summary and Letter of
 Attestation are made at the same time and filed in the same folder, see
 [client-documents.md](client-documents.md).
@@ -238,7 +241,8 @@ Attestation are made at the same time and filed in the same folder, see
   leaves two copies.
 - **Nothing is fatal.** A failed export never affects the release: it is logged, and
   a `:warning:` reply in the thread says the PDF needs saving manually and why.
-  Until `GOOGLE_DRIVE_REPORTS_FOLDER_ID` is set the export no-ops with a warning.
+  Until `GOOGLE_DRIVE_REPORTS_FOLDER_ID` is set nothing is filed in Drive (with a
+  warning), but the full report still goes on the Artifacts tab.
 - **Permissions.** Uploads use the existing service-account key
   (`GOOGLE_SERVICE_ACCOUNT_KEY`) but request the full `.../auth/drive` scope, since
   the read-only scope can't write and `drive.file` can't write into a folder the app

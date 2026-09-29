@@ -308,16 +308,16 @@ const idsIn = (text, marker) => [...new Set((text.match(new RegExp(`${marker}-(\
     }
   });
 
-  check('Plextrac artifacts: 2 per run, each on the right report, holding that report\'s data', () => {
-    assert.strictEqual(artifacts.length, runs.length * 2);
+  check('Plextrac artifacts: 3 per run, each on the right report, holding that report\'s data', () => {
+    assert.strictEqual(artifacts.length, runs.length * 3);
     for (const a of artifacts) {
       const r = reportById.get(a.reportId);
       assert.strictEqual(a.clientId, r.client.id);
-      const marker = a.filename.startsWith('Letter') ? 'SCOPE' : 'REPORT';
-      assert.deepStrictEqual(idsIn(a.content.toString('utf8'), marker), [a.reportId], `artifact ${a.filename} on ${a.reportId}`);
+      const ids = whose({ name: a.filename, content: a.content });
+      assert.strictEqual(ids, a.reportId, `artifact ${a.filename} on ${a.reportId} holds report ${ids}`);
     }
     for (const r of reports) {
-      assert.strictEqual(artifacts.filter((a) => a.reportId === r.id).length, runsPer(r.id) * 2);
+      assert.strictEqual(artifacts.filter((a) => a.reportId === r.id).length, runsPer(r.id) * 3);
     }
   });
 

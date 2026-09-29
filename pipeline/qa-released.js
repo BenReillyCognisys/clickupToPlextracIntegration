@@ -10,8 +10,8 @@
 // Plextrac API.
 //
 // Releasing is also what triggers the report being exported to PDF and filed in Google
-// Drive, along with the client documents (pipeline/release-exports.js) — a released
-// report is the version worth keeping.
+// Drive and on its Plextrac Artifacts tab, along with the client documents
+// (pipeline/release-exports.js) — a released report is the version worth keeping.
 
 const slack = require('../lib/slack');
 const users = require('../lib/plextrac-users');

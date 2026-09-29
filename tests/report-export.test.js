@@ -15,6 +15,7 @@ const PDF = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(64, 0x20)]);
 let exportCalls = [];   // [clientId, reportId, format]
 let uploads = [];       // uploadFile args
 let replies = [];       // { channel, threadTs, text }
+let artifacts = [];     // uploadReportArtifact args, as { clientId, reportId, ...file }
 let exportResult = { buffer: PDF, contentType: 'application/pdf' };
 let uploadResult = { fileId: 'FILE1', url: 'https://drive.google.com/file/d/FILE1/view', name: 'x.pdf', replaced: false };
 
@@ -24,6 +25,11 @@ api.exportReport = async (clientId, reportId, format) => {
   return exportResult;
 };
 drive.uploadFile = async (args) => { uploads.push(args); return { ...uploadResult, name: args.filename }; };
+api.uploadReportArtifact = async (clientId, reportId, file) => {
+  artifacts.push({ clientId, reportId, ...file });
+  return `ART-${artifacts.length}`;
+};
+api.listReportArtifacts = async () => artifacts.map((_, i) => ({ id: `ART-${i + 1}` }));
 slack.postReply = async (channel, threadTs, text) => { replies.push({ channel, threadTs, text }); };
 slack.postMessage = async (channel, text) => { replies.push({ channel, threadTs: null, text }); };
 
@@ -42,7 +48,7 @@ function test(description, fn) {
 const eq = (a, b) => assert.deepStrictEqual(a, b);
 
 function reset() {
-  exportCalls = []; uploads = []; replies = [];
+  exportCalls = []; uploads = []; replies = []; artifacts = [];
   exportResult = { buffer: PDF, contentType: 'application/pdf' };
   uploadResult = { fileId: 'FILE1', url: 'https://drive.google.com/file/d/FILE1/view', name: 'x.pdf', replaced: false };
 }
@@ -216,8 +222,42 @@ const RELEASE = {
     eq(uploads[0].subfolder, 'Acme Corp');
     eq(uploads[0].mimeType, 'application/pdf');
     eq(uploads[0].buffer, PDF);
-    eq(result.fileId, 'FILE1');
+    eq(result.driveFile.fileId, 'FILE1');
     // A successful export is silent: the release thread only hears about problems.
+    eq(replies, []);
+  });
+
+  await test('puts the same file on the report\'s Artifacts tab, verified', async () => {
+    reset();
+    const result = await exportReleasedReport(RELEASE);
+    eq(artifacts.length, 1);
+    eq([artifacts[0].clientId, artifacts[0].reportId], [12, 34]);
+    eq(artifacts[0].filename, uploads[0].filename);
+    eq(artifacts[0].buffer, PDF);
+    eq(artifacts[0].contentType, 'application/pdf');
+    eq(result.artifactId, 'ART-1');
+    eq(replies, []);
+  });
+
+  await test('an artifact that does not list on the report is a failure, and Drive still has it', async () => {
+    reset();
+    const listed = api.listReportArtifacts;
+    api.listReportArtifacts = async () => [];
+    const result = await exportReleasedReport(RELEASE);
+    api.listReportArtifacts = listed;
+    eq(result.artifactId, null);
+    eq(result.driveFile.fileId, 'FILE1');
+    eq(replies.length, 1);
+    eq(replies[0].text.includes('Plextrac Artifacts tab'), true);
+    eq(replies[0].text.includes('check the Artifacts tab'), true);
+  });
+
+  await test('folderId null files nothing in Drive but still uploads to Plextrac', async () => {
+    reset();
+    const result = await exportReleasedReport({ ...RELEASE, folderId: null });
+    eq(uploads.length, 0);
+    eq(artifacts.length, 1);
+    eq([result.driveFile, result.artifactId], [null, 'ART-1']);
     eq(replies, []);
   });
 
@@ -227,6 +267,7 @@ const RELEASE = {
     const result = await exportReleasedReport(RELEASE);
     eq(result, null);
     eq(uploads.length, 0);
+    eq(artifacts.length, 0);
     eq(replies.length, 1);
     eq(replies[0].text.includes(':warning:'), true);
     eq(replies[0].text.includes('PLEXTRAC_EXPORT_PATH'), true);
@@ -242,12 +283,14 @@ const RELEASE = {
     eq(replies[0].text.includes('404'), true);
   });
 
-  await test('a Drive failure is flagged, not thrown', async () => {
+  await test('a Drive failure is flagged, not thrown, and the artifact is still uploaded', async () => {
     reset();
     drive.uploadFile = async () => { throw new Error('insufficientFilePermissions'); };
     const result = await exportReleasedReport(RELEASE);
-    eq(result, null);
-    eq(replies[0].text.includes('insufficientFilePermissions'), true);
+    eq(result.driveFile, null);
+    eq(result.artifactId, 'ART-1');
+    eq(replies.length, 1);
+    eq(replies[0].text.includes('in Drive (insufficientFilePermissions)'), true);
     drive.uploadFile = async (args) => { uploads.push(args); return { ...uploadResult, name: args.filename }; };
   });
 

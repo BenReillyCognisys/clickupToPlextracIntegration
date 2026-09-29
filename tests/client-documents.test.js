@@ -44,7 +44,10 @@ function reset() {
   slack.postReply = async (channel, threadTs, text) => { calls.replies.push(text); };
   slack.postMessage = async (channel, text) => { calls.replies.push(text); };
   reportExport.resolveReleaseFolder = async (job) => { calls.resolveFolder.push(job); return 'FOLDER_CLIENT_MONTH'; };
-  reportExport.exportReleasedReport = async (args) => { calls.exportFull.push(args); return { fileId: 'FULL' }; };
+  reportExport.exportReleasedReport = async (args) => {
+    calls.exportFull.push(args);
+    return { driveFile: args.folderId ? { fileId: 'FULL' } : null, artifactId: 'ART-FULL' };
+  };
 }
 
 let passed = 0, failed = 0;
@@ -341,7 +344,8 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     reset(); stubDocuments();
     reportExport.resolveReleaseFolder = async () => { throw new Error('insufficientPermissions'); };
     await runReleaseExports(release);
-    eq(calls.exportFull.length, 0);
+    // The full report still runs, told not to file in Drive.
+    eq(calls.exportFull.map((a) => a.folderId), [null]);
     eq(calls.uploads.length, 0);
     eq(calls.artifacts.length, 2);
     eq(calls.replies.length, 1);
@@ -402,7 +406,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     reset(); stubDocuments();
     const lines = await captureLog(() => runReleaseExports(release));
     const done = lines[lines.length - 1][2];
-    eq([done.drive_files, done.plextrac_artifacts], [3, 2]);
+    eq([done.drive_files, done.plextrac_artifacts], [3, 3]);
     eq(/^\d+\.\ds$/.test(done.took), true);
   });
 
@@ -415,7 +419,8 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
       'Release export: Letter of Attestation upload FAILED',
     ]);
     const [level, message, data] = lines[lines.length - 1];
-    eq([level, message, data.problems, data.plextrac_artifacts], ['warn', 'Release export FINISHED WITH PROBLEMS', 2, 0]);
+    // Only the (stubbed) full report made it onto the Artifacts tab.
+    eq([level, message, data.problems, data.plextrac_artifacts], ['warn', 'Release export FINISHED WITH PROBLEMS', 2, 1]);
   });
 
   await test('a switched-off document shows in the release trail as skipped, and the run is not a problem', async () => {

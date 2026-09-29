@@ -4,7 +4,7 @@
 //            Plextrac Full Report <timestamp>.pdf     (pipeline/report-export.js)
 //            Executive Summary Report <timestamp>.pdf (pipeline/client-documents)
 //            Letter of Attestation <timestamp>.pdf    (pipeline/client-documents)
-//   Plextrac: the two client documents on the report's Artifacts tab
+//   Plextrac: the full report and the two client documents on the report's Artifacts tab
 //
 // Guarantees against filing into the wrong place:
 //   * The release's details (client, report, export time) are captured once, frozen,
@@ -34,6 +34,7 @@
 //   Release export: exporting full report from Plextrac
 //   Release export: full report exported from Plextrac    size, time taken
 //   Release export: full report uploaded to Drive          file, folder, Drive link
+//   Release export: full report uploaded to Plextrac       client, report, Plextrac link
 //   Release export: <document> rendered                    size
 //   Release export: <document> uploaded to Drive           file, folder, Drive link
 //   Release export: <document> uploaded to Plextrac        client, report, Plextrac link
@@ -45,9 +46,6 @@ const reportExport = require('./report-export');
 const clientDocuments = require('./client-documents');
 const { withTaskLock } = require('../lib/task-lock');
 const log = require('../lib/logger');
-
-const PLEXTRAC_BASE = `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}`;
-const plextracReportUrl = (clientId, reportId) => `${PLEXTRAC_BASE}/client/${clientId}/report/${reportId}`;
 
 /**
  * @param {object} args
@@ -66,7 +64,7 @@ async function runReleaseExports({ clientId, reportId, clientName, reportName, c
     // Which Plextrac report this is, on the lines that name where things went.
     const project = {
       client: clientName, report: reportName, client_id: clientId, report_id: reportId,
-      plextrac: plextracReportUrl(clientId, reportId),
+      plextrac: reportExport.plextracReportUrl(clientId, reportId),
     };
 
     log.info('Release export STARTED', project);
@@ -97,16 +95,18 @@ async function runReleaseExports({ clientId, reportId, clientName, reportName, c
       });
 
       // 2. The full report and the client documents, side by side. The full report
-      //    posts its own failure notice and logs its own steps.
+      //    posts its own failure notice and logs its own steps. Without a Drive folder
+      //    (folderId null) it still goes on the Artifacts tab.
       const [fullReport, documents] = await Promise.all([
-        folderId && reportExport.exportReleasedReport({ ...job, channel, threadTs, folderId }),
+        reportExport.exportReleasedReport({ ...job, channel, threadTs, folderId }),
         clientDocuments.generateClientDocuments(job).catch((err) => {
           log.error('Release export: client documents FAILED', { report_id: reportId, reason: err.message });
           problems.push(`Client documents could not be generated: ${err.message}`);
           return [];
         }),
       ]);
-      if (fullReport) filed.drive++;
+      if (fullReport?.driveFile) filed.drive++;
+      if (fullReport?.artifactId) filed.plextrac++;
 
       // 3. File each document that was made, into the SAME folder as the full report.
       const folder = reportExport.releaseFolderPath({ clientName, exportedAt: startedAt });

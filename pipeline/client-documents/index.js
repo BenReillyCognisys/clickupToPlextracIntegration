@@ -18,7 +18,8 @@
 const api = require('../../lib/plextrac-api');
 const renderer = require('../../lib/pdf-renderer');
 const drive = require('../../lib/google-drive');
-const { documentFilename, looksLikePdf } = require('../report-export');
+const reportExport = require('../report-export');
+const { documentFilename, looksLikePdf } = reportExport;
 const data = require('./data');
 const DOCUMENTS = require('../../config/client-documents');
 const log = require('../../lib/logger');
@@ -128,20 +129,6 @@ async function generateClientDocuments({
   });
 }
 
-// Uploads to the report's Artifacts tab, then reads the tab back to confirm the file
-// really is attached to THIS report before calling it done.
-async function uploadArtifactVerified({ clientId, reportId, document }) {
-  const description = `${document.doc.name} - generated automatically on release`;
-  const id = await api.uploadReportArtifact(clientId, reportId, {
-    buffer: document.buffer, filename: document.filename, contentType: PDF_MIME, description,
-  });
-  const listed = await api.listReportArtifacts(clientId, reportId);
-  if (!listed.some((a) => String(a.id) === String(id))) {
-    throw new Error(`uploaded (artifact ${id}) but it does not list on report ${reportId} - check the Artifacts tab`);
-  }
-  return id;
-}
-
 /**
  * Files one generated document in Drive and on the report's Artifacts tab. The two
  * uploads run side by side and fail independently.
@@ -162,7 +149,10 @@ async function publishClientDocument({ document, folderId, clientId, reportId })
       overwrite: false, // a same-named file can only be another release's
     }).then((r) => { out.driveFile = r; }, (err) => { out.errors.push(`Drive upload failed: ${err.message}`); }),
 
-    ARTIFACTS_ENABLED && uploadArtifactVerified({ clientId, reportId, document })
+    ARTIFACTS_ENABLED && reportExport.uploadArtifactVerified({
+      clientId, reportId, buffer: document.buffer, filename: document.filename, contentType: PDF_MIME,
+      description: `${document.doc.name} - generated automatically on release`,
+    })
       .then((id) => { out.artifactId = id; }, (err) => { out.errors.push(`Plextrac artifact upload failed: ${err.message}`); }),
   ]);
 

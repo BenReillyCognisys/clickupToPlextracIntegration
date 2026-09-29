@@ -1,5 +1,5 @@
-// Released-report export: when a Plextrac report is published, render it to PDF and
-// file that PDF in Google Drive.
+// Released-report export: when a Plextrac report is published, render it to PDF, file
+// that PDF in Google Drive and put it on the report's Artifacts tab in Plextrac.
 //
 // Runs from pipeline/qa-released.js (which the Plextrac webhook calls on the released
 // status), so releasing a report is the only trigger — there is no separate schedule.
@@ -17,8 +17,11 @@
 //   GOOGLE_DRIVE_REPORTS_EPOCH_MONTH    month numbered 001 (YYYY-MM, default 2026-07)
 //   PLEXTRAC_EXPORT_FORMAT              export format (default pdf)
 //   PLEXTRAC_EXPORT_PATH                export endpoint override (lib/plextrac-api)
+//   PLEXTRAC_EXPORT_ARTIFACTS           also upload it to the Artifacts tab (default on)
 //
 // Layout: <folder>/<NNN. Month YYYY>/<Client>/Plextrac Full Report <timestamp>.pdf
+// The same file, same name, goes on the report's Artifacts tab. The two uploads are
+// independent: either still happens when the other is switched off or fails.
 // Drive auth reuses the existing service-account key (GOOGLE_SERVICE_ACCOUNT_KEY) and
 // optional impersonation (GOOGLE_DRIVE_SUBJECT).
 
@@ -27,9 +30,15 @@ const drive = require('../lib/google-drive');
 const slack = require('../lib/slack');
 const log = require('../lib/logger');
 
-// Destination folder in Drive. Unset, the export is skipped entirely (with a warning)
-// rather than guessing where a client report should be filed.
+// Destination folder in Drive. Unset, nothing is filed in Drive (with a warning) rather
+// than guessing where a client report should be filed.
 const REPORTS_FOLDER_ID = process.env.GOOGLE_DRIVE_REPORTS_FOLDER_ID || null;
+
+// Set to "false" to file the full report in Drive only.
+const ARTIFACTS_ENABLED = process.env.PLEXTRAC_EXPORT_ARTIFACTS !== 'false';
+
+const PLEXTRAC_BASE = `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}`;
+const plextracReportUrl = (clientId, reportId) => `${PLEXTRAC_BASE}/client/${clientId}/report/${reportId}`;
 
 // File each report under a month folder of that folder — "002. August 2026" — so Drive
 // lists the months in order rather than alphabetically. Set to "false" to put every
@@ -229,8 +238,21 @@ async function resolveReleaseFolder({ clientName, exportedAt }) {
   return drive.resolveFolder(releaseFolderSpec({ clientName, exportedAt }));
 }
 
+// Uploads a file to the report's Artifacts tab, then reads the tab back to confirm the
+// file really is attached to THIS report before calling it done. Returns the artifact
+// id. Used for the full report and the client documents (pipeline/client-documents).
+async function uploadArtifactVerified({ clientId, reportId, buffer, filename, contentType, description }) {
+  const id = await api.uploadReportArtifact(clientId, reportId, { buffer, filename, contentType, description });
+  const listed = await api.listReportArtifacts(clientId, reportId);
+  if (!listed.some((a) => String(a.id) === String(id))) {
+    throw new Error(`uploaded (artifact ${id}) but it does not list on report ${reportId} - check the Artifacts tab`);
+  }
+  return id;
+}
+
 /**
- * Exports a released report and files it in Drive.
+ * Exports a released report and files it in Drive and on the report's Artifacts tab.
+ * The two uploads run side by side and fail independently.
  *
  * @param {object} args
  * @param {number|string} args.clientId
@@ -241,16 +263,19 @@ async function resolveReleaseFolder({ clientName, exportedAt }) {
  * @param {string} [args.threadTs]   its thread anchor — failures are replied there
  * @param {Date}   [args.exportedAt] the release's export time (default now) — month
  *                                   folder and filename timestamp
- * @param {string} [args.folderId]   an already-resolved destination folder
- *                                   (resolveReleaseFolder). Without it the month and
- *                                   client folders are resolved here.
- * @returns {Promise<object|null>} the upload result, or null when skipped/failed
+ * @param {string|null} [args.folderId] an already-resolved destination folder
+ *                                   (resolveReleaseFolder); null files nothing in
+ *                                   Drive. Omitted, the month and client folders are
+ *                                   resolved here.
+ * @returns {Promise<{driveFile: object|null, artifactId: string|null}|null>} what was
+ *   filed, or null when the export was skipped or failed
  */
 async function exportReleasedReport({
   clientId, reportId, clientName, reportName, channel, threadTs, exportedAt = new Date(), folderId,
 }) {
-  if (!REPORTS_FOLDER_ID) {
-    log.warn('Released-report export skipped — GOOGLE_DRIVE_REPORTS_FOLDER_ID is not set', {
+  const toDrive = Boolean(REPORTS_FOLDER_ID) && folderId !== null;
+  if (!toDrive && !ARTIFACTS_ENABLED) {
+    log.warn('Released-report export skipped — no Drive folder and PLEXTRAC_EXPORT_ARTIFACTS=false', {
       report_id: reportId,
     });
     return null;
@@ -260,18 +285,21 @@ async function exportReleasedReport({
   // timestamp, so a report released just after midnight on the 1st lands in the new
   // month and its name agrees.
   const filename = reportFilename({ date: exportedAt });
+  const mimeType = MIME_TYPES[EXPORT_FORMAT] || 'application/octet-stream';
 
+  let buffer;
   try {
     log.info('Release export: exporting full report from Plextrac', { report_id: reportId, format: EXPORT_FORMAT });
     const exportStarted = Date.now();
-    const { buffer, contentType } = await api.exportReport(clientId, reportId, EXPORT_FORMAT);
+    const exported = await api.exportReport(clientId, reportId, EXPORT_FORMAT);
+    buffer = exported.buffer;
 
     if (EXPORT_FORMAT === 'pdf' && !looksLikePdf(buffer)) {
       // Almost always a JSON job/error body returned with a 200 — surface what came
       // back so the endpoint can be corrected via PLEXTRAC_EXPORT_PATH.
       const excerpt = buffer.subarray(0, 300).toString('utf8').replace(/\s+/g, ' ').trim();
       throw new Error(
-        `Plextrac export did not return a PDF (content-type "${contentType}"): ${excerpt} `
+        `Plextrac export did not return a PDF (content-type "${exported.contentType}"): ${excerpt} `
         + '— confirm the endpoint with scripts/inspect-export.js and set PLEXTRAC_EXPORT_PATH',
       );
     }
@@ -279,35 +307,66 @@ async function exportReleasedReport({
     log.info('Release export: full report exported from Plextrac', {
       report_id: reportId, size: formatSize(buffer.length), took: `${((Date.now() - exportStarted) / 1000).toFixed(1)}s`,
     });
-
-    const result = await drive.uploadFile({
-      buffer,
-      filename,
-      mimeType: MIME_TYPES[EXPORT_FORMAT] || 'application/octet-stream',
-      ...(folderId ? { folderId } : releaseFolderSpec({ clientName, exportedAt })),
-      // A same-named file here can only be ANOTHER release's — never replace it.
-      overwrite: false,
-    });
-
-    log.info('Release export: full report uploaded to Drive', {
-      report_id: reportId,
-      file: result.name,
-      folder: releaseFolderPath({ clientName, exportedAt }),
-      drive: result.url,
-    });
-
-    return result;
   } catch (err) {
     log.error('Release export: full report FAILED', {
       report_id: reportId, report: reportName, file: filename, reason: err.message,
     });
     await postToThread(
       channel, threadTs,
-      `:warning: Could not file the ${EXPORT_FORMAT.toUpperCase()} for this report in Drive — `
+      `:warning: Could not export the ${EXPORT_FORMAT.toUpperCase()} of this report from Plextrac — `
       + `it needs saving manually. Reason: ${err.message}`,
     );
     return null;
   }
+
+  const out = { driveFile: null, artifactId: null };
+  const failures = [];
+
+  await Promise.all([
+    toDrive && drive.uploadFile({
+      buffer,
+      filename,
+      mimeType,
+      ...(folderId ? { folderId } : releaseFolderSpec({ clientName, exportedAt })),
+      // A same-named file here can only be ANOTHER release's — never replace it.
+      overwrite: false,
+    }).then((result) => {
+      out.driveFile = result;
+      log.info('Release export: full report uploaded to Drive', {
+        report_id: reportId,
+        file: result.name,
+        folder: releaseFolderPath({ clientName, exportedAt }),
+        drive: result.url,
+      });
+    }, (err) => {
+      log.error('Release export: full report Drive upload FAILED', { report_id: reportId, file: filename, reason: err.message });
+      failures.push(`in Drive (${err.message})`);
+    }),
+
+    ARTIFACTS_ENABLED && uploadArtifactVerified({
+      clientId, reportId, buffer, filename, contentType: mimeType,
+      description: 'Plextrac Full Report - exported automatically on release',
+    }).then((id) => {
+      out.artifactId = id;
+      log.info('Release export: full report uploaded to Plextrac', {
+        client: clientName, report: reportName, client_id: clientId, report_id: reportId,
+        plextrac: plextracReportUrl(clientId, reportId), file: filename, artifact_id: id,
+      });
+    }, (err) => {
+      log.error('Release export: full report Plextrac upload FAILED', { report_id: reportId, file: filename, reason: err.message });
+      failures.push(`on the Plextrac Artifacts tab (${err.message})`);
+    }),
+  ]);
+
+  if (failures.length) {
+    await postToThread(
+      channel, threadTs,
+      `:warning: Could not file the ${EXPORT_FORMAT.toUpperCase()} for this report ${failures.join(' or ')} — `
+      + 'it needs saving manually.',
+    );
+  }
+
+  return out;
 }
 
 // Replies in the announcement's thread, or posts standalone if the announcement
@@ -325,6 +384,8 @@ async function postToThread(channel, threadTs, text) {
 
 module.exports = {
   exportReleasedReport,
+  uploadArtifactVerified,
+  plextracReportUrl,
   resolveReleaseFolder,
   releaseFolderSpec,
   releaseFolderPath,

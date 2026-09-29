@@ -8,10 +8,13 @@ Drive:  <reports folder>/<NNN. Month YYYY>/<Client>/
           Plextrac Full Report 2026-09-26 14-30-05.pdf      ← Plextrac's own export
           Executive Summary Report 2026-09-26 14-30-05.pdf  ← made here
           Letter of Attestation 2026-09-26 14-30-05.pdf     ← made here
-Plextrac: the two made-here documents on the report's Artifacts tab
+Plextrac: all three on the report's Artifacts tab
 ```
 
-The full report is exported by Plextrac. The two **client documents** are made by
+The full report is exported by Plextrac and uploaded straight back to the report's
+Artifacts tab (switch that off with `PLEXTRAC_EXPORT_ARTIFACTS=false`). If Drive isn't
+set up, or its folder can't be made, the full report still goes on the Artifacts tab.
+The two **client documents** are made by
 this service, entirely from Plextrac data, with no AI involved. Each one goes through
 these steps:
 
@@ -87,11 +90,12 @@ carries the `report_id`, so one release can be followed even when several run at
 [INFO] Release export: exporting full report from Plextrac | report_id=277397777 | format="pdf"
 [INFO] Release export: full report exported from Plextrac | report_id=277397777 | size="793 KB" | took="41.2s"
 [INFO] Release export: full report uploaded to Drive | report_id=277397777 | file="Plextrac Full Report 2026-09-27 14-30-05.pdf" | folder="003. September 2026/Acme Corp" | drive="https://drive.google.com/file/d/.../view"
+[INFO] Release export: full report uploaded to Plextrac | client="Acme Corp" | report="Web Application Penetration Test" | client_id=39283 | report_id=277397777 | plextrac="https://cognisys.plextrac.com/client/39283/report/277397777" | file="Plextrac Full Report 2026-09-27 14-30-05.pdf" | artifact_id="..."
 [INFO] Release export: Executive Summary Report rendered | report_id=277397777 | size="249 KB"
 [INFO] Release export: Executive Summary Report uploaded to Drive | report_id=277397777 | file="..." | folder="..." | drive="..."
 [INFO] Release export: Executive Summary Report uploaded to Plextrac | client="Acme Corp" | report="Web Application Penetration Test" | client_id=39283 | report_id=277397777 | plextrac="https://cognisys.plextrac.com/client/39283/report/277397777" | file="..." | artifact_id="..."
   ... the same three lines for the Letter of Attestation ...
-[INFO] Release export FINISHED | report_id=277397777 | client="Acme Corp" | report="Web Application Penetration Test" | took="44.8s" | drive_files=3 | plextrac_artifacts=2
+[INFO] Release export FINISHED | report_id=277397777 | client="Acme Corp" | report="Web Application Penetration Test" | took="44.8s" | drive_files=3 | plextrac_artifacts=3
 ```
 
 - **Plextrac links:** the start line and every Plextrac upload line name the Plextrac client and report, with a link to the report.
