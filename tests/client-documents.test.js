@@ -20,19 +20,26 @@ const realGenerate = clientDocuments.generateClientDocuments;
 const { runReleaseExports } = require('../pipeline/release-exports');
 
 const PDF = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(32, 0x20)]);
+const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(16, 7)]);
 const EXPORTED_AT = new Date('2026-09-26T13:30:05Z');
 
 const DOCS = [
   { key: 'exec-summary', name: 'Executive Summary Report', template: 'exec.j2', enabledBy: 'TEST_EXEC_ENABLED' },
   { key: 'letter-of-attestation', name: 'Letter of Attestation', template: 'loa.j2', enabledBy: 'TEST_LOA_ENABLED' },
 ];
+const FULL_DOC = {
+  key: 'full-report', name: 'Full Report', filename: 'Full-Pentest-Report-Tech-Details', template: 'full.j2',
+  enabledBy: 'TEST_FULL_ENABLED', findings: 'full', pdfOptions: { dpi: 150 },
+};
 
 let calls;
 function reset() {
-  calls = { getReport: [], render: [], uploads: [], artifacts: [], replies: [], resolveFolder: [], exportFull: [] };
+  calls = { getReport: [], getFinding: [], fetched: [], render: [], uploads: [], artifacts: [], replies: [], resolveFolder: [], jobs: [] };
   api.getReport = async (c, r) => { calls.getReport.push([c, r]); return structuredClone(fx.report); };
   api.getClient = async () => structuredClone(fx.clientRecord);
   api.listReportFindings = async () => structuredClone(fx.findings);
+  api.getFinding = async (c, r, id) => { calls.getFinding.push([c, r, id]); return structuredClone(fx.fullFindings[id]); };
+  api.rawBinary = async (method, path) => { calls.fetched.push(path); return { buffer: PNG, contentType: 'image/png' }; };
   api.uploadReportArtifact = async (c, r, file) => { calls.artifacts.push({ c, r, filename: file.filename }); return `ART-${calls.artifacts.length}`; };
   api.listReportArtifacts = async () => calls.artifacts.map((_, i) => ({ id: `ART-${i + 1}` }));
   renderer.templateExists = () => true;
@@ -44,7 +51,6 @@ function reset() {
   slack.postReply = async (channel, threadTs, text) => { calls.replies.push(text); };
   slack.postMessage = async (channel, text) => { calls.replies.push(text); };
   reportExport.resolveReleaseFolder = async (job) => { calls.resolveFolder.push(job); return 'FOLDER_CLIENT_MONTH'; };
-  reportExport.exportReleasedReport = async (args) => { calls.exportFull.push(args); return { fileId: 'FULL' }; };
 }
 
 let passed = 0, failed = 0;
@@ -213,9 +219,15 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
   await test('the real config gives each document its own switch', () => {
     const real = require('../config/client-documents');
     eq(real.map((d) => [d.key, d.enabledBy]), [
+      ['full-report', 'CLIENT_DOCS_FULL_REPORT_ENABLED'],
       ['exec-summary', 'CLIENT_DOCS_EXEC_SUMMARY_ENABLED'],
       ['letter-of-attestation', 'CLIENT_DOCS_LETTER_OF_ATTESTATION_ENABLED'],
     ]);
+  });
+
+  await test('the real full report: Full-Pentest-Report-Tech-Details, every finding in full', () => {
+    const full = require('../config/client-documents').find((d) => d.key === 'full-report');
+    eq([full.filename, full.template, full.findings], ['Full-Pentest-Report-Tech-Details', 'cognisys-full-report.j2', 'full']);
   });
 
   await test('a document without its template is skipped, not failed', async () => {
@@ -230,6 +242,145 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     renderer.renderTemplates = async (jobs) => new Map(jobs.map((j) => [j.id, { ok: true, buffer: Buffer.from('<html>'), warnings: [] }]));
     const out = await clientDocuments.generateClientDocuments(job);
     eq(out.every((d) => !d.ok && /not a PDF/.test(d.error)), true);
+  });
+
+  console.log('\nthe full report — every finding in full:');
+
+  const fullCtx = (findings = Object.values(fx.fullFindings)) => data.templateContext({ ...facts(), findings, detail: 'full' });
+
+  await test('carries each finding\'s write-up, technical details, CVSS score and affected assets', () => {
+    const f = fullCtx().FINDINGS[0];
+    eq(f.title, 'SQL Injection in login');
+    eq(f.description, `<p>${fx.SECRET}</p>`);
+    eq(f.fields.proof_of_concept.label, 'Technical Details');
+    eq(f.risk_score.CVSS3_1.overall, 9.8);
+    eq(f.affected_assets, { asset1: { asset: 'host-1.acme.example', ports: {} } });
+  });
+
+  await test('...and nothing else: no assignee, tickets, exhibits, or the other findings on an asset', () => {
+    const json = JSON.stringify(fullCtx());
+    for (const s of ['INTERNAL-ASSIGNEE', 'INTERNAL-TICKET', 'INTERNAL-EXHIBIT', 'INTERNAL-OTHER-FINDING']) {
+      eq([s, json.includes(s)], [s, false]);
+    }
+  });
+
+  await test('most severe first; Plextrac\'s order kept within a severity', () => {
+    const f = fx.fullFindings;
+    eq(fullCtx([f[3], f[4], f[2], f[1]]).FINDINGS.map((x) => x.title),
+      ['Stored XSS', 'SQL Injection in login', 'Missing HSTS', 'Server banner']);
+  });
+
+  const fullJob = { ...job, documents: [FULL_DOC, ...DOCS] };
+  const byId = (list) => [...list].sort((a, b) => a[2] - b[2]);
+
+  await test('fetches every finding of THIS report, and renders with the other documents in one run', async () => {
+    reset();
+    const out = await clientDocuments.generateClientDocuments(fullJob);
+    eq(out.map((d) => [d.doc.key, d.ok, d.filename]), [
+      ['full-report', true, 'Full-Pentest-Report-Tech-Details 2026-09-26 14-30-05.pdf'],
+      ['exec-summary', true, 'Executive Summary Report 2026-09-26 14-30-05.pdf'],
+      ['letter-of-attestation', true, 'Letter of Attestation 2026-09-26 14-30-05.pdf'],
+    ]);
+    eq(byId(calls.getFinding), [[12, 34, 1], [12, 34, 2], [12, 34, 3], [12, 34, 4]]);
+    eq(calls.render.length, 1);
+    const [full, exec, letter] = calls.render[0];
+    eq([full.template, full.pdf_options, exec.pdf_options], ['full.j2', { dpi: 150 }, undefined]);
+    eq(JSON.stringify(full.context).includes(fx.SECRET), true);
+    // The summary documents still never see a write-up.
+    eq(JSON.stringify(exec.context).includes(fx.SECRET), false);
+    eq(exec.context, letter.context);
+  });
+
+  await test('its screenshots are fetched from Plextrac and printed from inside the document', async () => {
+    reset();
+    const [full] = await clientDocuments.generateClientDocuments(fullJob);
+    eq(calls.fetched.sort(), [1, 2, 3, 4].map((i) => `/api/v2/uploads/shot-${i}.png`));
+    const poc = calls.render[0][0].context.FINDINGS[0].fields.proof_of_concept.value;
+    eq(poc.includes(`<img src="data:image/png;base64,${PNG.toString('base64')}" />`), true);
+    eq([full.screenshots, full.notices], [{ inlined: 4, missing: 0 }, []]);
+  });
+
+  await test('a screenshot that cannot be fetched is flagged — the report is still made', async () => {
+    reset();
+    api.rawBinary = async (method, path) => {
+      if (path.endsWith('shot-2.png')) throw new Error('HTTP 404');
+      return { buffer: PNG, contentType: 'image/png' };
+    };
+    const [full] = await clientDocuments.generateClientDocuments(fullJob);
+    eq(full.ok, true);
+    eq(full.screenshots, { inlined: 3, missing: 1 });
+    eq(full.notices, ['a screenshot in "Stored XSS" is missing from the PDF (HTTP 404)']);
+    const xss = calls.render[0][0].context.FINDINGS.find((f) => f.title === 'Stored XSS');
+    eq(xss.fields.proof_of_concept.value.includes('[Screenshot missing'), true);
+  });
+
+  await test('a finding that cannot be fetched fails the full report alone', async () => {
+    reset();
+    api.getFinding = async (c, r, id) => {
+      if (id === 3) throw new Error('Plextrac 502');
+      return structuredClone(fx.fullFindings[id]);
+    };
+    const out = await clientDocuments.generateClientDocuments(fullJob);
+    eq(out.map((d) => d.ok), [false, true, true]);
+    eq(out[0].error, 'the findings could not be loaded from Plextrac: Plextrac 502');
+    eq(calls.render[0].map((j) => j.id), ['exec-summary', 'letter-of-attestation']);
+  });
+
+  await test('a finding that says it belongs to another report is refused', async () => {
+    reset();
+    api.getFinding = async (c, r, id) => ({ ...structuredClone(fx.fullFindings[id]), report_id: 99 });
+    const [full] = await clientDocuments.generateClientDocuments(fullJob);
+    eq(full.ok, false);
+    eq(/finding \d belongs to report 99, not 34/.test(full.error), true);
+  });
+
+  await test('switched off, the full report fetches nothing', async () => {
+    reset();
+    const out = await withEnv({ TEST_FULL_ENABLED: 'false' }, () => clientDocuments.generateClientDocuments(fullJob));
+    eq(out.map((d) => d.doc.key), ['exec-summary', 'letter-of-attestation']);
+    eq([calls.getFinding.length, calls.fetched.length], [0, 0]);
+  });
+
+  console.log('\nscreenshots:');
+
+  const images = require('../pipeline/client-documents/images');
+
+  await test('only this Plextrac instance\'s upload store is ever fetched', () => {
+    eq(images.uploadPath('/api/v2/uploads/abc-123.png'), '/api/v2/uploads/abc-123.png');
+    eq(images.uploadPath('https://cognisys.plextrac.com/api/v2/uploads/abc.png'), '/api/v2/uploads/abc.png');
+    for (const bad of [
+      'https://evil.example/api/v2/uploads/a.png', 'http://cognisys.plextrac.com/api/v2/uploads/a.png',
+      '//evil.example/api/v2/uploads/a.png', 'file:///etc/passwd', '/api/v1/client/1/report/2',
+      '/api/v2/uploads/../users', '', undefined,
+    ]) eq([bad, images.uploadPath(bad)], [bad, null]);
+  });
+
+  const shot = (src) => [{ title: 'T', description: `<p><img src="${src}"></p>` }];
+
+  await test('what comes back must really be an image', async () => {
+    const out = await images.inlineScreenshots(shot('/api/v2/uploads/a.png'), { fetchUpload: async () => ({ buffer: Buffer.from('{"status":"error","message":"nope"}') }) });
+    eq(out.missing, [{ title: 'T', reason: 'Plextrac did not return an image' }]);
+    eq(out.findings[0].description.includes('[Screenshot missing'), true);
+  });
+
+  await test('an image on any other host is never fetched, and is flagged', async () => {
+    const fetched = [];
+    const out = await images.inlineScreenshots(shot('https://evil.example/x.png'), { fetchUpload: async (p) => { fetched.push(p); return { buffer: PNG }; } });
+    eq(fetched, []);
+    eq(out.missing.length, 1);
+  });
+
+  await test('an upload used twice is fetched once; data: images are left as they are', async () => {
+    const fetched = [];
+    const findings = [
+      { title: 'A', description: '<img src="/api/v2/uploads/same.png">', recommendations: '<img src="data:image/png;base64,AAAA">' },
+      { title: 'B', fields: { poc: { value: '<img src="/api/v2/uploads/same.png">' } } },
+    ];
+    const out = await images.inlineScreenshots(findings, { fetchUpload: async (p) => { fetched.push(p); return { buffer: PNG }; } });
+    eq(fetched, ['/api/v2/uploads/same.png']);
+    eq([out.inlined, out.missing.length], [2, 0]);
+    eq(out.findings[0].recommendations, '<img src="data:image/png;base64,AAAA">');
+    eq(out.findings[1].fields.poc.value.startsWith('<img src="data:image/png;base64,'), true);
   });
 
   console.log('\npublishClientDocument:');
@@ -271,25 +422,28 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
 
   const release = { clientId: 12, reportId: 34, clientName: 'Acme Corp', reportName: 'Web App', channel: 'C1', threadTs: 't1' };
   const stubDocuments = () => {
-    clientDocuments.generateClientDocuments = async (j) => DOCS.map((d) => ({
-      doc: d, ok: true, buffer: PDF, filename: `${d.name} ${j.exportedAt.toISOString()}.pdf`,
-    }));
+    clientDocuments.generateClientDocuments = async (j) => {
+      calls.jobs.push(j);
+      return [FULL_DOC, ...DOCS].map((d) => ({
+        doc: d, ok: true, buffer: PDF, filename: `${d.filename || d.name} ${j.exportedAt.toISOString()}.pdf`,
+      }));
+    };
   };
 
-  await test('resolves the folder ONCE and files everything into it, silently on success', async () => {
+  await test('resolves the folder ONCE and files everything into it and onto the report, silently', async () => {
     reset(); stubDocuments();
     await runReleaseExports(release);
     eq(calls.resolveFolder.length, 1);
-    eq(calls.exportFull.map((a) => a.folderId), ['FOLDER_CLIENT_MONTH']);
-    eq(calls.uploads.map((u) => u.folderId), ['FOLDER_CLIENT_MONTH', 'FOLDER_CLIENT_MONTH']);
-    eq(calls.artifacts.map((a) => [a.c, a.r]), [[12, 34], [12, 34]]);
+    eq(calls.uploads.map((u) => u.folderId), ['FOLDER_CLIENT_MONTH', 'FOLDER_CLIENT_MONTH', 'FOLDER_CLIENT_MONTH']);
+    eq(calls.artifacts.map((a) => [a.c, a.r]), [[12, 34], [12, 34], [12, 34]]);
+    eq(calls.uploads[0].filename.startsWith('Full-Pentest-Report-Tech-Details '), true);
     eq(calls.replies, []);
   });
 
-  await test('one export time for the full report and every document', async () => {
+  await test('one export time for every document', async () => {
     reset(); stubDocuments();
     await runReleaseExports(release);
-    const t = calls.exportFull[0].exportedAt;
+    const t = calls.jobs[0].exportedAt;
     eq(calls.uploads.every((u) => u.filename.includes(t.toISOString())), true);
     // The filename time is claimed in the folder, so it may move on from the time
     // the folder was resolved for — but never backwards.
@@ -299,7 +453,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
   await test('two releases for one client in the same second get different filename times', async () => {
     reset(); stubDocuments();
     await Promise.all([runReleaseExports(release), runReleaseExports({ ...release, reportId: 35 })]);
-    const [a, b] = calls.exportFull.map((c) => reportExport.reportFilename({ date: c.exportedAt }));
+    const [a, b] = calls.jobs.map((j) => reportExport.documentFilename('Full-Pentest-Report-Tech-Details', { date: j.exportedAt }));
     eq(a === b, false);
   });
 
@@ -341,9 +495,8 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     reset(); stubDocuments();
     reportExport.resolveReleaseFolder = async () => { throw new Error('insufficientPermissions'); };
     await runReleaseExports(release);
-    eq(calls.exportFull.length, 0);
     eq(calls.uploads.length, 0);
-    eq(calls.artifacts.length, 2);
+    eq(calls.artifacts.length, 3);
     eq(calls.replies.length, 1);
     eq(/nothing was filed in Drive: insufficientPermissions/.test(calls.replies[0]), true);
   });
@@ -355,6 +508,19 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     eq(calls.replies.length, 1);
     eq(calls.replies[0].includes('Executive Summary Report: Rendering failed'), true);
     eq(calls.replies[0].includes('Letter of Attestation: Rendering failed'), true);
+  });
+
+  await test('a screenshot missing from the full report is raised in the thread; the report is still filed', async () => {
+    reset();
+    clientDocuments.generateClientDocuments = async () => [{
+      doc: FULL_DOC, ok: true, buffer: PDF, filename: 'Full-Pentest-Report-Tech-Details x.pdf',
+      screenshots: { inlined: 3, missing: 1 },
+      notices: ['a screenshot in "Stored XSS" is missing from the PDF (HTTP 404)'],
+    }];
+    await runReleaseExports(release);
+    eq([calls.uploads.length, calls.artifacts.length], [1, 1]);
+    eq(calls.replies.length, 1);
+    eq(calls.replies[0].includes('• Full Report: a screenshot in "Stored XSS" is missing from the PDF (HTTP 404)'), true);
   });
 
   // Captures what a run writes to the console (PM2), as [level, message, data].
@@ -373,8 +539,11 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     eq(lines.map(([level, m]) => `${level} ${m}`), [
       'info Release export STARTED',
       'info Release export: Drive folder ready',
+      'info Release export: Full Report rendered',
       'info Release export: Executive Summary Report rendered',
       'info Release export: Letter of Attestation rendered',
+      'info Release export: Full Report uploaded to Drive',
+      'info Release export: Full Report uploaded to Plextrac',
       'info Release export: Executive Summary Report uploaded to Drive',
       'info Release export: Executive Summary Report uploaded to Plextrac',
       'info Release export: Letter of Attestation uploaded to Drive',
@@ -402,7 +571,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     reset(); stubDocuments();
     const lines = await captureLog(() => runReleaseExports(release));
     const done = lines[lines.length - 1][2];
-    eq([done.drive_files, done.plextrac_artifacts], [3, 2]);
+    eq([done.drive_files, done.plextrac_artifacts], [3, 3]);
     eq(/^\d+\.\ds$/.test(done.took), true);
   });
 
@@ -411,11 +580,12 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     api.uploadReportArtifact = async () => { throw new Error('HTTP 400'); };
     const lines = await captureLog(() => runReleaseExports(release));
     eq(lines.filter(([level]) => level === 'error').map(([, m]) => m), [
+      'Release export: Full Report upload FAILED',
       'Release export: Executive Summary Report upload FAILED',
       'Release export: Letter of Attestation upload FAILED',
     ]);
     const [level, message, data] = lines[lines.length - 1];
-    eq([level, message, data.problems, data.plextrac_artifacts], ['warn', 'Release export FINISHED WITH PROBLEMS', 2, 0]);
+    eq([level, message, data.problems, data.plextrac_artifacts], ['warn', 'Release export FINISHED WITH PROBLEMS', 3, 0]);
   });
 
   await test('a switched-off document shows in the release trail as skipped, and the run is not a problem', async () => {
@@ -436,7 +606,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     clientDocuments.generateClientDocuments = async () => { throw new Error('Plextrac 500'); };
     await runReleaseExports(release);
     eq(/could not be generated: Plextrac 500/.test(calls.replies[0]), true);
-    eq(calls.exportFull.length, 1);
+    eq(calls.uploads.length, 0);
   });
 
   console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`);

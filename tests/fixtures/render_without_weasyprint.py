@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "renderer
 
 import render  # noqa: E402
 
-render.render_pdf = lambda html, template_dir: b"%PDF-TEST\n" + html.encode("utf-8")
+render.render_pdf = lambda html, template_dir, options=None: b"%PDF-TEST\n" + html.encode("utf-8")
 
 if __name__ == "__main__":
     render.main()

@@ -1,10 +1,14 @@
 // Everything filed when a report is released, in one place:
 //
 //   Drive: <reports folder>/<NNN. Month YYYY>/<Client>/
-//            Plextrac Full Report <timestamp>.pdf     (pipeline/report-export.js)
-//            Executive Summary Report <timestamp>.pdf (pipeline/client-documents)
-//            Letter of Attestation <timestamp>.pdf    (pipeline/client-documents)
-//   Plextrac: the two client documents on the report's Artifacts tab
+//            Full-Pentest-Report-Tech-Details <timestamp>.pdf
+//            Executive Summary Report <timestamp>.pdf
+//            Letter of Attestation <timestamp>.pdf
+//   Plextrac: the same three on the report's Artifacts tab
+//
+// All three are made here from Plextrac's data and the templates in
+// jinja2-export-templates/ (pipeline/client-documents, config/client-documents.js);
+// pipeline/report-export.js decides the Drive folder and the filename timestamp.
 //
 // Guarantees against filing into the wrong place:
 //   * The release's details (client, report, export time) are captured once, frozen,
@@ -20,8 +24,8 @@
 //   * Folder creation itself is serialised per parent folder (lib/google-drive), so
 //     two releases for one client can't create two client folders.
 //
-// Speed: the full-report export (Plextrac renders the PDF) and the client documents
-// (rendered here) are independent, so they run in parallel.
+// Speed: the documents render in one renderer process per release, and their Drive
+// and Plextrac uploads run side by side.
 //
 // Best-effort, like the export before it: failures are logged and reported in the
 // release announcement's Slack thread, and never thrown — the release has happened
@@ -31,10 +35,7 @@
 // one release can be followed even when several run at once:
 //   Release export STARTED                        client, report, ids, Plextrac link
 //   Release export: Drive folder ready            "003. September 2026/Acme Corp"
-//   Release export: exporting full report from Plextrac
-//   Release export: full report exported from Plextrac    size, time taken
-//   Release export: full report uploaded to Drive          file, folder, Drive link
-//   Release export: <document> rendered                    size
+//   Release export: <document> rendered                    size (full report: screenshots)
 //   Release export: <document> uploaded to Drive           file, folder, Drive link
 //   Release export: <document> uploaded to Plextrac        client, report, Plextrac link
 //   Release export FINISHED                       time taken, files filed, problems
@@ -96,19 +97,14 @@ async function runReleaseExports({ clientId, reportId, clientName, reportName, c
         exportedAt: folderId ? reportExport.claimFileTime(folderId, startedAt) : startedAt,
       });
 
-      // 2. The full report and the client documents, side by side. The full report
-      //    posts its own failure notice and logs its own steps.
-      const [fullReport, documents] = await Promise.all([
-        folderId && reportExport.exportReleasedReport({ ...job, channel, threadTs, folderId }),
-        clientDocuments.generateClientDocuments(job).catch((err) => {
-          log.error('Release export: client documents FAILED', { report_id: reportId, reason: err.message });
-          problems.push(`Client documents could not be generated: ${err.message}`);
-          return [];
-        }),
-      ]);
-      if (fullReport) filed.drive++;
+      // 2. Make the documents: the full report, the executive summary, the letter.
+      const documents = await clientDocuments.generateClientDocuments(job).catch((err) => {
+        log.error('Release export: documents FAILED', { report_id: reportId, reason: err.message });
+        problems.push(`The report documents could not be generated: ${err.message}`);
+        return [];
+      });
 
-      // 3. File each document that was made, into the SAME folder as the full report.
+      // 3. File each document that was made, all into the one folder.
       const folder = reportExport.releaseFolderPath({ clientName, exportedAt: startedAt });
       await Promise.all(documents.map(async (document) => {
         const name = document.doc.name;
@@ -117,7 +113,15 @@ async function runReleaseExports({ clientId, reportId, clientName, reportName, c
           problems.push(`${name}: ${document.error}`);
           return;
         }
-        log.info(`Release export: ${name} rendered`, { report_id: reportId, size: reportExport.formatSize(document.buffer.length) });
+        log.info(`Release export: ${name} rendered`, {
+          report_id: reportId, size: reportExport.formatSize(document.buffer.length),
+          ...(document.screenshots ? { screenshots: `${document.screenshots.inlined} printed, ${document.screenshots.missing} missing` } : {}),
+        });
+        // Made, but with something a person should check before it goes to the client.
+        for (const notice of document.notices || []) {
+          log.warn(`Release export: ${name} needs checking`, { report_id: reportId, reason: notice });
+          problems.push(`${name}: ${notice}`);
+        }
 
         const published = await clientDocuments.publishClientDocument({
           document, folderId, clientId: job.clientId, reportId: job.reportId,

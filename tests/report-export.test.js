@@ -4,32 +4,23 @@ const assert = require('assert');
 process.env.GOOGLE_DRIVE_REPORTS_FOLDER_ID = 'FOLDER_REPORTS';
 
 // ── Stub the outbound helpers ─────────────────────────────────────────────────
-// report-export holds module references and calls through them at runtime, so
-// mutating the exports here keeps the tests off Plextrac, Drive and Slack.
-const api = require('../lib/plextrac-api');
+// report-export calls through these module objects at runtime, so mutating their
+// exports keeps the tests off Drive and Slack.
 const drive = require('../lib/google-drive');
 const slack = require('../lib/slack');
 
 const PDF = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(64, 0x20)]);
 
-let exportCalls = [];   // [clientId, reportId, format]
-let uploads = [];       // uploadFile args
+let resolved = [];      // resolveFolder args
 let replies = [];       // { channel, threadTs, text }
-let exportResult = { buffer: PDF, contentType: 'application/pdf' };
-let uploadResult = { fileId: 'FILE1', url: 'https://drive.google.com/file/d/FILE1/view', name: 'x.pdf', replaced: false };
 
-api.exportReport = async (clientId, reportId, format) => {
-  exportCalls.push([clientId, reportId, format]);
-  if (exportResult instanceof Error) throw exportResult;
-  return exportResult;
-};
-drive.uploadFile = async (args) => { uploads.push(args); return { ...uploadResult, name: args.filename }; };
+drive.resolveFolder = async (spec) => { resolved.push(spec); return 'FOLDER_RESOLVED'; };
 slack.postReply = async (channel, threadTs, text) => { replies.push({ channel, threadTs, text }); };
 slack.postMessage = async (channel, text) => { replies.push({ channel, threadTs: null, text }); };
 
 const {
-  exportReleasedReport, monthLabel, monthFolder, reportFilename, exportTimestamp, clientFolderName,
-  safeFilename, looksLikePdf,
+  resolveReleaseFolder, releaseFolderPath, postToThread, monthLabel, monthFolder, documentFilename,
+  exportTimestamp, clientFolderName, safeFilename, looksLikePdf,
 } = require('../pipeline/report-export');
 
 let passed = 0, failed = 0;
@@ -40,17 +31,6 @@ function test(description, fn) {
     .catch((err) => { console.error(`  ✗  ${description}\n       ${err.message}`); failed++; });
 }
 const eq = (a, b) => assert.deepStrictEqual(a, b);
-
-function reset() {
-  exportCalls = []; uploads = []; replies = [];
-  exportResult = { buffer: PDF, contentType: 'application/pdf' };
-  uploadResult = { fileId: 'FILE1', url: 'https://drive.google.com/file/d/FILE1/view', name: 'x.pdf', replaced: false };
-}
-
-const RELEASE = {
-  clientId: 12, reportId: 34, clientName: 'Acme Corp', reportName: 'Web App Pentest',
-  channel: 'C0REL', threadTs: 'ts-9',
-};
 
 (async () => {
   console.log('safeFilename:');
@@ -163,20 +143,20 @@ const RELEASE = {
     eq(/[<>:"/\\|?*]/.test(exportTimestamp()), false);
   });
 
-  console.log('\nreportFilename:');
+  console.log('\ndocumentFilename:');
 
-  await test('"Plextrac Full Report <timestamp>.pdf"', () => {
-    eq(reportFilename({ date: new Date('2026-09-26T13:30:05Z'), tz: 'Europe/London' }),
-      'Plextrac Full Report 2026-09-26 14-30-05.pdf');
+  await test('"<name> <timestamp>.pdf" — the full report\'s name', () => {
+    eq(documentFilename('Full-Pentest-Report-Tech-Details', { date: new Date('2026-09-26T13:30:05Z'), tz: 'Europe/London' }),
+      'Full-Pentest-Report-Tech-Details 2026-09-26 14-30-05.pdf');
   });
 
-  await test('carries the export format as the extension', () => {
-    eq(reportFilename({ date: new Date('2026-09-26T13:30:05Z'), tz: 'UTC', format: 'docx' }),
-      'Plextrac Full Report 2026-09-26 13-30-05.docx');
+  await test('carries the output format as the extension', () => {
+    eq(documentFilename('Letter of Attestation', { date: new Date('2026-09-26T13:30:05Z'), tz: 'UTC', format: 'html' }),
+      'Letter of Attestation 2026-09-26 13-30-05.html');
   });
 
   await test('defaults to now', () => {
-    eq(reportFilename().startsWith('Plextrac Full Report '), true);
+    eq(documentFilename('Executive Summary Report').startsWith('Executive Summary Report 20'), true);
   });
 
   console.log('\nclientFolderName:');
@@ -199,70 +179,40 @@ const RELEASE = {
     eq(looksLikePdf(null), false);
   });
 
-  console.log('\nexportReleasedReport:');
+  console.log('\nresolveReleaseFolder:');
 
-  const TIMESTAMPED = /^Plextrac Full Report \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\.pdf$/;
-
-  await test('files the PDF as <month>/<client>/Plextrac Full Report <timestamp>.pdf, silently', async () => {
-    reset();
-    const result = await exportReleasedReport(RELEASE);
-    eq(exportCalls, [[12, 34, 'pdf']]);
-    eq(uploads.length, 1);
-    eq(TIMESTAMPED.test(uploads[0].filename), true);
-    eq(uploads[0].folderId, 'FOLDER_REPORTS');
+  await test('files under <reports folder>/<NNN. Month YYYY>/<client>/', async () => {
+    resolved = [];
+    const at = new Date('2026-09-26T13:30:05Z');
+    eq(await resolveReleaseFolder({ clientName: 'Acme Corp', exportedAt: at }), 'FOLDER_RESOLVED');
     // { label, sequence } — lib/google-drive names it "<NNN>. <label>".
-    eq(uploads[0].sequencedSubfolder, monthFolder());
-    // The client folder sits inside the month folder.
-    eq(uploads[0].subfolder, 'Acme Corp');
-    eq(uploads[0].mimeType, 'application/pdf');
-    eq(uploads[0].buffer, PDF);
-    eq(result.fileId, 'FILE1');
-    // A successful export is silent: the release thread only hears about problems.
-    eq(replies, []);
-  });
-
-  await test('a JSON body instead of a PDF is not filed, and is flagged in the thread', async () => {
-    reset();
-    exportResult = { buffer: Buffer.from('{"status":"queued","id":9}'), contentType: 'application/json' };
-    const result = await exportReleasedReport(RELEASE);
-    eq(result, null);
-    eq(uploads.length, 0);
-    eq(replies.length, 1);
-    eq(replies[0].text.includes(':warning:'), true);
-    eq(replies[0].text.includes('PLEXTRAC_EXPORT_PATH'), true);
-  });
-
-  await test('a Plextrac failure is flagged, not thrown', async () => {
-    reset();
-    exportResult = new Error('Plextrac API GET /export failed: 404');
-    const result = await exportReleasedReport(RELEASE);
-    eq(result, null);
-    eq(uploads.length, 0);
-    eq(replies[0].text.includes('needs saving manually'), true);
-    eq(replies[0].text.includes('404'), true);
-  });
-
-  await test('a Drive failure is flagged, not thrown', async () => {
-    reset();
-    drive.uploadFile = async () => { throw new Error('insufficientFilePermissions'); };
-    const result = await exportReleasedReport(RELEASE);
-    eq(result, null);
-    eq(replies[0].text.includes('insufficientFilePermissions'), true);
-    drive.uploadFile = async (args) => { uploads.push(args); return { ...uploadResult, name: args.filename }; };
+    eq(resolved, [{ folderId: 'FOLDER_REPORTS', sequencedSubfolder: monthFolder(at), subfolder: 'Acme Corp' }]);
+    eq(releaseFolderPath({ clientName: 'Acme Corp', exportedAt: at }), '003. September 2026/Acme Corp');
   });
 
   await test('an unnamed client still files under a usable folder', async () => {
-    reset();
-    await exportReleasedReport({ ...RELEASE, clientName: '', reportName: '' });
-    eq(uploads[0].sequencedSubfolder, monthFolder());
-    eq(uploads[0].subfolder, 'Unknown client');
-    eq(TIMESTAMPED.test(uploads[0].filename), true);
+    resolved = [];
+    await resolveReleaseFolder({ clientName: '', exportedAt: new Date() });
+    eq(resolved[0].subfolder, 'Unknown client');
   });
 
   await test('the client name is sanitised into a safe folder name', async () => {
-    reset();
-    await exportReleasedReport({ ...RELEASE, clientName: 'Acme / Corp: "UK"' });
-    eq(uploads[0].subfolder, 'Acme Corp UK');
+    resolved = [];
+    await resolveReleaseFolder({ clientName: 'Acme / Corp: "UK"', exportedAt: new Date() });
+    eq(resolved[0].subfolder, 'Acme Corp UK');
+  });
+
+  console.log('\npostToThread:');
+
+  await test('replies in the release thread, or posts standalone without one', async () => {
+    replies = [];
+    await postToThread('C0REL', 'ts-9', 'needs a human');
+    await postToThread('C0REL', null, 'no thread');
+    await postToThread(null, 'ts-9', 'no channel: dropped');
+    eq(replies, [
+      { channel: 'C0REL', threadTs: 'ts-9', text: 'needs a human' },
+      { channel: 'C0REL', threadTs: null, text: 'no thread' },
+    ]);
   });
 
   console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`);

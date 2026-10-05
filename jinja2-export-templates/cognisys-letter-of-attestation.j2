@@ -7,8 +7,8 @@
 
       (CLIENT NAME)            the PlexTrac client's name
       (MONTH YEAR)             the month and year the letter is exported, e.g. "September 2026"
-      (LINKS and APP NAMES)    the Scope narrative's in-scope table: one line per host,
-                               URL on the left, its notes on the right
+      (LINKS and APP NAMES)    the Scope narrative's in-scope table, printed as PlexTrac
+                               holds it (its own table, header row and colours)
       (TOTAL ISSUE COUNT)      number of findings, e.g. "9 issues"
       (INSERT ISSUE COUNT HERE) per-severity breakdown, e.g. "1 Critical, 2 High and 6 Low";
                                severities with no findings are left out
@@ -30,7 +30,8 @@
 {%- set SCOPE_END           = "The following activities were out of scope for this engagement" -%}   {#- everything from here on is left out -#}
 {%- set SCOPE_DROP_LINES    = ["In-Scope URLs", "In-Scope URL(s)", "In-Scope URL"] -%}   {#- headings removed from the host list -#}
 {%- set SCOPE_STOP_HEADINGS = ["User Authentication"] -%}   {#- a section from one of these headings on is left out: it lists test accounts, not hosts. Set [] to include it. -#}
-{%- set SCOPE_TABLE_HEADERS = true -%}              {#- true = the first row of each scope table is its header row (URL | Notes), not a host -#}
+{%- set SCOPE_TABLE_HEADERS = true -%}              {#- true = the first row of each scope table is its header row (URL | Notes): always printed, and a table with nothing under it is left out -#}
+{%- set SCOPE_DROP_BLANK_ROWS = true -%}            {#- true = table rows left blank in PlexTrac's scope template are not printed -#}
 {%- set COUNT_SEVERITIES    = ["Critical", "High", "Medium", "Low", "Informational"] -%}   {#- severities counted, in print order -#}
 {%- set NUMBERS_AS_WORDS    = false -%}             {#- true = "nine issues" rather than "9 issues" -#}
 {%- set EXCLUDE_FINDING_TITLES = [] -%}             {#- finding titles left out of the counts -#}
@@ -168,21 +169,29 @@
 {%- set total_issues = num(nn.total)|string ~ (" issue" if nn.total == 1 else " issues") -%}
 
 {#- ========================= (LINKS and APP NAMES) =========================
-    Read from the SCOPE_NARRATIVE narrative, which PlexTrac holds as rich text:
+    Printed straight from the SCOPE_NARRATIVE narrative - tables and all - as
+    PlexTrac holds it:
 
       <h5>In-Scope URLs</h5>
-      <table> URL | Notes [| Environment]      <- header row
-              https://app.example.com | Portal  <- one row per host
-      </table>
+      <figure class="table"><table>
+        URL | Notes                          <- header row, PlexTrac's fill
+        https://app.example.com | Portal     <- one row per host
+      </table></figure>
       <h5>User Authentication</h5> <table> test accounts </table>
       <p>The following activities were out of scope for this engagement:</p> ...
 
-    Everything from SCOPE_END on is dropped, as is the section from any
-    SCOPE_STOP_HEADINGS heading on. Each table row becomes one host - its cells
-    in scope_rows as [URL, Notes, ...] - skipping header rows and rows left blank
-    in the template. Text outside tables (a scope written as paragraphs or a
-    bullet list) becomes one host per paragraph / item, minus the
-    SCOPE_DROP_LINES headings. Tags, styles and links are stripped to plain text.
+    The narrative is taken apart into its blocks - headings, paragraphs, lists,
+    whole tables - and printed in order, leaving out:
+      - everything from SCOPE_END on;
+      - everything from a SCOPE_STOP_HEADINGS block on (the test accounts);
+      - SCOPE_DROP_LINES blocks (the "In-Scope URLs" heading: the letter labels
+        the section "Host(s)" itself);
+      - blocks with no text (the template's empty spacer paragraphs), and with
+        SCOPE_DROP_BLANK_ROWS, table rows left blank in the template.
+    What is kept is output as PlexTrac's own HTML; the stylesheet only fits it
+    to the page (.scope-table). A table with no host rows under its header -
+    a scope left unfilled - is left out, so an empty scope prints the red
+    placeholder rather than an empty table.
 =========================================================================== -#}
 {%- set ss.scope = "" -%}
 {%- set _es = REPORT_INFO.exec_summary if REPORT_INFO.exec_summary
@@ -199,45 +208,52 @@
 
 {%- set _drop = [] -%}{%- for _l in SCOPE_DROP_LINES -%}{%- set _ = _drop.append(_l|lower) -%}{%- endfor -%}
 {%- set _stop = [] -%}{%- for _l in SCOPE_STOP_HEADINGS -%}{%- set _ = _stop.append(_l|lower) -%}{%- endfor -%}
-{%- set bb = namespace(stopped=false) -%}
-{%- set scope_rows = [] -%}
+{%- set sc = namespace(stopped=false, tables=0, text="", table="", rows=0) -%}
+{%- set scope_blocks = [] -%}   {#- the HTML printed under "Host(s)", in order -#}
 
-{#- Text outside tables: one line per block element. striptags turns &nbsp; into
-    a space and trim removes it, so the template's empty spacer paragraphs vanish. -#}
-{%- macro _scope_text(html) -%}
-  {#- ss.t, not a plain variable: a plain `set` inside a for loop is lost when the loop ends. -#}
-  {%- set ss.t = html -%}
-  {%- for _closer in ["</p>", "</li>", "</div>", "</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "<br>", "<br/>", "<br />"] -%}
-    {%- set ss.t = ss.t.replace(_closer, "\n") -%}
+{#- Everything outside tables, one block per heading / paragraph / list. A block
+    runs up to and including its closing tag; striptags turns &nbsp; into a
+    space and trim removes it, so empty spacer blocks have no text. Printing the
+    kept blocks in order reproduces PlexTrac's HTML, minus what was left out. -#}
+{%- macro _scope_blocks(html) -%}
+  {%- set sc.text = html -%}
+  {%- for _closer in ["</p>", "</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</ul>", "</ol>", "</div>", "</blockquote>", "</pre>", "</figure>"] -%}
+    {%- set sc.text = sc.text.replace(_closer, _closer ~ "@@SCOPE-BLOCK@@") -%}
   {%- endfor -%}
-  {%- for _line in ss.t.split("\n") -%}
-    {%- set ss.line = _line|striptags|trim -%}
-    {%- set ss.key = ss.line|lower|replace(":", "")|trim -%}
-    {%- if ss.key in _stop -%}{%- set bb.stopped = true -%}{%- endif -%}
-    {%- if ss.line and not bb.stopped and ss.key not in _drop -%}
-      {%- set _ = scope_rows.append([ss.line]) -%}
+  {%- for _block in sc.text.split("@@SCOPE-BLOCK@@") -%}
+    {%- set ss.key = _block|striptags|trim|lower|replace(":", "")|trim -%}
+    {%- if ss.key in _stop -%}{%- set sc.stopped = true -%}{%- endif -%}
+    {%- if ss.key and not sc.stopped and ss.key not in _drop -%}
+      {%- set _ = scope_blocks.append(_block) -%}
     {%- endif -%}
   {%- endfor -%}
 {%- endmacro -%}
 
 {%- set _parts = ss.scope.split("<table") -%}
-{{- _scope_text(_parts[0]) -}}
+{{- _scope_blocks(_parts[0]) -}}
 {%- for _part in _parts[1:] -%}
   {%- set _split = _part.split("</table>", 1) -%}
-  {%- if not bb.stopped -%}
-    {%- for _row in _split[0].replace("<th", "<td").split("<tr")[1:] -%}
-      {%- if not (SCOPE_TABLE_HEADERS and loop.first) -%}
-        {%- set _cells = [] -%}
-        {%- for _cell in _row.split("<td")[1:] -%}
-          {%- set _ = _cells.append(("<td" ~ _cell)|striptags|trim) -%}
-        {%- endfor -%}
-        {%- if _cells|select|list -%}
-          {%- set _ = scope_rows.append(_cells) -%}
-        {%- endif -%}
+  {%- if not sc.stopped -%}
+    {#- The table as PlexTrac wrote it, minus the rows left blank. -#}
+    {%- set _rows = _split[0].split("<tr") -%}
+    {%- set sc.table = "<table" ~ _rows[0] -%}
+    {%- set sc.rows = 0 -%}
+    {%- for _row in _rows[1:] -%}
+      {%- set ss.cells = ("<tr" ~ _row)|striptags|trim -%}
+      {%- set bb_header = SCOPE_TABLE_HEADERS and loop.first -%}
+      {%- if bb_header or ss.cells or not SCOPE_DROP_BLANK_ROWS -%}
+        {%- set sc.table = sc.table ~ "<tr" ~ _row -%}
+      {%- endif -%}
+      {%- if not bb_header and ss.cells -%}
+        {%- set sc.rows = sc.rows + 1 -%}
       {%- endif -%}
     {%- endfor -%}
+    {%- if sc.rows -%}
+      {%- set _ = scope_blocks.append('<div class="scope-table">' ~ sc.table ~ "</table></div>") -%}
+      {%- set sc.tables = sc.tables + 1 -%}
+    {%- endif -%}
   {%- endif -%}
-  {%- if _split|length > 1 -%}{{- _scope_text(_split[1]) -}}{%- endif -%}
+  {%- if _split|length > 1 -%}{{- _scope_blocks(_split[1]) -}}{%- endif -%}
 {%- endfor -%}
 <!DOCTYPE html>
 <html lang="en-GB">
@@ -311,21 +327,29 @@ p { margin: 0; }
 .sp-11     { height: 11.97pt; }   /* empty 11pt line */
 .sp-10     { height: 10.88pt; }   /* empty 10pt line */
 
-/* Host table: 9045tw (452.25pt) in two equal columns, zero cell padding,
-   white borders on white - so invisible, and left out. Row heights are
-   Word's: "Host(s)" row at least 14.25pt; the hosts row opens with an empty
-   10.5pt Arial paragraph (12.87pt including the border); the trailing empty
-   row is 20.37pt. */
-table.hosts { width: 452.25pt; table-layout: fixed; border-collapse: collapse; }
-table.hosts td { padding: 0; vertical-align: top; width: 226.125pt; }
-table.hosts tr.head td { height: 14.25pt; font-size: 9pt; color: var(--blue); }
-table.hosts tr.list.first td::before { content: ""; display: block; height: 12.87pt; }
-table.hosts tr.tail td { height: 20.37pt; }
-/* One host per row: URL in the left column, its notes in the right, a little
-   air between hosts. Long URLs wrap rather than overflow the column. */
-table.hosts td.host-list { overflow-wrap: anywhere; padding-bottom: 3pt; }
-table.hosts tr.list td.host-list + td.host-list { padding-left: 8pt; }
-table.hosts tr { break-inside: avoid; page-break-inside: avoid; }
+/* Host(s): the Scope narrative's own HTML, printed as PlexTrac holds it - its
+   table, header fill and cell border colours included. These rules only fit it
+   to the letter: the full 452.25pt text width, the letter's font, and the 1px
+   grid PlexTrac's editor draws round every cell (each cell's inline
+   border-color still colours it). The px widths and heights PlexTrac puts on
+   cells are sized for its editor, not an A4 page, so they give way - an
+   !important rule beats an inline style. */
+.hosts-head { font-size: 9pt; color: var(--blue); min-height: 14.25pt; }
+.scope { margin-top: 4pt; }
+.scope p, .scope li { margin: 0; }
+.scope ul, .scope ol { margin: 2pt 0 4pt 14pt; padding: 0; }
+.scope h1, .scope h2, .scope h3, .scope h4, .scope h5, .scope h6 {
+  font-size: 10pt; font-weight: bold; margin: 6pt 0 3pt; color: var(--ink);
+}
+.scope-table { margin: 2pt 0 6pt; }
+.scope-table table {
+  width: 100% !important; table-layout: auto; border-collapse: collapse; border: 0;
+}
+.scope-table td, .scope-table th {
+  border: 0.75pt solid #BFBFBF; padding: 2pt 5pt; vertical-align: top; text-align: left;
+  width: auto !important; height: auto !important; overflow-wrap: anywhere;
+}
+.scope-table tr { break-inside: avoid; page-break-inside: avoid; }
 
 /* A placeholder the template could not fill. */
 .tpl-missing { color: #B00020; }
@@ -344,8 +368,8 @@ table.hosts tr { break-inside: avoid; page-break-inside: avoid; }
 client keys   {{ (CLIENT_INFO.keys()|list if CLIENT_INFO is mapping else [])|join(", ")|e }}
 issued        {{ ss.issued|e }} -> {{ month_year|striptags|e }}
 findings      {{ report_findings|length }} collected: {% for f in report_findings %}{{ f.severity|e }}{{ ", " if not loop.last }}{% endfor %}
-scope rows    {{ scope_rows|length }}{% for r in scope_rows %}
-  {{ r|join(" | ")|e }}{% endfor %}
+scope         {{ scope_blocks|length }} block(s), {{ sc.tables }} table(s){% for b in scope_blocks %}
+  {{ b|striptags|truncate(160, true)|e }}{% endfor %}
 
 custom fields:
 {% for _bag in [REPORT_INFO.fields, REPORT_INFO.custom_fields, REPORT_INFO.custom_field] if _bag %}{% for _f in (_bag.values()|list if _bag is mapping else _bag) if _f is mapping %}  {{ (_f.label if _f.label else _f.key)|e }} = {{ (_f.value if _f.value else _f.text)|string|truncate(120, true)|e }}
@@ -368,21 +392,16 @@ custom fields:
 <p>Based on the services agreed with {{ client_name }} in the proposal, the following areas were tested during this assessment:</p>
 <p class="sp-10"></p>
 
-<table class="hosts">
-  <tr class="head"><td>Host(s)</td><td></td></tr>
-  {%- for row in scope_rows %}
-  <tr class="list{{ ' first' if loop.first }}">
-    <td class="host-list">{{ row[0]|e }}</td>
-    <td class="host-list">{{ row[1:]|select|join(" – ")|e }}</td>
-  </tr>
-  {%- else %}
-  <tr class="list first">
-    <td class="host-list">{{ missing("(LINKS and APP NAMES)") }}</td>
-    <td></td>
-  </tr>
-  {%- endfor %}
-  <tr class="tail"><td></td><td></td></tr>
-</table>
+<p class="hosts-head">Host(s)</p>
+{%- if scope_blocks %}
+<div class="scope">
+{%- for _block in scope_blocks %}
+{{ _block }}
+{%- endfor %}
+</div>
+{%- else %}
+<p class="scope-missing">{{ missing("(LINKS and APP NAMES)") }}</p>
+{%- endif %}
 <p class="sp-10"></p>
 
 <p class="loa-h">Summary of the Assessment Results</p>

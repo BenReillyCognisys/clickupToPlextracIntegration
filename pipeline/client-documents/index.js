@@ -1,8 +1,11 @@
-// Client-facing documents for a released report — the executive summary and the letter
-// of attestation (config/client-documents.js).
+// Client-facing documents for a released report — the full report, the executive
+// summary and the letter of attestation (config/client-documents.js).
 //
 // For each document:
-//   1. Plextrac data   report, client and findings, fetched fresh for THIS release
+//   1. Plextrac data   report, client and findings, fetched fresh for THIS release;
+//                      for a document with `findings: 'full'` (the full report) also
+//                      every finding's full record, with its screenshots fetched from
+//                      Plextrac and inlined (./images)
 //   2. Template        a reduced copy of that data (./data) → the document's Jinja2
 //                      template, which fills itself from it → PDF (lib/pdf-renderer)
 //   3. Publish         into the release's Drive folder and onto the report's Artifacts
@@ -20,8 +23,13 @@ const renderer = require('../../lib/pdf-renderer');
 const drive = require('../../lib/google-drive');
 const { documentFilename, looksLikePdf } = require('../report-export');
 const data = require('./data');
+const images = require('./images');
+const { limiter } = require('../../lib/concurrency');
 const DOCUMENTS = require('../../config/client-documents');
 const log = require('../../lib/logger');
+
+// Full finding records fetched from Plextrac at once, per release.
+const FINDING_FETCH_CONCURRENCY = 4;
 
 // Set to "false" to file the documents in Drive only.
 const ARTIFACTS_ENABLED = process.env.CLIENT_DOCS_PLEXTRAC_ARTIFACTS !== 'false';
@@ -78,6 +86,41 @@ async function loadReportData({ clientId, reportId }) {
   return { report, clientRecord, findings: data.normaliseFindings(rawFindings) };
 }
 
+// How much of each finding a document is given: 'full' or 'summary' (see ./data).
+const detailOf = (doc) => (doc.findings === 'full' ? 'full' : 'summary');
+
+/**
+ * The full record of every finding, for the full report. Each is fetched
+ * by the release's clientId AND reportId, and must say it belongs to that report.
+ * Throws if any one can't be fetched: a full report missing a finding must not be
+ * filed as if it were complete.
+ */
+async function loadFullFindings({ clientId, reportId, findings }) {
+  const slots = limiter(FINDING_FETCH_CONCURRENCY);
+  return Promise.all(findings.map((listed) => slots(async () => {
+    if (listed.flaw_id == null) throw new Error(`finding "${listed.title}" has no id in Plextrac's list`);
+    const full = await api.getFinding(clientId, reportId, listed.flaw_id);
+    if (!full || typeof full !== 'object') throw new Error(`Plextrac returned no finding ${listed.flaw_id}`);
+    if (full.report_id != null && String(full.report_id) !== String(reportId)) {
+      throw new Error(`finding ${listed.flaw_id} belongs to report ${full.report_id}, not ${reportId}`);
+    }
+    return full;
+  })));
+}
+
+/**
+ * The full report's template context: every finding in full, screenshots
+ * inlined. `missing` lists the screenshots that could not be printed.
+ */
+async function fullReportContext({ clientId, reportId, loaded, exportedAt }) {
+  const full = await loadFullFindings({ clientId, reportId, findings: loaded.findings });
+  const shots = await images.inlineScreenshots(full.map(data.reduceFullFinding));
+  return {
+    context: data.templateContext({ ...loaded, findings: shots.findings, exportedAt, detail: 'full' }),
+    screenshots: { inlined: shots.inlined, missing: shots.missing },
+  };
+}
+
 /**
  * Builds every active document for one release.
  *
@@ -89,9 +132,12 @@ async function loadReportData({ clientId, reportId }) {
  * @param {'pdf'|'html'} [args.output='pdf']
  * @param {boolean} [args.respectSwitches=true]  false = make switched-off documents too (previews)
  * @returns {Promise<Array<{doc, ok: boolean, buffer?: Buffer, filename?: string,
- *   warnings?: string[], error?: string}>>} one entry per active document, in config
- *   order. Rejects only if the Plextrac data can't be loaded. With every document
- *   switched off, returns [] without contacting Plextrac.
+ *   warnings?: string[], notices?: string[], screenshots?: object, error?: string}>>}
+ *   one entry per active document, in config order. `notices` are things a person
+ *   should check in a document that was made (a screenshot that couldn't be printed).
+ *   Rejects only if the report itself can't be loaded; the full findings failing
+ *   fails only the documents that need them. With every document switched off,
+ *   returns [] without contacting Plextrac.
  */
 async function generateClientDocuments({
   clientId, reportId, exportedAt, documents, output = 'pdf', respectSwitches = true,
@@ -99,18 +145,37 @@ async function generateClientDocuments({
   const docs = activeDocuments(documents, { reportId, respectSwitches });
   if (!docs.length) return [];
 
-  const context = data.templateContext({ ...(await loadReportData({ clientId, reportId })), exportedAt });
+  const loaded = await loadReportData({ clientId, reportId });
+  const contexts = { summary: data.templateContext({ ...loaded, exportedAt }) };
 
-  let rendered;
-  try {
-    rendered = await renderer.renderTemplates(docs.map((doc) => ({
-      id: doc.key, template: doc.template, context, output,
-    })));
-  } catch (err) {
-    rendered = new Map(docs.map((doc) => [doc.key, { ok: false, error: err.message }]));
+  // The full findings only when a document needs them — they are one Plextrac call per
+  // finding plus every screenshot.
+  let full = null;
+  let fullError = null;
+  if (docs.some((doc) => detailOf(doc) === 'full')) {
+    try {
+      full = await fullReportContext({ clientId, reportId, loaded, exportedAt });
+      contexts.full = full.context;
+    } catch (err) {
+      fullError = `the findings could not be loaded from Plextrac: ${err.message}`;
+    }
+  }
+
+  const renderable = docs.filter((doc) => contexts[detailOf(doc)]);
+  let rendered = new Map();
+  if (renderable.length) {
+    try {
+      rendered = await renderer.renderTemplates(renderable.map((doc) => ({
+        id: doc.key, template: doc.template, context: contexts[detailOf(doc)], output,
+        ...(doc.pdfOptions ? { pdf_options: doc.pdfOptions } : {}),
+      })));
+    } catch (err) {
+      rendered = new Map(renderable.map((doc) => [doc.key, { ok: false, error: err.message }]));
+    }
   }
 
   return docs.map((doc) => {
+    if (!contexts[detailOf(doc)]) return { doc, ok: false, error: fullError };
     const r = rendered.get(doc.key) || { ok: false, error: 'renderer returned no result' };
     if (r.ok && output === 'pdf' && !looksLikePdf(r.buffer)) {
       r.ok = false;
@@ -119,12 +184,16 @@ async function generateClientDocuments({
     if (r.warnings?.length) {
       log.warn('Client document rendered with warnings', { document: doc.key, warnings: r.warnings });
     }
-    return r.ok
-      ? {
-        doc, ok: true, buffer: r.buffer, warnings: r.warnings,
-        filename: documentFilename(doc.name, { date: exportedAt, tz: TZ, format: output }),
-      }
-      : { doc, ok: false, error: `Rendering failed: ${r.error}` };
+    if (!r.ok) return { doc, ok: false, error: `Rendering failed: ${r.error}` };
+    const made = {
+      doc, ok: true, buffer: r.buffer, warnings: r.warnings,
+      filename: documentFilename(doc.filename || doc.name, { date: exportedAt, tz: TZ, format: output }),
+    };
+    if (detailOf(doc) === 'full') {
+      made.screenshots = { inlined: full.screenshots.inlined, missing: full.screenshots.missing.length };
+      made.notices = full.screenshots.missing.map((m) => `a screenshot in "${m.title}" is missing from the PDF (${m.reason})`);
+    }
+    return made;
   });
 }
 
@@ -174,6 +243,7 @@ module.exports = {
   isEnabled,
   activeDocuments,
   loadReportData,
+  loadFullFindings,
   generateClientDocuments,
   publishClientDocument,
 };

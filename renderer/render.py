@@ -9,7 +9,8 @@ Protocol - JSON on stdin, JSON on stdout, nothing else on stdout:
     stdin:  {"jobs": [{"id": "exec-summary",
                        "template": "cognisys-exec-summary.j2",
                        "context": {...},            # the template's variables
-                       "output": "pdf" | "html"}]}   # html = skip WeasyPrint (previews)
+                       "output": "pdf" | "html",     # html = skip WeasyPrint (previews)
+                       "pdf_options": {"dpi": 150}}]}  # optional, see PDF_OPTIONS
 
     stdout: {"results": [{"id": "exec-summary", "ok": true,
                           "content_base64": "...", "warnings": ["..."]},
@@ -41,6 +42,22 @@ import sys
 import traceback
 
 ALLOWED_URL_PROTOCOLS = ("data",)
+
+# The WeasyPrint write_pdf options a job may set, and the type each must be. Anything
+# else in a job's pdf_options is ignored, so a job can't switch on, say, attachments.
+#   dpi              downsample images to at most this resolution (screenshots)
+#   optimize_images  recompress images losslessly
+#   jpeg_quality     re-encode JPEGs at this quality (0-95)
+PDF_OPTIONS = {"dpi": int, "optimize_images": bool, "jpeg_quality": int}
+
+
+def pdf_options(requested):
+    options = {}
+    for key, kind in PDF_OPTIONS.items():
+        value = (requested or {}).get(key)
+        if isinstance(value, kind) and not (kind is int and isinstance(value, bool)):
+            options[key] = value
+    return options
 
 
 class _Collector(logging.Handler):
@@ -94,10 +111,10 @@ def load_weasyprint():
     return HTML, URLFetcher
 
 
-def render_pdf(html, template_dir):
+def render_pdf(html, template_dir, options=None):
     HTML, URLFetcher = load_weasyprint()
     fetcher = URLFetcher(allowed_protocols=ALLOWED_URL_PROTOCOLS, timeout=5)
-    return HTML(string=html, base_url=template_dir, url_fetcher=fetcher).write_pdf()
+    return HTML(string=html, base_url=template_dir, url_fetcher=fetcher).write_pdf(**pdf_options(options))
 
 
 def run_job(env, template_dir, job):
@@ -111,7 +128,7 @@ def run_job(env, template_dir, job):
         if job.get("output", "pdf") == "html":
             content = html.encode("utf-8")
         else:
-            content = render_pdf(html, template_dir)
+            content = render_pdf(html, template_dir, job.get("pdf_options"))
         return {
             "id": job_id,
             "ok": True,

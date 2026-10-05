@@ -184,19 +184,21 @@ case-insensitive and substring-based ("Project Roadmap" matches "Roadmap",
 ## Released-report export (PDF → Google Drive)
 
 Releasing a report is also what files it. When a report reaches the released status,
-`pipeline/report-export.js` renders it to PDF via Plextrac and uploads that PDF to
-Google Drive. A successful export is silent in Slack; a failure is replied in the
-release announcement's thread. The client-facing Executive Summary and Letter of
-Attestation are made at the same time and filed in the same folder, see
-[client-documents.md](client-documents.md).
+its documents — the full report, the Executive Summary and the Letter of Attestation
+— are rendered here from the report's Plextrac data and the templates in
+`jinja2-export-templates/`, filed in Google Drive and uploaded to the report's
+Artifacts tab (`pipeline/release-exports.js`, see
+[client-documents.md](client-documents.md)). A successful export is silent in Slack;
+a failure is replied in the release announcement's thread.
 
 - **Where it lands.** `GOOGLE_DRIVE_REPORTS_FOLDER_ID` is the destination folder.
   Inside it, each report is filed under a **month folder**, then a **client folder**,
-  both created on first use, and named `Plextrac Full Report <timestamp>.pdf`:
+  both created on first use. The full report is named
+  `Full-Pentest-Report-Tech-Details <timestamp>.pdf`:
 
   ```
-  <folder>/001. July 2026/Acme Corp/Plextrac Full Report 2026-07-09 11-02-45.pdf
-  <folder>/002. August 2026/Beta Ltd/Plextrac Full Report 2026-08-14 15-42-07.pdf
+  <folder>/001. July 2026/Acme Corp/Full-Pentest-Report-Tech-Details 2026-07-09 11-02-45.pdf
+  <folder>/002. August 2026/Beta Ltd/Full-Pentest-Report-Tech-Details 2026-08-14 15-42-07.pdf
   <folder>/003. September 2026/...
   ```
 
@@ -232,45 +234,23 @@ Attestation are made at the same time and filed in the same folder, see
   Set `GOOGLE_DRIVE_REPORTS_MONTH_FOLDERS=false` to drop the month level
   (`<folder>/Acme Corp/...`).
 - **Every export is a new file.** Because the filename is a timestamp, releasing the
-  same report again **adds another PDF** alongside the earlier one rather than
-  overwriting it, so each release is kept. A webhook delivered twice within the same
-  second resolves to the same name and replaces in place; a retry that arrives later
-  leaves two copies.
+  same report again **adds another set of PDFs** alongside the earlier one rather
+  than overwriting it, so each release is kept. Two runs for the same report never
+  overlap, and a second run claims the next free second for its filenames.
 - **Nothing is fatal.** A failed export never affects the release: it is logged, and
-  a `:warning:` reply in the thread says the PDF needs saving manually and why.
-  Until `GOOGLE_DRIVE_REPORTS_FOLDER_ID` is set the export no-ops with a warning.
+  a `:warning:` reply in the thread says which document needs doing by hand and why.
+  Until `GOOGLE_DRIVE_REPORTS_FOLDER_ID` is set nothing is filed in Drive (the
+  Plextrac uploads still run).
 - **Permissions.** Uploads use the existing service-account key
   (`GOOGLE_SERVICE_ACCOUNT_KEY`) but request the full `.../auth/drive` scope, since
   the read-only scope can't write and `drive.file` can't write into a folder the app
   didn't create. **The service account (or the `GOOGLE_DRIVE_SUBJECT` user it
   impersonates) needs Editor access to the destination folder.**
 
-> ⚠️ **The Plextrac API account needs an export permission.** The endpoint itself is
-> confirmed correct — `/api/v1/client/{clientId}/report/{reportId}/export/{format}`,
-> with the format as a path segment (`?type=` / `?format=` are rejected as "not
-> allowed", and the v2 and `/{format}` variants are 404s), so leave
-> `PLEXTRAC_EXPORT_PATH` unset.
->
-> What fails is authorization. An account that can read the client and the report
-> (both `200`) is still refused on export with **HTTP 400** and:
->
-> ```json
-> {"status":"failed","message":[{"type":"unknown","message":"User is not authorized to perform this action."}]}
-> ```
->
-> Note it is a `400`, not a `403`, and the body never names the missing permission.
-> **Fix it in Plextrac RBAC by granting the export permission to the API account's
-> role** — not by changing the path. This is the same class of problem as the "View
-> Users" permission needed by `listTenantUsers`.
->
-> `node scripts/inspect-export.js <clientId> <reportId>` re-checks it: it prints the
-> account's plain read access to the client and report *above* the export attempts, so
-> a missing role permission (reads OK, export refused) stays distinguishable from an
-> account with no access to that client (reads refused too).
->
-> Separately, the pipeline checks the response actually starts with `%PDF-`, so a JSON
-> job/error body returned with a 200 is reported in Slack rather than filed in Drive as
-> an unopenable "PDF".
+> Plextrac's own PDF export (`/export/pdf`, which needs an export permission on the
+> API account's role) is no longer used on release. The full report is rendered here
+> from `cognisys-full-report.j2` instead; the API account only needs to read the
+> report and its findings, and to upload artifacts.
 
 ## Claude Pro vs Claude API
 

@@ -51,7 +51,8 @@ const crypto = require('crypto');
 const deliveryflow = require('../lib/deliveryflow-api');
 const store = require('../lib/deliveryflow-store');
 const api = require('../lib/plextrac-api');
-const { buildReportName, epochToISO } = require('../pipeline/plextrac-report');
+const { epochToISO } = require('../pipeline/plextrac-report');
+const { chooseReportName } = require('../pipeline/deliveryflow-report-name');
 const { fileIdFromUrl, driveFileUrl } = require('../lib/google-drive');
 const { postMessage } = require('../lib/slack');
 const { withTaskLock } = require('../lib/task-lock');
@@ -240,14 +241,22 @@ async function resolvePendingReport(record, startMs, endMs) {
     const currentName = report?.name ?? null;
     // plextrac_type names the report (config/portal-test-types.js); records written
     // before it existed only have test_type.
-    const resolvedName = buildReportName(record.plextrac_type ?? record.test_type, startMs, record.scope);
+    // Named as the auth-form endpoint names reports: qualified with the DealFlow line
+    // only if another engagement's report already has the plain name for that month.
+    const { name: resolvedName, scope, qualified } = await chooseReportName({
+      clientId, testingType: record.plextrac_type ?? record.test_type, startMs, scope: record.scope ?? null,
+      engagementId: record.engagement_id, ownReportId: reportId,
+      lineLabel: record.line_label ?? null, lineId: record.line_id ?? null,
+    });
     const nameChanged = currentName == null || currentName.toLowerCase() !== resolvedName.toLowerCase();
 
     const payload = { start_date: epochToISO(startMs), end_date: epochToISO(endMs) };
     if (nameChanged) payload.name = resolvedName;
     await api.updateReport(clientId, reportId, payload);
 
-    await mirror('schedule-task', record.engagement_id, { start_date_pending: false, report_name: resolvedName });
+    await mirror('schedule-task', record.engagement_id, {
+      start_date_pending: false, report_name: resolvedName, ...(qualified ? { scope } : {}),
+    });
 
     if (nameChanged) {
       log.info('DeliveryFlow schedule-task — start date booked, report renamed', {

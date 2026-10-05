@@ -1,5 +1,7 @@
 const crypto = require('crypto');
 const { findByCuid } = require('../lib/task-store');
+const deliveryflowStore = require('../lib/deliveryflow-store');
+const deliveryflow = require('../lib/deliveryflow-api');
 const { updateTaskStatus, getTask } = require('../lib/clickup-api');
 const { getReport, listReportFindings } = require('../lib/plextrac-api');
 const lookup = require('../lib/plextrac-lookup');
@@ -180,6 +182,47 @@ function verifySignature(secret, rawBody, header) {
   return headerBuf.length === computedBuf.length && crypto.timingSafeEqual(headerBuf, computedBuf);
 }
 
+// A DeliveryFlow engagement's report as the mapping the rest of the handler reads
+// (the shape of a ClickUp task mapping, without a ClickUp task).
+function mappingFromEngagement(record) {
+  return {
+    plextrac_client_id: record.plextrac_client_id,
+    plextrac_report_id: record.plextrac_report_id,
+    task_name:          record.report_name,
+    client_name:        record.client_name,
+  };
+}
+
+// The DeliveryFlow counterpart of the ClickUp status sync below: every status change
+// of an engagement's report is sent to DeliveryFlow as a report_status event, and
+// DeliveryFlow moves the project on (QA, Report Published). Best-effort and logged —
+// the QA automations above have already run, and Plextrac is never retried.
+async function forwardReportStatus(record, reportStatus, report) {
+  if (!deliveryflow.isConfigured()) {
+    log.warn('Plextrac report status not sent to DeliveryFlow — DELIVERYFLOW_EVENTS_URL is not set', {
+      engagementId: record.engagement_id, status: reportStatus,
+    });
+    return 'not_configured';
+  }
+  try {
+    await deliveryflow.sendEvent('report_status', { engagementId: record.engagement_id, dealId: record.deal_id ?? null }, {
+      status:     reportStatus,
+      reportId:   record.plextrac_report_id != null ? String(record.plextrac_report_id) : null,
+      reportName: report?.name || record.report_name || null,
+      reportUrl:  `${PLEXTRAC_BASE}/client/${record.plextrac_client_id}/report/${record.plextrac_report_id}`,
+    });
+    log.info('Plextrac report status sent to DeliveryFlow', {
+      engagementId: record.engagement_id, status: reportStatus, report_id: record.plextrac_report_id,
+    });
+    return 'sent';
+  } catch (err) {
+    log.error('Failed to send Plextrac report status to DeliveryFlow', {
+      reason: err.message, engagementId: record.engagement_id, status: reportStatus,
+    });
+    return 'failed';
+  }
+}
+
 // Plextrac status → ClickUp status (only statuses we act on)
 const STATUS_MAP = {
   'Ready For Review': process.env.CLICKUP_STATUS_QA      || 'QA / Reviewing',
@@ -228,6 +271,24 @@ async function handler(req, res) {
   // for them (below), but skip the ClickUp status sync since there is no task.
   let mapped = true;
 
+  // The DeliveryFlow engagement behind the report, when it is one: found by the cuid
+  // recorded when break.services created the report, else (below) by the report id
+  // the name-based fallback resolves.
+  let engagement = null;
+  if (!mapping) {
+    engagement = await deliveryflowStore.findByReportCuid(targetCuid).catch(err => {
+      log.error('DeliveryFlow engagement lookup by CUID failed', { reason: err.message, cuid: targetCuid });
+      return null;
+    });
+    if (engagement) {
+      mapped = false;
+      mapping = mappingFromEngagement(engagement);
+      log.info('Plextrac webhook — report belongs to a DeliveryFlow engagement', {
+        cuid: targetCuid, engagementId: engagement.engagement_id, report_id: engagement.plextrac_report_id,
+      });
+    }
+  }
+
   if (!mapping) {
     // Backwards compatibility for reports created before the ClickUp integration:
     // they have no CUID mapping. Plextrac's webhook can't send numeric IDs (only
@@ -262,8 +323,12 @@ async function handler(req, res) {
       task_name:          parsed.reportName,
       client_name:        parsed.clientName,
     };
-    log.info('Plextrac webhook — no mapping found; resolved IDs from payload names (pre-integration report)', {
+    // A DeliveryFlow report whose cuid wasn't recorded (Plextrac returned none when it
+    // was created) is still found by its id.
+    engagement = await deliveryflowStore.findByReportId(ids.reportId).catch(() => null);
+    log.info('Plextrac webhook — no mapping found; resolved IDs from payload names', {
       cuid: targetCuid, client_id: ids.clientId, report_id: ids.reportId,
+      engagementId: engagement?.engagement_id ?? null,
     });
   }
 
@@ -380,6 +445,11 @@ async function handler(req, res) {
     });
   }
 
+  // A DeliveryFlow engagement's report: DeliveryFlow is told the new status.
+  if (engagement) {
+    await forwardReportStatus(engagement, reportStatus, report);
+  }
+
   // Pre-integration reports have no ClickUp task to update — the QA review above
   // is the only action we take for them.
   if (!mapped) {
@@ -434,3 +504,4 @@ async function handler(req, res) {
 }
 
 module.exports = handler;
+module.exports.forwardReportStatus = forwardReportStatus;

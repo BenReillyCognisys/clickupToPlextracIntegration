@@ -39,7 +39,17 @@
  *   • client name or testing type changed — the portal re-scopes the form. A signed
  *     form is never rewritten; that is posted to Slack for someone to reissue.
  * New dates and consultants are kept on the record, which is what the availability
- * cache reads when AVAILABILITY_SOURCE=deliveryflow.
+ * cache reads when AVAILABILITY_SOURCE=deliveryflow. consultantEmails, when sent (even
+ * empty), replace the consultants on record; replaceDates: true makes the dates sent
+ * replace ours, a cleared date included.
+ *
+ * dealId is the DealFlow Deal ID, shared by every line item sold on the deal; lineId is
+ * the engagement's own line item and lineLabel its call-off or product name. The portal
+ * combines a deal's pentests into one authorisation form (relatedEngagementIds tells it
+ * which forms they are on), and two engagements whose reports would share a name — same
+ * type, client and month — get the second one qualified with its line
+ * (pipeline/deliveryflow-report-name.js). An engagement recorded under its line item,
+ * before the Deal ID was sent, moves onto the Deal ID on its next call.
  *
  * DeliveryFlow authenticates with a shared secret in the X-API-Key header:
  * DELIVERYFLOW_API_KEY when it is set, otherwise AVAILABILITY_API_KEY (the key the
@@ -56,7 +66,8 @@ const crypto = require('crypto');
 const { deliveryFlowKey } = require('../lib/deliveryflow-api');
 const { createAuthForm, updateAuthForm, createTestFilesLink } = require('../lib/secure-portal-api');
 const { findOrCreateClient } = require('../pipeline/plextrac-client');
-const { createPlextracReport, buildReportName, epochToISO } = require('../pipeline/plextrac-report');
+const { createPlextracReport, epochToISO } = require('../pipeline/plextrac-report');
+const { chooseReportName } = require('../pipeline/deliveryflow-report-name');
 const { syncClientName } = require('../pipeline/task-rename');
 const plextracApi = require('../lib/plextrac-api');
 const store = require('../lib/deliveryflow-store');
@@ -209,9 +220,12 @@ function resolveBlackBoxTier(known, engagementCost) {
 // The consultants delivering the engagement — they become the Plextrac report's
 // operators, as a ClickUp task's assignees do. Plextrac validates the addresses
 // itself; this only rejects values that aren't email-shaped at all.
+//
+// null when DeliveryFlow didn't send the field (the consultants on record stand); an
+// array — possibly empty — when it did (it replaces them).
 function optionalEmails(body, field) {
   const raw = body[field];
-  if (raw == null) return [];
+  if (raw == null) return null;
   if (!Array.isArray(raw)) throw new ValidationError(field, `${field} must be an array of email addresses`);
   if (raw.length > MAX_CONSULTANTS) {
     throw new ValidationError(field, `${field} may list at most ${MAX_CONSULTANTS} addresses`);
@@ -222,9 +236,22 @@ function optionalEmails(body, field) {
   return [...new Set(emails)];
 }
 
+// An optional id: null when absent, else the same rule as requiredId.
+function optionalId(body, field) {
+  if (body[field] == null || String(body[field]).trim() === '') return null;
+  return requiredId(body, field);
+}
+
+const has = (body, field) => Object.prototype.hasOwnProperty.call(body, field);
+
 function parseAuthFormRequest(body) {
   const engagementId = requiredId(body, 'engagementId');
+  // The DealFlow Deal ID, shared by every line item sold on the deal; the portal
+  // combines the deal's pentests into one authorisation form under it. lineId is this
+  // engagement's own line item (DeliveryFlow's deal reference), and lineLabel the
+  // line's call-off or product name — used to tell apart reports that would clash.
   const dealId = requiredId(body, 'dealId');
+  const lineId = optionalId(body, 'lineId');
 
   const clientName = typeof body.clientName === 'string' ? body.clientName.trim() : '';
   if (!clientName) throw new ValidationError('clientName', 'clientName is required');
@@ -256,6 +283,8 @@ function parseAuthFormRequest(body) {
   return {
     engagementId,
     dealId,
+    lineId,
+    lineLabel: optionalText(body, 'lineLabel', MAX_CLIENT_NAME),
     clientName,
     testType,
     plextracType,
@@ -263,10 +292,18 @@ function parseAuthFormRequest(body) {
     engagementCost,
     blackBox,
     scope: optionalText(body, 'scope', MAX_SCOPE),
+    // A scope not sent keeps the one on record (see setUpEngagement): DeliveryFlow has
+    // no scope field, and the report namer may have settled one to avoid a clash.
+    scopeSent: has(body, 'scope'),
     consultantEmails: optionalEmails(body, 'consultantEmails'),
     engagementUrl: optionalUrl(body, 'engagementUrl'),
     startDate,
     endDate,
+    // replaceDates: true says these are the engagement's dates as DeliveryFlow now
+    // holds them, so a date it cleared is cleared here too. Without it a date left
+    // out or null keeps the one on record (a portal booking isn't wiped by a call
+    // that doesn't carry it).
+    replaceDates: body.replaceDates === true,
   };
 }
 
@@ -342,7 +379,12 @@ async function syncLinkedReport(existing, input, changes) {
   if (!changed('testType') && !changed('scope') && !datesArrived) return out;
 
   const startMs = input.startDate ?? existing.start_date ?? null;
-  const name = buildReportName(input.plextracType, startMs, input.scope);
+  const { name, scope, qualified } = await chooseReportName({
+    clientId, testingType: input.plextracType, startMs, scope: input.scope,
+    engagementId: input.engagementId, ownReportId: reportId,
+    lineLabel: input.lineLabel ?? existing.line_label, lineId: input.lineId ?? existing.line_id,
+  });
+  if (qualified) input.scope = scope;
   try {
     const report = await plextracApi.getReport(clientId, reportId);
     const current = report?.name ?? null;
@@ -373,6 +415,7 @@ async function syncLinkedReport(existing, input, changes) {
   try {
     await store.updateEngagement(input.engagementId, {
       report_name: out.reportName, start_date_pending: out.startDatePending, plextrac_type: input.plextracType,
+      ...(qualified ? { scope } : {}),
     });
   } catch (err) {
     log.error('DeliveryFlow auth-form — could not record the report update', { engagementId: input.engagementId, reason: err.message });
@@ -413,6 +456,8 @@ async function rescopeAuthForm(input, plextrac, previous) {
       engagementId,
       engagementUrl: input.engagementUrl,
       dealId: input.dealId,
+      lineId: input.lineId,
+      relatedEngagementIds: await relatedEngagementIds(input),
     });
   } catch (err) {
     if (err.status === 404) {
@@ -540,6 +585,8 @@ router.post('/auth-form/update', requireDeliveryFlowKey, async (req, res) => {
         input = parseAuthFormRequest({
           engagementId,
           dealId: body.dealId ?? existing.deal_id,
+          lineId: body.lineId ?? existing.line_id ?? null,
+          lineLabel: body.lineLabel ?? existing.line_label ?? null,
           clientName: body.clientName ?? existing.client_name ?? existing.form_client_name,
           testType: body.testType,
           engagementCost: body.engagementCost ?? existing.engagement_cost,
@@ -631,7 +678,17 @@ async function ensurePlextracReport(input, existing) {
   // No start date: the name falls back to the current month, exactly as a ClickUp
   // task without one does, and the record is flagged so it can be renamed later.
   const startDatePending = input.startDate == null;
-  const name = buildReportName(plextracType, input.startDate, input.scope);
+  const { name, scope, qualified } = await chooseReportName({
+    clientId, testingType: plextracType, startMs: input.startDate, scope: input.scope,
+    engagementId, lineLabel: input.lineLabel, lineId: input.lineId,
+  });
+  if (qualified) {
+    // Recorded below and in the auth-form record, so later renames keep it.
+    input.scope = scope;
+    log.info('DeliveryFlow auth-form — report name qualified with the DealFlow line to avoid a clash', {
+      engagementId, report: name,
+    });
+  }
   if (startDatePending) {
     log.warn('DeliveryFlow engagement has no startDate — using current month/year for report name', {
       engagementId, report: name,
@@ -643,7 +700,7 @@ async function ensurePlextracReport(input, existing) {
     report = await createPlextracReport(clientId, {
       name,
       testingType: plextracType,
-      operatorEmails: input.consultantEmails,
+      operatorEmails: input.consultantEmails || [],
       startDateMs: input.startDate,
       endDateMs: input.endDate,
     });
@@ -669,6 +726,7 @@ async function ensurePlextracReport(input, existing) {
   try {
     await store.saveReport({
       engagementId, dealId, clientName, testType, plextracType,
+      lineId: input.lineId, lineLabel: input.lineLabel,
       scope: input.scope,
       plextracClientId: clientId,
       plextracReportId: report.reportId,
@@ -692,6 +750,19 @@ async function ensurePlextracReport(input, existing) {
   return { ok: true, plextrac };
 }
 
+// The other engagements recorded under the same deal. Best-effort: without them the
+// portal still groups by the Deal ID; this only helps it find a form made before it
+// did.
+async function relatedEngagementIds({ engagementId, dealId }) {
+  try {
+    const siblings = await store.findByDealId(dealId);
+    return siblings.map((r) => r.engagement_id).filter((id) => id && id !== engagementId);
+  } catch (err) {
+    log.warn('DeliveryFlow auth-form — could not list the deal\'s other engagements', { engagementId, dealId, reason: err.message });
+    return [];
+  }
+}
+
 // `opts` is passed through to requestAuthForm (see there); /auth-form sends none.
 async function setUpEngagement(input, opts = {}) {
   const { engagementId, dealId, clientName, testType } = input;
@@ -705,7 +776,22 @@ async function setUpEngagement(input, opts = {}) {
     return { status: 500, body: { ok: false, error: 'could not read the engagement record; safe to retry' } };
   }
 
-  if (existing && existing.deal_id && existing.deal_id !== dealId) {
+  // Engagements set up before DeliveryFlow sent the real Deal ID were recorded under
+  // their line item (or their own id). The first call carrying the Deal ID moves the
+  // record onto it — saveAuthForm writes the new deal_id — rather than refusing it.
+  const legacyDeal = existing?.deal_id
+    && existing.deal_id !== dealId
+    && [input.lineId, engagementId].filter(Boolean).includes(existing.deal_id);
+  if (legacyDeal) {
+    log.info('DeliveryFlow auth-form — engagement moved from its line item onto the Deal ID', {
+      engagementId, from: existing.deal_id, to: dealId,
+    });
+    try {
+      await store.updateEngagement(engagementId, { deal_id: dealId, line_id: input.lineId ?? existing.deal_id });
+    } catch (err) {
+      log.error('DeliveryFlow auth-form — could not move the engagement onto the Deal ID', { engagementId, reason: err.message });
+    }
+  } else if (existing && existing.deal_id && existing.deal_id !== dealId) {
     log.warn('DeliveryFlow auth-form — engagement already belongs to a different deal', {
       engagementId, dealId, existingDealId: existing.deal_id,
     });
@@ -726,6 +812,9 @@ async function setUpEngagement(input, opts = {}) {
     });
     log.notify(`DeliveryFlow sent "${bb.requestedTestType}" for ${clientName} (engagement ${engagementId}) but the engagement cost is £${input.engagementCost}, so it was set up as "${testType}". Please check the engagement in DeliveryFlow.`);
   }
+
+  // No scope sent: keep the one on record, so a qualified report name isn't undone.
+  if (!input.scopeSent && existing?.scope) input.scope = existing.scope;
 
   // ── Phase 1: blacklist ────────────────────────────────────────────────────
   const hit = findBlacklistedWord(clientName, input.scope);
@@ -862,6 +951,10 @@ async function requestAuthForm(input, plextrac, existing, opts = {}) {
         engagementId,
         engagementUrl: input.engagementUrl,
         dealId,
+        lineId: input.lineId,
+        // The deal's other engagements: the portal folds this one into the form they
+        // are already on, so a deal's pentests share one authorisation form.
+        relatedEngagementIds: await relatedEngagementIds(input),
       });
     } catch (err) {
       // 400: the portal can't place this testing type on a form. Retrying won't

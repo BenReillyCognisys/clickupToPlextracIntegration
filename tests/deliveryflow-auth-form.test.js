@@ -85,6 +85,13 @@ const plextracApi = require('../lib/plextrac-api');
 const reportNames = {};   // reportId -> current name (defaults to what createPlextracReport made)
 const reportUpdates = [];
 plextracApi.getReport = async (clientId, reportId) => ({ name: reportNames[reportId] });
+// The report namer reads the client's reports to spot a clash.
+plextracApi.listClientReports = async (clientId) =>
+  Object.entries(plextracReports[clientId] || {}).map(([name, id]) => ({ id, name }));
+// ClickUp mappings the namer checks a clashing report against: reportId -> task id.
+const clickupMappings = {};
+require('../lib/task-store').findByReportId = async (id) =>
+  (clickupMappings[id] ? { clickup_task_id: clickupMappings[id] } : null);
 plextracApi.updateReport = async (clientId, reportId, payload) => {
   reportUpdates.push({ reportId, payload });
   if (payload.name) reportNames[reportId] = payload.name;
@@ -107,6 +114,7 @@ store.saveReport = async (rec) => {
   if (storeMode === 'report-write-fail') throw new Error('mongo down');
   records[rec.engagementId] = {
     ...records[rec.engagementId], engagement_id: rec.engagementId, deal_id: rec.dealId,
+    ...(rec.lineId ? { line_id: rec.lineId } : {}), ...(rec.lineLabel ? { line_label: rec.lineLabel } : {}),
     client_name: rec.clientName, test_type: rec.testType, scope: rec.scope ?? null,
     plextrac_type: rec.plextracType ?? rec.testType,
     plextrac_client_id: rec.plextracClientId, plextrac_report_id: rec.plextracReportId,
@@ -120,17 +128,25 @@ store.saveAuthForm = async (rec) => {
   records[rec.engagementId] = {
     ...records[rec.engagementId],
     engagement_id: rec.engagementId, deal_id: rec.dealId,
+    ...(rec.lineId ? { line_id: rec.lineId } : {}), ...(rec.lineLabel ? { line_label: rec.lineLabel } : {}),
     client_name: rec.clientName, test_type: rec.testType, scope: rec.scope ?? null,
     form_url: rec.formUrl, form_token: rec.formToken ?? null,
     form_client_name: rec.formClientName ?? rec.clientName, form_test_type: rec.formTestType ?? rec.testType,
     ...(rec.engagementUrl ? { engagement_url: rec.engagementUrl } : {}),
-    ...(rec.startDate != null ? { start_date: rec.startDate } : {}),
-    ...(rec.endDate != null ? { end_date: rec.endDate } : {}),
-    ...(rec.consultantEmails?.length ? { consultant_emails: rec.consultantEmails } : {}),
+    ...(rec.replaceDates
+      ? { start_date: rec.startDate ?? null, end_date: rec.endDate ?? null }
+      : {
+        ...(rec.startDate != null ? { start_date: rec.startDate } : {}),
+        ...(rec.endDate != null ? { end_date: rec.endDate } : {}),
+      }),
+    ...(Array.isArray(rec.consultantEmails) ? { consultant_emails: rec.consultantEmails, consultant: null } : {}),
     ...(rec.engagementCost != null ? { engagement_cost: rec.engagementCost } : {}),
     ...(rec.testFilesUrl ? { test_files_url: rec.testFilesUrl, test_files_token: rec.testFilesToken ?? null } : {}),
   };
 };
+store.findByReportId = async (id) =>
+  Object.values(records).find((r) => r.plextrac_report_id != null && String(r.plextrac_report_id) === String(id)) || null;
+store.findByDealId = async (dealId) => Object.values(records).filter((r) => r.deal_id === String(dealId));
 store.updateEngagement = async (id, set) => {
   if (!records[id]) return false;
   records[id] = { ...records[id], ...set };
@@ -848,6 +864,92 @@ const valid = (over = {}) => ({
     assert.strictEqual(r.status, 201);
     assert.strictEqual(r.json.testFilesUrl, 'https://portal.test/u/eng-files');
     assert.strictEqual(records['eng-files'].test_files_url, 'https://portal.test/u/eng-files');
+  });
+
+  // ── Deals, line items and report names ───────────────────────────────────
+  console.log('\nDeals and line items:');
+
+  await test('an engagement recorded under its line item moves onto the Deal ID, not a 409', async () => {
+    reset();
+    await setUp({ engagementId: 'eng-legacy', dealId: '4840277874', clientName: 'Legacy Deal Ltd' });
+    assert.strictEqual(records['eng-legacy'].deal_id, '4840277874');
+    reset();
+    const r = await setUp({ engagementId: 'eng-legacy', dealId: '5143712084', lineId: '4840277874', clientName: 'Legacy Deal Ltd' });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(records['eng-legacy'].deal_id, '5143712084');
+    assert.strictEqual(records['eng-legacy'].line_id, '4840277874');
+    assert.strictEqual(r.json.plextrac.status, 'already_linked', 'the same report, not a new one');
+  });
+
+  await test('a different deal that is not the line item is still refused with 409', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-legacy', dealId: '999', lineId: '4840277874', clientName: 'Legacy Deal Ltd' });
+    assert.strictEqual(r.status, 409);
+  });
+
+  await test('the portal gets the line and the other engagements on the deal', async () => {
+    reset();
+    await setUp({ engagementId: 'eng-d1', dealId: 'deal-a10', lineId: 'A1001', clientName: 'Deal Co', testType: 'External' });
+    reset();
+    await setUp({ engagementId: 'eng-d2', dealId: 'deal-a10', lineId: 'A1004', clientName: 'Deal Co', testType: 'Internal' });
+    const sent = portalCalls[0];
+    assert.strictEqual(sent.dealId, 'deal-a10');
+    assert.strictEqual(sent.lineId, 'A1004');
+    assert.deepStrictEqual(sent.relatedEngagementIds, ['eng-d1']);
+  });
+
+  await test('two same-type engagements in one month: the second report is named for its line', async () => {
+    reset();
+    const a = await setUp({ engagementId: 'eng-api1', dealId: 'deal-pul', lineId: '481403878606', lineLabel: 'Pulsar: Application Testing', clientName: 'Pulsar Group', testType: 'API Testing', startDate: '2026-10-12', endDate: '2026-10-23' });
+    assert.strictEqual(a.json.plextrac.reportName, 'API | October 2026', 'the first keeps the plain name');
+    reset();
+    const b = await setUp({ engagementId: 'eng-api2', dealId: 'deal-pul', lineId: '481403878607', lineLabel: 'Isentia: Application Penetration Testing', clientName: 'Pulsar Group', testType: 'API Testing', startDate: '2026-10-26', endDate: '2026-10-29' });
+    assert.strictEqual(b.json.plextrac.status, 'created', 'a report of its own, linked');
+    assert.strictEqual(b.json.plextrac.reportName, 'API (Isentia: Application Penetration Testing) | October 2026');
+    assert.notStrictEqual(b.json.plextrac.reportId, a.json.plextrac.reportId);
+    assert.strictEqual(records['eng-api2'].scope, 'Isentia: Application Penetration Testing');
+  });
+
+  await test('the qualifier settled on is kept on later calls that send no scope', async () => {
+    reset();
+    const r = await setUp({ engagementId: 'eng-api2', dealId: 'deal-pul', lineId: '481403878607', lineLabel: 'Isentia: Application Penetration Testing', clientName: 'Pulsar Group', testType: 'API Testing', startDate: '2026-10-26', endDate: '2026-10-29' });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.json.changes, undefined, 'no scope change detected');
+    assert.strictEqual(reportUpdates.length, 0, 'the report is not renamed back');
+  });
+
+  await test('a call-off name with "|" is cleaned; no label falls back to the line id', async () => {
+    reset();
+    await setUp({ engagementId: 'eng-co1', dealId: 'deal-sg', lineId: '458713293003-E1', lineLabel: 'Smart Pension | HL', clientName: 'Smart Gaming', testType: 'External', startDate: '2026-09-14', endDate: '2026-09-20' });
+    reset();
+    const b = await setUp({ engagementId: 'eng-co3', dealId: 'deal-sg', lineId: '458713293003-E3', lineLabel: 'Smart Pensions | New Ireland', clientName: 'Smart Gaming', testType: 'External', startDate: '2026-09-25', endDate: '2026-09-30' });
+    assert.strictEqual(b.json.plextrac.reportName, 'External (Smart Pensions - New Ireland) | September 2026');
+    reset();
+    const c = await setUp({ engagementId: 'eng-co4', dealId: 'deal-sg', lineId: '458713293003-E4', clientName: 'Smart Gaming', testType: 'External', startDate: '2026-09-27', endDate: '2026-09-28' });
+    assert.strictEqual(c.json.plextrac.reportName, 'External (458713293003-E4) | September 2026');
+  });
+
+  await test('a clash with the report of a ClickUp task is qualified too', async () => {
+    reset();
+    const clientId = plextracClients['existing corp'];
+    (plextracReports[clientId] ||= {})['Internal | November 2026'] = 4242;
+    clickupMappings[4242] = 'cu-task-1';
+    const r = await setUp({ engagementId: 'eng-vs-cu', dealId: 'deal-x', lineId: 'L-9', lineLabel: 'Internal Network Test', clientName: 'Existing Corp', testType: 'Internal', startDate: '2026-11-02', endDate: '2026-11-04' });
+    assert.strictEqual(r.json.plextrac.status, 'created');
+    assert.strictEqual(r.json.plextrac.reportName, 'Internal (Internal Network Test) | November 2026');
+  });
+
+  await test('consultants from DeliveryFlow replace the portal-booked name, and replaceDates clears dates', async () => {
+    reset();
+    records['eng-api1'].consultant = 'Old Booked Name';
+    await setUp({ engagementId: 'eng-api1', dealId: 'deal-pul', lineId: '481403878606', clientName: 'Pulsar Group', testType: 'API Testing', consultantEmails: ['new@cognisys.group'], startDate: '2026-10-12', endDate: '2026-10-23' });
+    assert.deepStrictEqual(records['eng-api1'].consultant_emails, ['new@cognisys.group']);
+    assert.strictEqual(records['eng-api1'].consultant, null);
+    reset();
+    await setUp({ engagementId: 'eng-api1', dealId: 'deal-pul', lineId: '481403878606', clientName: 'Pulsar Group', testType: 'API Testing', consultantEmails: [], startDate: null, endDate: null, replaceDates: true });
+    assert.deepStrictEqual(records['eng-api1'].consultant_emails, []);
+    assert.strictEqual(records['eng-api1'].start_date, null);
+    assert.strictEqual(records['eng-api1'].end_date, null);
   });
 
   console.log(`\n${passed} passed, ${failed} failed\n`);

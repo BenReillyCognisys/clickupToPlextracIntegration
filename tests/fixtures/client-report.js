@@ -1,6 +1,6 @@
 // A Plextrac report / client / findings trio in the shapes the API returns, for the
 // client-document tests. The finding write-ups carry a marker so tests can prove they
-// never reach a client-facing document.
+// never reach the summary documents (the executive summary and the letter).
 const SECRET = 'INTERNAL-FINDING-DETAIL-DO-NOT-SHIP';
 
 const report = {
@@ -39,4 +39,30 @@ const findings = [
   { flaw_id: 4, title: 'Server banner', severity: 'Informational', description: `<p>${SECRET}</p>` },
 ];
 
-module.exports = { report, clientRecord, findings, SECRET };
+// The same findings as Plextrac's single-finding endpoint returns them — what the full
+// report is built from: the write-up, CVSS score, affected assets and a screenshot,
+// plus fields that no document may carry (INTERNAL- markers, and each asset's list of
+// the OTHER findings on it).
+const fullFindings = Object.fromEntries(findings.map((f) => [f.flaw_id, {
+  ...f,
+  report_id: 34,
+  client_id: 12,
+  status: 'Open',
+  recommendations: `<p>Fix ${f.title}</p>`,
+  references: '',
+  fields: {
+    proof_of_concept: {
+      key: 'proof_of_concept', label: 'Technical Details',
+      value: `<p>Steps for ${f.title}</p><figure class="image"><img src="/api/v2/uploads/shot-${f.flaw_id}.png" /></figure>`,
+    },
+  },
+  risk_score: f.flaw_id === 1 ? { CVSS3_1: { vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H', overall: 9.8 } } : {},
+  affected_assets: {
+    [`asset${f.flaw_id}`]: { asset: `host-${f.flaw_id}.acme.example`, ports: {}, findings: { 999: { title: 'INTERNAL-OTHER-FINDING' } } },
+  },
+  assignedTo: 'INTERNAL-ASSIGNEE',
+  serviceNowTicket: 'INTERNAL-TICKET',
+  exhibits: [{ data: 'INTERNAL-EXHIBIT' }],
+}]));
+
+module.exports = { report, clientRecord, findings, fullFindings, SECRET };

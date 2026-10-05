@@ -3,10 +3,11 @@
 // Plextrac is then read back to prove it went to the right place with the right data.
 //
 // Real: every line of this service's code — runReleaseExports, the locks, Drive folder
-// resolution, filenames, the report and client-document pipelines, and the renderer:
-// a separate Python process per release rendering the REAL executive-summary and
-// letter-of-attestation templates with Jinja2 (tests/fixtures/render_without_weasyprint.py
-// swaps only WeasyPrint's HTML → PDF step, so each document can be read back).
+// resolution, filenames, the document pipeline (screenshots included), and the
+// renderer: a separate Python process per release rendering the REAL full-report,
+// executive-summary and letter-of-attestation templates with Jinja2
+// (tests/fixtures/render_without_weasyprint.py swaps only WeasyPrint's HTML → PDF
+// step, so each document can be read back).
 //
 // Simulated: Google Drive (in memory — duplicate names allowed, arbitrary list order
 // unless orderBy is asked for, like the real API) and Plextrac (findings in the
@@ -14,8 +15,9 @@
 // the 105 runs interleave as badly as possible.
 //
 // Every report's data carries markers (REPORT-<id>, EXEC-<id>, SCOPE-<id>,
-// CLIENT-<id>), and each report has its own mix of finding severities, so a document
-// holding another report's data — or another report's counts — is caught.
+// CLIENT-<id>, FINDING-<id>, and a screenshot per finding), and each report has its
+// own mix of finding severities, so a document holding another report's data — or
+// another report's counts or screenshots — is caught.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -42,7 +44,7 @@ if (childProcess.spawnSync(python, ['-c', 'import jinja2'], { stdio: 'ignore' })
 
 // ── Templates: the real ones, copied so the test can't touch the originals ────
 const templateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stress-templates-'));
-for (const t of ['cognisys-exec-summary.j2', 'cognisys-letter-of-attestation.j2']) {
+for (const t of ['cognisys-full-report.j2', 'cognisys-exec-summary.j2', 'cognisys-letter-of-attestation.j2']) {
   fs.copyFileSync(path.join(ROOT_DIR, 'jinja2-export-templates', t), path.join(templateDir, t));
 }
 
@@ -165,9 +167,27 @@ api.listReportFindings = async (clientId, reportId) => {
   await jitter(20);
   return findingsOf(reportId).map((sev, i) => ({ id: `f${i}`, doc_id: [reportId, i], data: [i, sev, `Finding ${i}`, 'Open'] }));
 };
-api.exportReport = async (clientId, reportId) => {
-  await jitter(60);
-  return { buffer: Buffer.from(`%PDF-FULL ${JSON.stringify({ clientId, reportId })}`), contentType: 'application/pdf' };
+// The single-finding endpoint: the write-up the full report prints, marked with its
+// report, and a screenshot stored in Plextrac's upload store.
+api.getFinding = async (clientId, reportId, flawId) => {
+  await jitter(20);
+  const sev = findingsOf(reportId)[flawId];
+  return {
+    flaw_id: flawId, report_id: reportId, client_id: clientId, title: `Finding ${flawId}`, severity: sev,
+    description: `<p>FINDING-${reportId} number ${flawId}</p>`,
+    recommendations: '<p>Fix it.</p>',
+    fields: { proof_of_concept: { key: 'proof_of_concept', label: 'Technical Details',
+      value: `<figure class="image"><img src="/api/v2/uploads/shot-${reportId}-${flawId}.png" /></figure>` } },
+    risk_score: sev === 'Critical' ? { CVSS3_1: { vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H', overall: 9.8 } } : {},
+    affected_assets: { [`a${reportId}`]: { asset: `app-${reportId}.example`, ports: {} } },
+  };
+};
+// Plextrac's upload store: a PNG whose bytes name the file, so each inlined screenshot
+// can be traced back to the upload it came from.
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+api.rawBinary = async (method, path) => {
+  await jitter(20);
+  return { buffer: Buffer.concat([PNG_SIGNATURE, Buffer.from(`UPLOAD ${path}`)]), contentType: 'image/png' };
 };
 api.uploadReportArtifact = async (clientId, reportId, file) => {
   await jitter(20);
@@ -250,7 +270,6 @@ const idsIn = (text, marker) => [...new Set((text.match(new RegExp(`${marker}-(\
   // Each file, read back: which report's data is in it?
   const whose = (f) => {
     const text = f.content.toString('utf8');
-    if (f.name.startsWith('Plextrac Full Report')) return JSON.parse(text.slice('%PDF-FULL '.length)).reportId;
     // The letter doesn't print the report's name; its hosts carry the SCOPE marker.
     const ids = idsIn(text, f.name.startsWith('Letter') ? 'SCOPE' : 'REPORT');
     assert.strictEqual(ids.length, 1, `${f.name} holds data from reports ${ids}`);
@@ -275,12 +294,32 @@ const idsIn = (text, marker) => [...new Set((text.match(new RegExp(`${marker}-(\
       sets.set(key, [...(sets.get(key) || []), f.name.replace(/ \d{4}.*$/, '')]);
     }
     for (const [key, kinds] of sets) {
-      assert.deepStrictEqual(kinds.sort(), ['Executive Summary Report', 'Letter of Attestation', 'Plextrac Full Report'],
+      assert.deepStrictEqual(kinds.sort(), ['Executive Summary Report', 'Full-Pentest-Report-Tech-Details', 'Letter of Attestation'],
         `report|stamp ${key} has ${kinds}`);
     }
     for (const r of reports) {
       const n = [...sets.keys()].filter((k) => k.startsWith(`${r.id}|`)).length;
       assert.strictEqual(n, runsPer(r.id), `report ${r.id}: ${n} sets for ${runsPer(r.id)} runs`);
+    }
+  });
+
+  check('the full report holds THAT report\'s findings, most severe first, with THEIR screenshots', () => {
+    for (const f of files.filter((x) => x.name.startsWith('Full-Pentest-Report-Tech-Details'))) {
+      const id = whose(f);
+      const html = f.content.toString('utf8');
+      const expected = findingsOf(id);
+      assert.strictEqual((html.match(/<section class="finding">/g) || []).length, expected.length, `${f.name}: findings`);
+      assert.deepStrictEqual(idsIn(html, 'FINDING'), [id], `${f.name} holds findings of ${idsIn(html, 'FINDING')}`);
+      const order = [...html.matchAll(/<td class="finding-sev">([^<]*)</g)].map((m) => m[1]);
+      const rank = (s) => SEVS.findIndex((x) => x.replace('rmational', '') === s);
+      assert.deepStrictEqual(order, [...order].sort((a, b) => rank(a) - rank(b)), `${f.name}: order ${order}`);
+      // Every screenshot printed is this report's own upload.
+      const shots = [...html.matchAll(/src="data:image\/png;base64,([^"]+)"/g)]
+        .map((m) => Buffer.from(m[1], 'base64').subarray(8).toString('utf8'))
+        .filter((s) => s.startsWith('UPLOAD '));
+      assert.deepStrictEqual(shots.sort(), expected.map((_, i) => `UPLOAD /api/v2/uploads/shot-${id}-${i}.png`).sort());
+      assert.ok(html.includes(`<li>app-${id}.example</li>`), `${f.name}: affected asset`);
+      assert.strictEqual((html.match(/<h3>CVSS Score<\/h3>/g) || []).length, expected.filter((s) => s === 'Critical').length);
     }
   });
 
@@ -308,8 +347,8 @@ const idsIn = (text, marker) => [...new Set((text.match(new RegExp(`${marker}-(\
     }
   });
 
-  check('Plextrac artifacts: 2 per run, each on the right report, holding that report\'s data', () => {
-    assert.strictEqual(artifacts.length, runs.length * 2);
+  check('Plextrac artifacts: 3 per run, each on the right report, holding that report\'s data', () => {
+    assert.strictEqual(artifacts.length, runs.length * 3);
     for (const a of artifacts) {
       const r = reportById.get(a.reportId);
       assert.strictEqual(a.clientId, r.client.id);
@@ -317,7 +356,7 @@ const idsIn = (text, marker) => [...new Set((text.match(new RegExp(`${marker}-(\
       assert.deepStrictEqual(idsIn(a.content.toString('utf8'), marker), [a.reportId], `artifact ${a.filename} on ${a.reportId}`);
     }
     for (const r of reports) {
-      assert.strictEqual(artifacts.filter((a) => a.reportId === r.id).length, runsPer(r.id) * 2);
+      assert.strictEqual(artifacts.filter((a) => a.reportId === r.id).length, runsPer(r.id) * 3);
     }
   });
 

@@ -95,6 +95,10 @@ const googleDrive = require('../lib/google-drive');
 const clickupWrites = []; // { taskId, op }
 let drivedownloads = 0;
 let lookupMode = 'ok';    // 'ok' | 'throw'
+// The report namer checks the client's other reports for a clash; none here.
+plextrac.listClientReports = async () => [];
+store.findByReportId = async () => null;
+require('../lib/task-store').findByReportId = async () => null;
 store.findEngagementIds = async (ids) => {
   if (lookupMode === 'throw') throw new Error('mongo down');
   return new Set(ids.filter((id) => records[id]));
