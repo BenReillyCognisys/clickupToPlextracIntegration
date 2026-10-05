@@ -108,17 +108,6 @@ async function mention(user, fallback) {
   return user?.name || user?.email || fallback;
 }
 
-// "Alice Elvin and Ben Reilly" for a status's allowed emails, by Plextrac name.
-async function allowedNames(status) {
-  const emails = allowedFor(status) || [];
-  let byEmail = new Map();
-  try {
-    byEmail = new Map([...(await users.cuidMap()).values()].filter((u) => u.email).map((u) => [norm(u.email), u.name || u.email]));
-  } catch { /* names fall back to emails */ }
-  const names = emails.map((e) => byEmail.get(e) || e);
-  return names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names.join('');
-}
-
 function slackEscape(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -129,12 +118,19 @@ const WHO = {
   users_unavailable: 'Someone (the Plextrac user list could not be read to check who)',
 };
 
-/** The ready-for-release channel message for a put-back. Pure, for tests. */
-function buildRevertMessage({ clientName, clientUrl, reportName, reportUrl, who, attempted, previous, allowed, putBack, error }) {
+/**
+ * The message for a put-back. Pure, for tests. `verified` is false when it couldn't be
+ * established who made the change (Plextrac didn't say, or the user list couldn't be
+ * read) — they may well be allowed, so the message doesn't say they aren't.
+ */
+function buildRevertMessage({ clientName, clientUrl, reportName, reportUrl, who, attempted, previous, verified = true, putBack, error }) {
   const client = clientUrl ? `<${clientUrl}|${slackEscape(clientName)}>` : slackEscape(clientName);
   const report = reportUrl ? `<${reportUrl}|${slackEscape(reportName)}>` : slackEscape(reportName);
+  const why = verified
+    ? 'they are not authorised to perform second or release QA'
+    : 'they could not be confirmed as authorised to perform second or release QA';
   const head = `:no_entry: *Status change not allowed* — Client: ${client} - ${report}\n`
-    + `${who} moved the report from *${slackEscape(previous)}* to *${slackEscape(attempted)}*, but only ${slackEscape(allowed)} can set *${slackEscape(attempted)}*.`;
+    + `${who} moved the report from *${slackEscape(previous)}* to *${slackEscape(attempted)}*, but ${why}.`;
   return putBack
     ? `${head} It has been moved back to *${slackEscape(previous)}*. Nothing was posted or exported for the change.`
     : `${head}\n:warning: It could NOT be moved back automatically (${slackEscape(error)}) — please set it back to *${slackEscape(previous)}* by hand. Nothing was posted or exported for the change.`;
@@ -170,7 +166,7 @@ async function putBack({ decision, clientId, reportId, cuid, clientName, reportN
     clientName: client?.name || clientName || `client ${clientId}`, reportName,
     clientUrl: `${plextracBase}/client/${clientId}`,
     reportUrl: `${plextracBase}/client/${clientId}/report/${reportId}`,
-    who, attempted, previous, allowed: await allowedNames(attempted), putBack: ok, error,
+    who, attempted, previous, verified: decision.reason === 'not_permitted', putBack: ok, error,
   });
   // The ready-for-release channel, and the status-violations channel — where the
   // person who made the change is tagged so they see it. Each post stands alone.

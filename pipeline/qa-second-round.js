@@ -21,7 +21,7 @@ const SECOND_ROUND_QA_CHANNEL = process.env.SLACK_SECOND_ROUND_QA_CHANNEL || 'C0
 // Slack user ids @-mentioned on a second-round announcement (the second-round QA
 // reviewers). Override with SLACK_SECOND_ROUND_QA_MENTIONS (comma/space-separated ids);
 // falls back to the built-in list when unset.
-const DEFAULT_SECOND_ROUND_MENTIONS = ['U0811891NTU', 'U07R28NJ0KS', 'U07LSK8F8DN', 'U07PYU23RN3'];
+const DEFAULT_SECOND_ROUND_MENTIONS = ['U08D2N3RPGV', 'U07R28NJ0KS', 'U07LSK8F8DN', 'U07PYU23RN3'];
 const CONFIGURED_MENTIONS = (process.env.SLACK_SECOND_ROUND_QA_MENTIONS || '')
   .split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
 const SECOND_ROUND_MENTIONS = CONFIGURED_MENTIONS.length ? CONFIGURED_MENTIONS : DEFAULT_SECOND_ROUND_MENTIONS;

@@ -148,8 +148,8 @@ const nothingRan = () => {
     const { text } = calls.slack[1];
     assert.ok(text.includes('Client: <https://test.plextrac.com/client/10|Acme Ltd> - <https://test.plextrac.com/client/10/report/101|Acme | Web>'), text);
     assert.ok(text.includes('<@UJO> moved the report from *In Review* to *Approved*'), text);
-    assert.ok(text.includes('only Alice Elvin, Ben Reilly, Soham Bakore, Punit Sharma, Karan Luniyal and Rajveer Parmar can set *Approved*'), text);
-    assert.ok(text.includes('It has been moved back to *In Review*'), text);
+    assert.ok(text.endsWith('<@UJO> moved the report from *In Review* to *Approved*, but they are not authorised to perform second or release QA. '
+      + 'It has been moved back to *In Review*. Nothing was posted or exported for the change.'), text);
   });
 
   await test('the put-back\'s own webhook is ignored — by actor, and by the expected status without one', async () => {
@@ -193,7 +193,7 @@ const nothingRan = () => {
     await moved('Published', 'cuid-soham');
     eq(calls.updates, [{ status: 'Approved' }]);
     nothingRan();
-    assert.ok(calls.slack[0].text.includes('only Alice Elvin and Ben Reilly can set *Published*'));
+    assert.ok(calls.slack[0].text.includes('to *Published*, but they are not authorised to perform second or release QA.'), calls.slack[0].text);
     assert.ok(calls.slack[0].text.includes('Soham Bakore moved the report from *Approved* to *Published*'), calls.slack[0].text);
   });
 
@@ -232,7 +232,8 @@ const nothingRan = () => {
     reset({ before: 'In Review' });
     await moved('Approved', null);
     eq(calls.updates, [{ status: 'In Review' }]);
-    assert.ok(calls.slack[0].text.includes('Someone (Plextrac did not say who) moved the report'));
+    assert.ok(calls.slack[0].text.includes('Someone (Plextrac did not say who) moved the report from *In Review* to *Approved*, '
+      + 'but they could not be confirmed as authorised to perform second or release QA.'), calls.slack[0].text);
     nothingRan();
 
     reset({ before: 'Approved' });

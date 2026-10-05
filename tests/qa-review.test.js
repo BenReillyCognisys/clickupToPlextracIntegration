@@ -426,7 +426,7 @@ test('uses the built-in reviewer list when mentions are omitted', () => {
   const msg = buildSecondRoundMessage({
     clientName: 'Acme', reportName: 'Report 5', firstQaName: 'Ada Lovelace',
   });
-  eq(msg.includes('<@U0811891NTU> <@U07R28NJ0KS> <@U07LSK8F8DN> <@U07PYU23RN3>'), true);
+  eq(msg.includes('<@U08D2N3RPGV> <@U07R28NJ0KS> <@U07LSK8F8DN> <@U07PYU23RN3>'), true);
   eq(msg.includes('First QA done by Ada Lovelace'), true);
 });
 
