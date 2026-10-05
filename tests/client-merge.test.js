@@ -19,6 +19,7 @@ const deliveryflow = require('../lib/deliveryflow-api');
 const clientDocuments = require('../pipeline/client-documents');
 const suppression = require('../lib/webhook-suppression');
 const statusStore = require('../lib/report-status-store');
+const reportCounts = require('../lib/plextrac-report-counts');
 const log = require('../lib/logger');
 const DOCUMENTS = require('../config/client-documents');
 
@@ -408,6 +409,30 @@ const quiet = async (fn) => {
     pt.clients[30] = { client_id: 30, name: 'Beta Corp' };
     const res = await call('/clients?q=acme');
     eq(res.body.clients.map((c) => c.name), ['Acme Limited', 'Acme Ltd']);
+  });
+
+  await test('GET /clients carries each client\'s report and published counts once counted', async () => {
+    reset();
+    reportCounts.reset();
+    pt.reports[20][1].status = 'Draft';
+    // Not counted yet: null counts, and a count starts in the background.
+    const first = await call('/clients');
+    eq(first.body.clients.map((c) => [c.name, c.reports, c.published]), [['Acme Limited', null, null], ['Acme Ltd', null, null]]);
+    eq(first.body.counts.ready, false);
+    await reportCounts.refreshAll();
+    const res = await call('/clients');
+    eq(res.body.clients.map((c) => [c.name, c.reports, c.published]), [['Acme Limited', 2, 1], ['Acme Ltd', 1, 1]]);
+    eq(res.body.counts.ready, true);
+  });
+
+  await test('a merge recounts its two clients straight away', async () => {
+    reset();
+    reportCounts.reset();
+    await reportCounts.refreshAll();
+    await quiet(() => merge.runMerge(newJob()));
+    const { counts } = reportCounts.current();
+    eq(counts.get(10), { reports: 3, published: 3 });
+    eq(counts.get(20)?.reports ?? 0, 0); // deleted: no reports (and gone from the client list)
   });
 
   await test('POST /client-merges answers 202, and a wrong confirmation 400', async () => {

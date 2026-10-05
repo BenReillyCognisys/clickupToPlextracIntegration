@@ -6,8 +6,11 @@
  * BREAK_SERVICES_API_KEY. The portal limits the screen to its administrators and
  * sends the signed-in user as `requestedBy`, which is recorded on the merge.
  *
- *   GET  /api/plextrac/clients?q=acme            every client [{ id, name }], A–Z;
- *                                                q filters by name (case-insensitive)
+ *   GET  /api/plextrac/clients?q=acme            every client [{ id, name, reports,
+ *                                                published }], A–Z; q filters by name
+ *                                                (case-insensitive). The counts are cached
+ *                                                and null until the first count finishes;
+ *                                                ?refresh=1 recounts
  *   GET  /api/plextrac/client-merges/preview?keepClientId=1&mergeClientId=2
  *                                                both clients' reports, name clashes, the
  *                                                records that move, the backup folder name
@@ -25,6 +28,7 @@ const express = require('express');
 const crypto = require('crypto');
 const merge = require('../pipeline/client-merge');
 const store = require('../lib/client-merge-store');
+const reportCounts = require('../lib/plextrac-report-counts');
 const log = require('../lib/logger');
 
 const router = express.Router();
@@ -83,8 +87,19 @@ function view(job, { events = true } = {}) {
 router.get('/clients', async (req, res) => {
   try {
     const q = String(req.query.q ?? '').trim().toLowerCase();
-    const clients = await merge.listClients();
-    res.json({ ok: true, clients: q ? clients.filter((c) => c.name.toLowerCase().includes(q)) : clients });
+    const all = await merge.listClients();
+    // Report counts come from a background cache (lib/plextrac-report-counts.js): null
+    // for a client until the first count has finished. ?refresh=1 recounts now.
+    const held = reportCounts.current({ force: req.query.refresh === '1' });
+    const clients = (q ? all.filter((c) => c.name.toLowerCase().includes(q)) : all).map((c) => {
+      const n = held.counts.get(c.id);
+      return { ...c, reports: n ? n.reports : null, published: n ? n.published : null };
+    });
+    res.json({
+      ok: true,
+      clients,
+      counts: { ready: Boolean(held.refreshedAt), refreshed_at: held.refreshedAt, refreshing: held.refreshing },
+    });
   } catch (err) {
     fail(res, err, 'client list');
   }

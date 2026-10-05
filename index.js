@@ -296,6 +296,10 @@ app.listen(PORT, async () => {
   // Warm + schedule the availability cache that backs /schedule/pentest.
   startAvailabilityCache();
 
+  // Count every client's reports now (~1-2 min in the background), so the SFE merge
+  // picker has its report counts ready rather than counting on its first visit.
+  require('./lib/plextrac-report-counts').refreshAll();
+
   // The weekly Plextrac backup: schedule it, and pick up a run the restart interrupted.
   require('./pipeline/plextrac-backup').startSchedule();
 

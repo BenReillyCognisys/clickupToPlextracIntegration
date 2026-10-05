@@ -55,6 +55,7 @@ const store = require('../lib/client-merge-store');
 const deliveryflow = require('../lib/deliveryflow-api');
 const suppression = require('../lib/webhook-suppression');
 const statusStore = require('../lib/report-status-store');
+const reportCounts = require('../lib/plextrac-report-counts');
 const backup = require('./report-backup');
 const DOCUMENTS = require('../config/client-documents');
 const { exportTimestamp, safeFilename } = require('./report-export');
@@ -284,6 +285,9 @@ async function runMerge(job) {
 
   job.finished_at = new Date();
   await save();
+  // The client picker's report counts: both clients just changed (one may be gone).
+  await reportCounts.refreshClients([job.keep_client.id, job.merge_client.id])
+    .catch((err) => log.warn('Client merge: report counts not refreshed', { merge_id: job.merge_id, reason: err.message }));
   await writeManifest(job).catch((err) => event('warn', `Could not update manifest.json in Drive: ${err.message}`));
   await save();
   notifySlack(job);
