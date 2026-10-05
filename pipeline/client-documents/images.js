@@ -71,6 +71,12 @@ function mapStrings(value, fn) {
 
 const srcOf = (tag) => { const m = SRC_ATTR.exec(tag); return m ? (m[2] ?? m[3] ?? m[4]) : null; };
 
+// Plextrac's editor stamps style="aspect-ratio:W/H" on every pasted image. WeasyPrint
+// doesn't support the property and logs a warning per image; the images keep their
+// own proportions without it, so it is dropped.
+const ASPECT_RATIO = /\baspect-ratio\s*:[^;"']*;?\s*/gi;
+const withoutAspectRatio = (tag) => tag.replace(ASPECT_RATIO, '');
+
 /**
  * Returns copies of `findings` with every Plextrac screenshot inlined as a data: URI.
  *
@@ -110,7 +116,8 @@ async function inlineScreenshots(findings, { fetchUpload = (path) => api.rawBina
 
   let inlined = 0;
   const missing = [];
-  const out = findings.map((f) => mapStrings(f, (s) => s.replace(IMG_TAG, (tag) => {
+  const out = findings.map((f) => mapStrings(f, (s) => s.replace(IMG_TAG, (found) => {
+    const tag = withoutAspectRatio(found);
     const src = srcOf(tag);
     if (src && /^data:image\//i.test(src.trim())) return tag;
     const path = uploadPath(src);

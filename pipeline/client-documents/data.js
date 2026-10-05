@@ -85,6 +85,35 @@ function findingSummary(findings) {
   return summary;
 }
 
+// Characters no font can draw: C0 controls other than tab and newlines, DEL, and the
+// C1 block (U+0080-U+009F), raw or as numeric references (&#8; &#x84;). WeasyPrint
+// prints each as a box and logs a warning per character. C1 is almost always
+// Windows-1252 punctuation that was read as Latin-1 somewhere on the way into
+// Plextrac (U+0092 for ’, U+0096 for –), so it is mapped back the way browsers map
+// &#146;; the five positions Windows-1252 leaves undefined, and the C0 controls, go.
+const CP1252 = {
+  0x80: '€', 0x82: '‚', 0x83: 'ƒ', 0x84: '„', 0x85: '…', 0x86: '†', 0x87: '‡', 0x88: 'ˆ', 0x89: '‰',
+  0x8a: 'Š', 0x8b: '‹', 0x8c: 'Œ', 0x8e: 'Ž', 0x91: '‘', 0x92: '’', 0x93: '“', 0x94: '”', 0x95: '•',
+  0x96: '–', 0x97: '—', 0x98: '˜', 0x99: '™', 0x9a: 'š', 0x9b: '›', 0x9c: 'œ', 0x9e: 'ž', 0x9f: 'Ÿ',
+};
+const UNPRINTABLE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]|&#(?:x0*([0-9a-f]{1,2})|0*(\d{1,3}));/gi;
+
+function printable(value) {
+  if (typeof value === 'string') {
+    return value.replace(UNPRINTABLE, (match, hex, dec) => {
+      const code = hex !== undefined ? parseInt(hex, 16) : (dec !== undefined ? Number(dec) : match.charCodeAt(0));
+      const unprintable = code < 0x20 ? ![0x09, 0x0a, 0x0d].includes(code) : code >= 0x7f && code <= 0x9f;
+      if (!unprintable) return match; // an ordinary reference such as &#39;
+      return CP1252[code] ?? '';
+    });
+  }
+  if (Array.isArray(value)) return value.map(printable);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, printable(v)]));
+  }
+  return value;
+}
+
 const pick = (obj, keys) => Object.fromEntries(
   keys.filter((k) => obj?.[k] !== undefined).map((k) => [k, structuredClone(obj[k])]),
 );
@@ -133,12 +162,12 @@ function templateContext({ report, clientRecord, findings, exportedAt, detail = 
   REPORT_INFO.export_datetime_us = exportDatetimeUs(exportedAt);
   const included = bySeverity(findings);
 
-  return {
+  return printable({
     REPORT_INFO,
     CLIENT_INFO: pick(clientRecord, CLIENT_KEYS),
     FINDINGS: included.map((f) => (detail === 'full' ? reduceFullFinding(f) : pick(f, FINDING_KEYS))),
     FINDING_SUMMARY: findingSummary(included),
-  };
+  });
 }
 
 module.exports = {
@@ -151,5 +180,6 @@ module.exports = {
   bySeverity,
   findingSummary,
   reduceFullFinding,
+  printable,
   templateContext,
 };

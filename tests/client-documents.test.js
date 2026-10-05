@@ -111,6 +111,20 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     eq(ctx().REPORT_INFO.export_datetime_us, '09-26-2026 14:30');
   });
 
+  await test('characters no font can draw are removed; Windows-1252 punctuation read as Latin-1 is repaired', () => {
+    eq(data.printable('it\u0092s a\u0096b \u0001\b\u001f\u007f\u0081x'), 'it’s a–b x');
+    eq(data.printable('<p>a&#8;b&#x84;c&#X1F;d&#150;e</p>'), '<p>ab„cd–e</p>');
+    eq(data.printable('tab\tnew\nline\r &#39; &#x27; &#169; &#1234; café'), 'tab\tnew\nline\r &#39; &#x27; &#169; &#1234; café');
+    eq(data.printable({ a: ['x\u0008', { b: 'y\u0095' }], n: 3, z: null }), { a: ['x', { b: 'y•' }], n: 3, z: null });
+  });
+
+  await test('every string in the context is made printable', () => {
+    const report = { ...fx.report, name: 'Report\u0008 \u0093One\u0094' };
+    const findings = [{ title: 'SQLi\u0001', severity: 'High', description: 'raw\u008abytes' }];
+    const out = data.templateContext({ ...facts(), report, findings, detail: 'full' });
+    eq([out.REPORT_INFO.name, out.FINDINGS[0].title, out.FINDINGS[0].description], ['Report “One”', 'SQLi', 'rawŠbytes']);
+  });
+
   await test('severity counts in the FINDING_SUMMARY shape', () => {
     eq(ctx().FINDING_SUMMARY.high, { total: 2 });
     eq(ctx().FINDING_SUMMARY.totals, { total_reported: 4 });
@@ -381,6 +395,27 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     eq([out.inlined, out.missing.length], [2, 0]);
     eq(out.findings[0].recommendations, '<img src="data:image/png;base64,AAAA">');
     eq(out.findings[1].fields.poc.value.startsWith('<img src="data:image/png;base64,'), true);
+  });
+
+  await test('Plextrac\'s aspect-ratio style is dropped from images (WeasyPrint warns on every one)', async () => {
+    const findings = [{ title: 'A', description: '<img style="aspect-ratio:1300/794" src="/api/v2/uploads/a.png"> <img style="width:50%; aspect-ratio: 4/3;" src="data:image/png;base64,AAAA">' }];
+    const out = await images.inlineScreenshots(findings, { fetchUpload: async () => ({ buffer: PNG }) });
+    const d = out.findings[0].description;
+    eq(/aspect-ratio/.test(d), false);
+    eq(d.includes('style="width:50%; "'), true);
+    eq(out.inlined, 1);
+  });
+
+  console.log('\nrenderer warnings:');
+
+  await test('one line for every character no font can draw, counted; other warnings kept once each', () => {
+    const notdef = (cp) => `.notdef glyph rendered for Unicode string unsupported by fonts: "x" (${cp})`;
+    const out = clientDocuments.summariseWarnings([
+      notdef('U+0008'), notdef('U+0008'), notdef('U+008A'), 'Ignored `aspect-ratio:1/1` at 1:1, unknown property.',
+      notdef('U+0008'), 'Ignored `aspect-ratio:1/1` at 1:1, unknown property.',
+    ]);
+    eq(out, ['4 characters no font can draw were printed as boxes: U+0008 x3, U+008A x1', 'Ignored `aspect-ratio:1/1` at 1:1, unknown property.']);
+    eq(clientDocuments.summariseWarnings(['a', 'b']), ['a', 'b']);
   });
 
   console.log('\npublishClientDocument:');

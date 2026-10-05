@@ -86,6 +86,26 @@ async function loadReportData({ clientId, reportId }) {
   return { report, clientRecord, findings: data.normaliseFindings(rawFindings) };
 }
 
+// WeasyPrint logs one ".notdef glyph rendered ... (U+0008)" warning per character no
+// font can draw, which for a pasted binary blob is thousands of lines. They become one
+// line, counted by character; every other warning is kept, once each.
+const NOTDEF = /^\.notdef glyph rendered .*\((U\+[0-9A-F]+)\)$/;
+
+function summariseWarnings(warnings = []) {
+  const missing = new Map();
+  const other = new Set();
+  for (const w of warnings) {
+    const m = NOTDEF.exec(w);
+    if (m) missing.set(m[1], (missing.get(m[1]) || 0) + 1);
+    else other.add(w);
+  }
+  if (!missing.size) return [...other];
+  const total = [...missing.values()].reduce((a, b) => a + b, 0);
+  const top = [...missing].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([cp, n]) => `${cp} x${n}`);
+  const more = missing.size > 8 ? `, and ${missing.size - 8} more` : '';
+  return [`${total} characters no font can draw were printed as boxes: ${top.join(', ')}${more}`, ...other];
+}
+
 // How much of each finding a document is given: 'full' or 'summary' (see ./data).
 const detailOf = (doc) => (doc.findings === 'full' ? 'full' : 'summary');
 
@@ -182,7 +202,8 @@ async function generateClientDocuments({
       r.error = 'renderer output is not a PDF';
     }
     if (r.warnings?.length) {
-      log.warn('Client document rendered with warnings', { document: doc.key, warnings: r.warnings });
+      r.warnings = summariseWarnings(r.warnings);
+      log.warn('Client document rendered with warnings', { document: doc.key, report_id: reportId, warnings: r.warnings });
     }
     if (!r.ok) return { doc, ok: false, error: `Rendering failed: ${r.error}` };
     const made = {
@@ -245,5 +266,6 @@ module.exports = {
   loadReportData,
   loadFullFindings,
   generateClientDocuments,
+  summariseWarnings,
   publishClientDocument,
 };
