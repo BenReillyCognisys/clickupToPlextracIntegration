@@ -54,7 +54,7 @@ const drive = require('../lib/google-drive');
 const store = require('../lib/client-merge-store');
 const deliveryflow = require('../lib/deliveryflow-api');
 const suppression = require('../lib/webhook-suppression');
-const clientDocuments = require('./client-documents');
+const backup = require('./report-backup');
 const DOCUMENTS = require('../config/client-documents');
 const { exportTimestamp, safeFilename } = require('./report-export');
 const { withTaskLock } = require('../lib/task-lock');
@@ -70,9 +70,7 @@ const backupConcurrency = () => Number(process.env.CLIENT_MERGE_BACKUP_CONCURREN
 const importWaitMs = () => Number(process.env.CLIENT_MERGE_IMPORT_WAIT_MS) || 180000;
 const pollMs = () => Number(process.env.CLIENT_MERGE_POLL_MS) || 5000;
 
-const PDF_MIME = 'application/pdf';
-const PTRAC_MIME = 'application/octet-stream';
-const JSON_MIME = 'application/json';
+const { md5, JSON_MIME } = backup;
 
 class MergeError extends Error {
   constructor(message, status = 400) {
@@ -82,7 +80,6 @@ class MergeError extends Error {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const md5 = (buffer) => crypto.createHash('md5').update(buffer).digest('hex');
 const sameName = (a, b) => store.aliasKey(a) === store.aliasKey(b);
 
 // Plextrac list rows: clients { data: [id, name] }, reports { data: [id, name, _, status] }.
@@ -307,22 +304,11 @@ async function snapshot(job, event) {
 }
 
 // ── Backup ────────────────────────────────────────────────────────────────────
-
-// Uploads one file and proves Drive holds exactly these bytes.
-async function uploadVerified({ buffer, filename, mimeType, folderId, overwrite = false }) {
-  const local = md5(buffer);
-  const up = await drive.uploadFile({ buffer, filename, mimeType, folderId, overwrite });
-  if (!up.md5Checksum || up.md5Checksum !== local) {
-    throw new Error(`Drive copy of "${filename}" does not match (MD5 ${up.md5Checksum || 'missing'} vs ${local})`);
-  }
-  return { name: up.name, file_id: up.fileId, url: up.url, md5: local, size: buffer.length };
-}
-
-const folderUnder = (parentId, name) => drive.resolveFolder({ folderId: parentId, subfolder: name });
+// Each report is backed up by pipeline/report-backup.js, shared with the weekly backup.
 
 async function backupAll(job, event, save, clientRecords) {
   const rootName = mergeFolderName(job.merge_client, job.keep_client, job.started_at);
-  const rootId = await folderUnder(backupRoot(), rootName);
+  const rootId = await backup.folderUnder(backupRoot(), rootName);
   job.drive_folder = { id: rootId, name: rootName, url: drive.driveFolderUrl(rootId) };
   event('info', `Backup folder ready: ${rootName}`, { drive: job.drive_folder.url });
   await save();
@@ -330,14 +316,14 @@ async function backupAll(job, event, save, clientRecords) {
   // One folder per client, holding the client record and the list of its reports.
   const clientFolders = {};
   for (const client of [job.merge_client, job.keep_client]) {
-    const folderId = await folderUnder(rootId, `${safeFilename(client.name, 'Client')} (${client.id})`);
+    const folderId = await backup.folderUnder(rootId, backup.clientFolderName(client));
     clientFolders[client.id] = folderId;
-    const json = Buffer.from(JSON.stringify({
-      client: clientRecords[client.id],
-      reports: job.reports.filter((r) => r.client_id === client.id).map(({ report_id, name, status }) => ({ report_id, name, status })),
-      backed_up_at: job.started_at,
-    }, null, 2));
-    await uploadVerified({ buffer: json, filename: 'client.json', mimeType: JSON_MIME, folderId });
+    await backup.backupClientRecord({
+      record: clientRecords[client.id],
+      reports: job.reports.filter((r) => r.client_id === client.id).map((r) => ({ id: r.report_id, name: r.name, status: r.status })),
+      folderId,
+      at: job.started_at,
+    });
   }
 
   const slots = limiter(backupConcurrency());
@@ -363,61 +349,30 @@ async function backupAll(job, event, save, clientRecords) {
 }
 
 async function backupReport(job, entry, clientFolderId) {
-  const files = [];
-  entry.backup = { ok: false, folder_id: null, files, warnings: [] };
-  try {
-    const folderId = await folderUnder(clientFolderId, `${safeFilename(entry.name, 'Report')} (${entry.report_id})`);
-    entry.backup.folder_id = folderId;
-    entry.backup.folder_url = drive.driveFolderUrl(folderId);
-
-    // Taken before the export, so any edit from here on shows up before deletion.
-    if (entry.role === 'move') entry.fingerprint = await fingerprint(entry.client_id, entry.report_id);
-
-    // 1. The .ptrac — the restorable copy, and what the move imports.
-    const { buffer, ptrac } = await api.exportReportPtrac(entry.client_id, entry.report_id);
-    entry.cuid = ptrac.report_info.cuid ?? null;
-    entry.status = ptrac.report_info.status ?? entry.status;
-    entry.findings = ptrac.flaws_array.length;
-    entry.media = Object.keys(ptrac.summary?.ReportMedia || {}).length;
-    files.push({ kind: 'ptrac', ...await uploadVerified({
-      buffer, filename: `${safeFilename(entry.name, 'Report')}.ptrac`, mimeType: PTRAC_MIME, folderId,
-    }) });
-
-    // 2. The three client documents, from our own templates. Every one must be made.
-    const documents = await clientDocuments.generateClientDocuments({
-      clientId: entry.client_id, reportId: entry.report_id, exportedAt: job.started_at, respectSwitches: false,
-    });
-    for (const doc of DOCUMENTS) {
-      const made = documents.find((d) => d.doc.key === doc.key);
-      if (!made) throw new Error(`${doc.name} was not generated (template missing?)`);
-      if (!made.ok) throw new Error(`${doc.name}: ${made.error}`);
-      entry.backup.warnings.push(...(made.notices || []).map((n) => `${doc.name}: ${n}`));
-      files.push({ kind: 'document', document: doc.key, ...await uploadVerified({
-        buffer: made.buffer, filename: made.filename, mimeType: PDF_MIME, folderId,
-      }) });
+  // Taken before the export, so any edit from here on shows up before deletion.
+  if (entry.role === 'move') {
+    try {
+      entry.fingerprint = await fingerprint(entry.client_id, entry.report_id);
+    } catch (err) {
+      entry.backup = { ok: false, folder_id: null, files: [], warnings: [], error: `could not read the report: ${err.message}` };
+      return;
     }
-
-    // 3. The Artifacts tab — not in the .ptrac, so copied file by file.
-    const artifacts = await api.listReportArtifacts(entry.client_id, entry.report_id);
-    if (artifacts.length) {
-      const artifactsFolder = await folderUnder(folderId, 'Artifacts');
-      for (const a of artifacts) {
-        const { buffer: bytes } = await api.downloadArtifact(a.id);
-        if (a.size != null && Number(a.size) !== bytes.length) {
-          throw new Error(`artifact "${a.filename}" downloaded as ${bytes.length} bytes, Plextrac lists ${a.size}`);
-        }
-        files.push({
-          kind: 'artifact', artifact_id: a.id, filename: a.filename, content_type: a.content_type || 'application/octet-stream',
-          description: a.description ?? null,
-          ...await uploadVerified({ buffer: bytes, filename: safeFilename(a.filename, 'artifact'), mimeType: a.content_type || 'application/octet-stream', folderId: artifactsFolder }),
-        });
-      }
-    }
-    entry.artifacts = artifacts.length;
-    entry.backup.ok = true;
-  } catch (err) {
-    entry.backup.error = err.message;
   }
+  const result = await backup.backupReport({
+    clientId: entry.client_id, report: { id: entry.report_id, name: entry.name },
+    parentFolderId: clientFolderId, exportedAt: job.started_at,
+  });
+  entry.backup = {
+    ok: result.ok, folder_id: result.folder_id, folder_url: result.folder_url,
+    files: result.files, warnings: result.warnings, error: result.error,
+  };
+  if (result.report) {
+    entry.cuid = result.report.cuid;
+    entry.status = result.report.status ?? entry.status;
+    entry.findings = result.report.findings.length;
+    entry.media = result.report.media;
+  }
+  entry.artifacts = result.artifacts;
 }
 
 async function writeManifest(job) {

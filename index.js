@@ -172,6 +172,10 @@ app.use('/api/deliveryflow', require('./routes/deliveryflow-portal'));
 // into the budget its /clickup and /api/deliveryflow calls share.
 const clientMergeLimiter = rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false });
 app.use('/api/plextrac', clientMergeLimiter, require('./routes/client-merge'));
+// The weekly backup of the whole tenant (pipeline/plextrac-backup.js), for the portal's
+// Scheduling page:
+//   GET  /api/plextrac/backups/status           last run, run in progress, next run
+app.use('/api/plextrac', clientMergeLimiter, require('./routes/plextrac-backup'));
 
 // Manual repair endpoints for missed or mis-mapped automations (X-API-Key:
 // AVAILABILITY_API_KEY). Unlike the /jobs/* triggers below these answer
@@ -229,6 +233,16 @@ app.post('/jobs/qa-queue-seed', apiLimiter, requireApiKey, (req, res) => {
   seedQaQueue().catch(err => log.error('QA queue seed failed', { reason: err.message }));
 });
 
+// Manual trigger for the weekly Plextrac backup (also runs on PLEXTRAC_BACKUP_CRON,
+// Fridays 22:00 UK time by default). Requires the X-API-Key header and is rate-limited.
+// Responds with a blank 200; the run takes hours, so its outcome goes to the logs, Slack
+// and the portal's Scheduling page. A run already in progress is left alone.
+app.post('/jobs/plextrac-backup', apiLimiter, requireApiKey, (req, res) => {
+  res.status(200).end();
+  require('./pipeline/plextrac-backup').runBackup({ kind: 'manual', requestedBy: 'POST /jobs/plextrac-backup' })
+    .catch(err => log.error('Plextrac backup failed', { reason: err.message }));
+});
+
 // Auth-form check at 14:00 on working days (Mon–Fri; server timezone unless
 // AUTH_FORM_CHECK_TZ set). Override the schedule with AUTH_FORM_CHECK_CRON.
 const AUTH_FORM_CHECK_CRON = process.env.AUTH_FORM_CHECK_CRON || '0 14 * * 1-5';
@@ -281,6 +295,9 @@ app.listen(PORT, async () => {
   }
   // Warm + schedule the availability cache that backs /schedule/pentest.
   startAvailabilityCache();
+
+  // The weekly Plextrac backup: schedule it, and pick up a run the restart interrupted.
+  require('./pipeline/plextrac-backup').startSchedule();
 
   // A client merge still "running" died with the previous process — say so on its record.
   require('./lib/client-merge-store').markInterrupted()
