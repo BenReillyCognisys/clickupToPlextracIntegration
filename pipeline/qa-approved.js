@@ -9,7 +9,7 @@
 // thread. Nothing is exported until the report is Published (pipeline/qa-released.js).
 
 const slack = require('../lib/slack');
-const PERMS = require('../config/report-status-permissions');
+const people = require('../lib/slack-people');
 const { postEmptyFieldsNotice } = require('./qa-review/empty-fields');
 const { resolveReleaseQaName, resolveClientName } = require('./qa-released');
 const { READY_FOR_RELEASE_CHANNEL } = require('./status-guard');
@@ -19,23 +19,12 @@ function slackEscape(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Slack ids to @-mention: SLACK_APPROVED_MENTIONS (comma/space-separated ids), else the
-// publishers looked up by email. Looked up once and kept; someone Slack can't find is
-// left out rather than failing the post.
-let publisherIds = null;
+// Slack ids to @-mention: SLACK_APPROVED_MENTIONS (comma/space-separated ids), else
+// every publisher, found in Slack by email (lib/slack-people.js). Someone Slack can't
+// find is left out rather than failing the post.
 async function approvedMentions() {
   const configured = (process.env.SLACK_APPROVED_MENTIONS || '').split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
-  if (configured.length) return configured;
-  if (!publisherIds) {
-    const ids = await Promise.all(PERMS.PUBLISHERS.map((email) => slack.lookupUserIdByEmail(email).catch((err) => {
-      log.warn('Could not find a publisher in Slack for the Approved mention', { email, reason: err.message });
-      return null;
-    })));
-    const found = ids.filter(Boolean);
-    if (found.length === PERMS.PUBLISHERS.length) publisherIds = found; // keep only a complete lookup
-    return found;
-  }
-  return publisherIds;
+  return configured.length ? configured : people.publisherMentions();
 }
 
 //   :large_green_circle: Client: <client> - <report> approved — ready for release <@a> <@b>. Approved by <name> :large_green_circle:

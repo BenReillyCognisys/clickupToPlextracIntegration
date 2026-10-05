@@ -28,12 +28,11 @@ const { READY_FOR_RELEASE_CHANNEL } = require('./status-guard');
 
 const RELEASED_QA_CHANNEL = READY_FOR_RELEASE_CHANNEL();
 
-// Slack user ids @-mentioned on a release announcement. Override with
-// SLACK_RELEASED_QA_MENTIONS (comma/space-separated ids); falls back to the built-in list.
-const DEFAULT_RELEASED_MENTIONS = ['U09CF6MLUF3', 'U06NJCD93RT', 'U06V88B1MEK'];
-const CONFIGURED_MENTIONS = (process.env.SLACK_RELEASED_QA_MENTIONS || '')
-  .split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
-const RELEASED_MENTIONS = CONFIGURED_MENTIONS.length ? CONFIGURED_MENTIONS : DEFAULT_RELEASED_MENTIONS;
+// Who is @-mentioned on a release announcement: the publishers
+// (config/report-status-permissions.js) other than the one who released it — Ben
+// releases, Alice is tagged, and the other way round (lib/slack-people.js). The old
+// fixed list and SLACK_RELEASED_QA_MENTIONS are no longer used.
+const people = require('../lib/slack-people');
 
 // Escapes the three characters special in Slack mrkdwn link text.
 function slackEscape(s) {
@@ -43,7 +42,7 @@ function slackEscape(s) {
 // Builds the release announcement, matching the other QA announcements (client and
 // report hyperlinked), bookended with a :white_check_mark::
 //   :white_check_mark: Client: <client> - <report> released <@u1> <@u2>…. Release QA done by <name> :white_check_mark:
-function buildReleaseMessage({ clientName, clientUrl, reportName, reportUrl, releaseQaName, mentions = RELEASED_MENTIONS }) {
+function buildReleaseMessage({ clientName, clientUrl, reportName, reportUrl, releaseQaName, mentions = [] }) {
   const client = clientUrl ? `<${clientUrl}|${slackEscape(clientName)}>` : slackEscape(clientName);
   const report = reportUrl ? `<${reportUrl}|${slackEscape(reportName)}>` : slackEscape(reportName);
   const pings = (mentions || []).map(id => `<@${id}>`).join(' ');
@@ -51,20 +50,24 @@ function buildReleaseMessage({ clientName, clientUrl, reportName, reportUrl, rel
   return `:white_check_mark: Client: ${client} - ${report} released${mentionPart}. Release QA done by ${slackEscape(releaseQaName)} :white_check_mark:`;
 }
 
-// Resolves the actor who released the report (the user who moved it into the released
-// status) to a display name via the cuid→user map, degrading to a cuid-based fallback if
-// resolution fails.
-async function resolveReleaseQaName(actorCuid) {
-  if (!actorCuid) return 'an unknown user';
+// The actor who released the report (the user who moved it into the released status),
+// as { name, email } via the cuid→user map. The name degrades to a cuid-based fallback
+// and the email to null if they can't be resolved.
+async function resolveReleaser(actorCuid) {
+  if (!actorCuid) return { name: 'an unknown user', email: null };
   try {
-    const map = await users.cuidMap();
-    return users.displayName(map.get(actorCuid), actorCuid);
+    const user = (await users.cuidMap()).get(actorCuid);
+    return { name: users.displayName(user, actorCuid), email: user?.email || null };
   } catch (err) {
     log.warn('Could not resolve release actor for release message', {
       reason: err.message, actor_cuid: actorCuid,
     });
-    return users.displayName(null, actorCuid);
+    return { name: users.displayName(null, actorCuid), email: null };
   }
+}
+
+async function resolveReleaseQaName(actorCuid) {
+  return (await resolveReleaser(actorCuid)).name;
 }
 
 // Resolves the canonical client name from the Plextrac client record, degrading to the
@@ -87,9 +90,14 @@ async function resolveClientName(clientId, fallback) {
 // Posts the release announcement to the release channel. Best-effort — any failure is
 // logged and swallowed so it never disrupts the rest of the webhook.
 async function postReleaseAnnouncement({ clientId, clientName, clientUrl, reportName, reportUrl, actorCuid, reportId, report }) {
-  const releaseQaName = await resolveReleaseQaName(actorCuid);
-  const resolvedClientName = await resolveClientName(clientId, clientName);
-  const text = buildReleaseMessage({ clientName: resolvedClientName, clientUrl, reportName, reportUrl, releaseQaName });
+  const releaser = await resolveReleaser(actorCuid);
+  const releaseQaName = releaser.name;
+  // Unknown releaser: every publisher is tagged.
+  const [resolvedClientName, mentions] = await Promise.all([
+    resolveClientName(clientId, clientName),
+    people.publisherMentions({ except: releaser.email }),
+  ]);
+  const text = buildReleaseMessage({ clientName: resolvedClientName, clientUrl, reportName, reportUrl, releaseQaName, mentions });
   let threadTs = null;
   try {
     threadTs = await slack.postMessage(RELEASED_QA_CHANNEL, text);

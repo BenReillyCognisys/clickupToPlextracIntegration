@@ -105,7 +105,10 @@ router.get('/pentest', requireApiKey, requireCache, (req, res) => {
 // Requires the X-API-Key header. Booking still goes through POST /schedule/pentest
 // with testType "Black Box Web App" and days 0.5.
 const FREE_BLACKBOX_BASE_SERVICE = 'Black Box Web App';
-const FREE_BLACKBOX_PRIORITY     = ['Chahat Mundra', 'Akshay Dandekar', 'Siddharth Johri'];
+// TEMPORARY: only Arjun Pednekar gets Free Black Box tests after the 2-week window.
+// Put back when done: ['Chahat Mundra', 'Akshay Dandekar', 'Siddharth Johri']
+// (tests/free-blackbox.test.js expects those three, so two of its tests fail meanwhile).
+const FREE_BLACKBOX_PRIORITY     = ['Arjun Pednekar'];
 const PRIORITY_WINDOW_DAYS       = 14;
 const HALF_DAY                   = 0.5;
 const AFTER_OPTION_COUNT         = 5;

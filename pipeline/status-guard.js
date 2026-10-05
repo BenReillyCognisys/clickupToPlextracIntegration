@@ -20,6 +20,7 @@
 const api = require('../lib/plextrac-api');
 const users = require('../lib/plextrac-users');
 const slack = require('../lib/slack');
+const people = require('../lib/slack-people');
 const statusStore = require('../lib/report-status-store');
 const suppression = require('../lib/webhook-suppression');
 const PERMS = require('../config/report-status-permissions');
@@ -89,22 +90,11 @@ function choosePrevious({ known, attempted, actorEmail }) {
   return PERMS.ORDER[0];
 }
 
-// "<@U123>" when Slack knows the email, else the name. Never throws.
-// Plextrac and Slack don't always hold someone under the same Cognisys domain
-// (alice@cognisys.group in one, alice@cognisys.co.uk in the other), so the other one is
-// tried too.
-const COGNISYS_DOMAINS = ['cognisys.group', 'cognisys.co.uk'];
-function emailsToTry(email) {
-  const [local, domain] = norm(email).split('@');
-  if (!local || !domain) return [];
-  return [norm(email), ...COGNISYS_DOMAINS.filter((d) => d !== domain && COGNISYS_DOMAINS.includes(domain)).map((d) => `${local}@${d}`)];
-}
-
+// "<@U123>" when Slack knows the person (either Cognisys domain — lib/slack-people.js),
+// else their name. Never throws.
 async function mention(user, fallback) {
-  for (const email of emailsToTry(user?.email)) {
-    const id = await slack.lookupUserIdByEmail(email).catch(() => null);
-    if (id) return `<@${id}>`;
-  }
+  const id = await people.slackIdForEmail(user?.email);
+  if (id) return `<@${id}>`;
   return user?.name || user?.email || fallback;
 }
 
@@ -214,5 +204,4 @@ module.exports = {
   allowedFor,
   READY_FOR_RELEASE_CHANNEL,
   STATUS_VIOLATIONS_CHANNEL,
-  emailsToTry,
 };

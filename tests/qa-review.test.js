@@ -22,12 +22,15 @@ const posts = [];   // { channel, text } from postMessage
 const replies = []; // { channel, threadTs, text } from postReply
 slack.postMessage = async (channel, text) => { posts.push({ channel, text }); return 'ts-1'; };
 slack.postReply = async (channel, threadTs, text) => { replies.push({ channel, threadTs, text }); };
-slack.lookupUserIdByEmail = async (email) => (email === 'ada@example.com' ? 'U777' : null);
+const SLACK_IDS = { 'ada@example.com': 'U777', 'alice.elvin@cognisys.group': 'UALICE', 'ben.reilly@cognisys.group': 'UBEN' };
+slack.lookupUserIdByEmail = async (email) => SLACK_IDS[email] || null;
 // The release also files the client documents (tests/client-documents.test.js covers
 // that); here only the announcement is under test.
 require('../pipeline/client-documents').generateClientDocuments = async () => [];
 users.cuidMap = async () => new Map([
   ['cuid-ada', { cuid: 'cuid-ada', name: 'Ada Lovelace', email: 'ada@example.com' }],
+  ['cuid-alice', { cuid: 'cuid-alice', name: 'Alice Elvin', email: 'alice.elvin@cognisys.group' }],
+  ['cuid-ben', { cuid: 'cuid-ben', name: 'Ben Reilly', email: 'ben.reilly@cognisys.group' }],
 ]);
 plextrac.getClient = async () => ({ name: 'Acme Corp' });
 
@@ -465,12 +468,11 @@ test('hyperlinks names, pings reviewers, credits release QA, and bookends with a
   );
 });
 
-test('uses the built-in release reviewer list when mentions are omitted', () => {
+test('the release message tags nobody unless told who to tag (no fixed list)', () => {
   const msg = buildReleaseMessage({
     clientName: 'Acme', reportName: 'Report 5', releaseQaName: 'Ada Lovelace',
   });
-  eq(msg.includes('<@U09CF6MLUF3> <@U06NJCD93RT> <@U06V88B1MEK>'), true);
-  eq(msg.includes('Release QA done by Ada Lovelace'), true);
+  eq(msg, ':white_check_mark: Client: Acme - Report 5 released. Release QA done by Ada Lovelace :white_check_mark:');
 });
 
 test('escapes mrkdwn-special characters in names and the release-QA name', () => {
@@ -574,6 +576,24 @@ function resetSlack() { posts.length = 0; replies.length = 0; }
     eq(replies[0].text.includes('• Author 1 Email'), true);
     // Release uses its own, louder wording — not the routine "please fill these in".
     eq(replies[0].text.includes('Released with empty custom fields'), true);
+  });
+
+  await atest('the release tags the OTHER publisher: Ben releases → Alice, Alice releases → Ben', async () => {
+    const report = { custom_fields: [] };
+    resetSlack();
+    await postReleaseAnnouncement({ ...ANNOUNCEMENT, actorCuid: 'cuid-ben', report });
+    eq(posts[0].text, ':white_check_mark: Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> released <@UALICE>. Release QA done by Ben Reilly :white_check_mark:');
+    resetSlack();
+    await postReleaseAnnouncement({ ...ANNOUNCEMENT, actorCuid: 'cuid-alice', report });
+    eq(posts[0].text.includes('released <@UBEN>. Release QA done by Alice Elvin'), true);
+    // Katie and Charlotte are never tagged.
+    eq(/U09CF6MLUF3|U06NJCD93RT/.test(posts[0].text), false);
+  });
+
+  await atest('a release by someone unknown tags every publisher', async () => {
+    resetSlack();
+    await postReleaseAnnouncement({ ...ANNOUNCEMENT, actorCuid: null, report: { custom_fields: [] } });
+    eq(posts[0].text.includes('released <@UALICE> <@UBEN>. Release QA done by an unknown user'), true);
   });
 
   await atest('nothing extra is posted when every required field is filled', async () => {
