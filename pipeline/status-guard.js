@@ -25,7 +25,7 @@ const suppression = require('../lib/webhook-suppression');
 const PERMS = require('../config/report-status-permissions');
 const log = require('../lib/logger');
 
-const READY_FOR_RELEASE_CHANNEL = () => process.env.SLACK_READY_FOR_RELEASE_CHANNEL || 'C0C08NCU0MV';
+const READY_FOR_RELEASE_CHANNEL = () => process.env.SLACK_READY_FOR_RELEASE_CHANNEL || 'C0C4ZAKA998';
 // Every disallowed change is also posted here, tagging the person who made it.
 const STATUS_VIOLATIONS_CHANNEL = () => process.env.SLACK_STATUS_VIOLATIONS_CHANNEL || 'C0B6SN0023D';
 

@@ -143,7 +143,7 @@ const nothingRan = () => {
     eq(recorded[101], 'In Review');
     nothingRan();
     // The ready-for-release channel and the status-violations channel, same message.
-    eq(calls.slack.map((m) => m.channel), ['C0C08NCU0MV', 'C0B6SN0023D']);
+    eq(calls.slack.map((m) => m.channel), ['C0C4ZAKA998', 'C0B6SN0023D']);
     eq(calls.slack[0].text, calls.slack[1].text);
     const { text } = calls.slack[1];
     assert.ok(text.includes('Client: <https://test.plextrac.com/client/10|Acme Ltd> - <https://test.plextrac.com/client/10/report/101|Acme | Web>'), text);
@@ -286,7 +286,7 @@ const nothingRan = () => {
     reset({ before: 'In Review' });
     const real = slack.postMessage;
     slack.postMessage = async (channel, text) => {
-      if (channel === 'C0C08NCU0MV') throw new Error('not_in_channel');
+      if (channel === 'C0C4ZAKA998') throw new Error('not_in_channel');
       calls.slack.push({ channel, text });
     };
     try {

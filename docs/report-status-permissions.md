@@ -39,7 +39,7 @@ the user list can't be read to check.
    changes are never checked. A missing Draft trigger means the previous status can be
    wrong.
 2. Invite the Slack bot to the status-violations channel (`C0B6SN0023D`) and the ready-for-release channel (`SLACK_READY_FOR_RELEASE_CHANNEL`,
-   default `C0C08NCU0MV`). Releases move there from the second-round channel.
+   default `C0C4ZAKA998`). Releases move there from the second-round channel.
 3. `node scripts/seed-report-statuses.js` once: records every report's current status.
 
 Plextrac itself still lets anyone pick any status. break.services undoes a disallowed
