@@ -4,7 +4,7 @@
 //
 // Real: every line of this service's code — runReleaseExports, the locks, Drive folder
 // resolution, filenames, the document pipeline (screenshots included), and the
-// renderer: a separate Python process per release rendering the REAL full-report,
+// renderer: a separate Python process per document rendering the REAL full-report,
 // executive-summary and letter-of-attestation templates with Jinja2
 // (tests/fixtures/render_without_weasyprint.py swaps only WeasyPrint's HTML → PDF
 // step, so each document can be read back).
@@ -360,9 +360,9 @@ const idsIn = (text, marker) => [...new Set((text.match(new RegExp(`${marker}-(\
     }
   });
 
-  check(`at most ${RENDER_LIMIT} renderer processes at once (one per run: ${runs.length})`, () => {
+  check(`at most ${RENDER_LIMIT} renderer processes at once (one per document: ${runs.length * 3})`, () => {
     assert.ok(procs.max <= RENDER_LIMIT, `peak ${procs.max}`);
-    assert.strictEqual(procs.total, runs.length);
+    assert.strictEqual(procs.total, runs.length * 3);
   });
 
   fs.rmSync(templateDir, { recursive: true, force: true });

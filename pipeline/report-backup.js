@@ -10,8 +10,9 @@
 //     Artifacts/<file>                                  the report's Artifacts tab
 //
 // Every file is checked against the MD5 Drive reports for what it stored. The three
-// parts are attempted independently, so one failing still leaves the others filed;
-// `ok` is true only when every part of the report was filed.
+// parts are attempted independently and side by side, so one failing still leaves the
+// others filed; `ok` is true only when every part of the report was filed. Each file
+// is uploaded as soon as it's ready, not after the rest of its part.
 //
 // Only reads from Plextrac.
 
@@ -21,10 +22,14 @@ const drive = require('../lib/google-drive');
 const clientDocuments = require('./client-documents');
 const DOCUMENTS = require('../config/client-documents');
 const { safeFilename } = require('./report-export');
+const { limiter } = require('../lib/concurrency');
 
 const PDF_MIME = 'application/pdf';
 const PTRAC_MIME = 'application/octet-stream';
 const JSON_MIME = 'application/json';
+
+// Artifacts-tab files copied at once, per report.
+const ARTIFACT_CONCURRENCY = 3;
 
 const md5 = (buffer) => crypto.createHash('md5').update(buffer).digest('hex');
 
@@ -103,41 +108,48 @@ async function backupReport({ clientId, report, parentFolderId, exportedAt }) {
   }
   const folderId = out.folder_id;
 
-  // 1. The .ptrac — the restorable copy.
-  await attempt('.ptrac', async () => {
-    const { buffer, ptrac } = await api.exportReportPtrac(clientId, report.id);
-    out.report = describePtrac(ptrac);
-    file({ kind: 'ptrac', ...await uploadVerified({
-      buffer, filename: `${safeFilename(report.name, 'Report')}.ptrac`, mimeType: PTRAC_MIME, folderId,
-    }) });
-  });
+  await Promise.all([
+    // 1. The .ptrac — the restorable copy.
+    attempt('.ptrac', async () => {
+      const { buffer, ptrac } = await api.exportReportPtrac(clientId, report.id);
+      out.report = describePtrac(ptrac);
+      file({ kind: 'ptrac', ...await uploadVerified({
+        buffer, filename: `${safeFilename(report.name, 'Report')}.ptrac`, mimeType: PTRAC_MIME, folderId,
+      }) });
+    }),
 
-  // 2. The three client documents. Each one is its own success or failure.
-  await attempt('documents', async () => {
-    const documents = await clientDocuments.generateClientDocuments({
-      clientId, reportId: report.id, exportedAt, respectSwitches: false,
-    });
-    for (const doc of DOCUMENTS) {
-      const made = documents.find((d) => d.doc.key === doc.key);
-      if (!made) { out.errors.push(`${doc.name}: not generated (template missing?)`); continue; }
-      if (!made.ok) { out.errors.push(`${doc.name}: ${made.error}`); continue; }
-      out.warnings.push(...(made.notices || []).map((n) => `${doc.name}: ${n}`));
-      await attempt(doc.name, async () => {
-        file({ kind: 'document', document: doc.key, ...await uploadVerified({
-          buffer: made.buffer, filename: made.filename, mimeType: PDF_MIME, folderId,
-        }) });
+    // 2. The three client documents. Each one is its own success or failure, and is
+    // uploaded as soon as it's rendered.
+    attempt('documents', async () => {
+      const pending = await clientDocuments.startClientDocuments({
+        clientId, reportId: report.id, exportedAt, respectSwitches: false,
       });
-    }
-  });
+      const made = new Set();
+      await Promise.all(pending.map(async (p) => {
+        const document = await p;
+        const { key, name } = document.doc;
+        made.add(key);
+        if (!document.ok) { out.errors.push(`${name}: ${document.error}`); return; }
+        out.warnings.push(...(document.notices || []).map((n) => `${name}: ${n}`));
+        await attempt(name, async () => {
+          file({ kind: 'document', document: key, ...await uploadVerified({
+            buffer: document.buffer, filename: document.filename, mimeType: PDF_MIME, folderId,
+          }) });
+        });
+      }));
+      for (const doc of DOCUMENTS.filter((d) => !made.has(d.key))) {
+        out.errors.push(`${doc.name}: not generated (template missing?)`);
+      }
+    }),
 
-  // 3. The Artifacts tab — not in the .ptrac, so copied file by file.
-  await attempt('artifacts', async () => {
-    const artifacts = await api.listReportArtifacts(clientId, report.id);
-    out.artifacts = artifacts.length;
-    if (!artifacts.length) return;
-    const artifactsFolder = await folderUnder(folderId, 'Artifacts');
-    for (const a of artifacts) {
-      await attempt(`artifact "${a.filename}"`, async () => {
+    // 3. The Artifacts tab — not in the .ptrac, so copied file by file, a few at once.
+    attempt('artifacts', async () => {
+      const artifacts = await api.listReportArtifacts(clientId, report.id);
+      out.artifacts = artifacts.length;
+      if (!artifacts.length) return;
+      const artifactsFolder = await folderUnder(folderId, 'Artifacts');
+      const slots = limiter(ARTIFACT_CONCURRENCY);
+      await Promise.all(artifacts.map((a) => slots(() => attempt(`artifact "${a.filename}"`, async () => {
         const { buffer } = await api.downloadArtifact(a.id);
         if (a.size != null && Number(a.size) !== buffer.length) {
           throw new Error(`downloaded ${buffer.length} bytes, Plextrac lists ${a.size}`);
@@ -147,9 +159,9 @@ async function backupReport({ clientId, report, parentFolderId, exportedAt }) {
           kind: 'artifact', artifact_id: a.id, filename: a.filename, content_type: contentType, description: a.description ?? null,
           ...await uploadVerified({ buffer, filename: safeFilename(a.filename, 'artifact'), mimeType: contentType, folderId: artifactsFolder }),
         });
-      });
-    }
-  });
+      }))));
+    }),
+  ]);
 
   out.ok = out.errors.length === 0;
   out.error = out.errors.length ? out.errors.join('; ') : null;

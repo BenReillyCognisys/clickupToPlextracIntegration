@@ -123,7 +123,7 @@ function reset() {
   };
   drive.downloadFileById = async (fileId) => ({ buffer: files[fileId], md5Checksum: md5(files[fileId]) });
 
-  clientDocuments.generateClientDocuments = async ({ reportId }) => DOCUMENTS.map((doc) => (hooks.docFails?.(reportId, doc.key)
+  clientDocuments.startClientDocuments = async ({ reportId }) => DOCUMENTS.map((doc) => (hooks.docFails?.(reportId, doc.key)
     ? { doc, ok: false, error: 'Rendering failed: boom' }
     : { doc, ok: true, buffer: PDF, filename: `${doc.name} 2026-10-05 10-00-00.pdf` }));
 

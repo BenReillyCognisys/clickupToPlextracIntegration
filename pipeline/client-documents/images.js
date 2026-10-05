@@ -78,18 +78,51 @@ const ASPECT_RATIO = /\baspect-ratio\s*:[^;"']*;?\s*/gi;
 const withoutAspectRatio = (tag) => tag.replace(ASPECT_RATIO, '');
 
 /**
+ * Fetches uploads for inlineScreenshots: at most FETCH_CONCURRENCY at once, and each
+ * distinct upload once, however many times — or by however many calls — it's used.
+ * One per release, shared across its findings, so each finding's screenshots can be
+ * fetched as soon as that finding arrives.
+ *
+ * @param {object} [opts]
+ * @param {(path: string) => Promise<{buffer: Buffer}>} [opts.fetchUpload]  defaults to
+ *   the authenticated Plextrac client
+ * @returns {(path: string) => Promise<{uri: string} | {reason: string}>}  never rejects
+ */
+function screenshotFetcher({ fetchUpload = (path) => api.rawBinary('get', path) } = {}) {
+  const slots = limiter(FETCH_CONCURRENCY);
+  const fetched = new Map(); // path -> Promise<{ uri } | { reason }>
+  return (path) => {
+    if (!fetched.has(path)) {
+      fetched.set(path, slots(async () => {
+        try {
+          const { buffer } = await fetchUpload(path);
+          const type = imageType(buffer);
+          if (!type) return { reason: 'Plextrac did not return an image' };
+          if (buffer.length > MAX_BYTES) return { reason: `image is over ${Math.round(MAX_BYTES / 1024 / 1024)} MB` };
+          return { uri: `data:${type};base64,${buffer.toString('base64')}` };
+        } catch (err) {
+          return { reason: err.message };
+        }
+      }));
+    }
+    return fetched.get(path);
+  };
+}
+
+/**
  * Returns copies of `findings` with every Plextrac screenshot inlined as a data: URI.
  *
  * @param {Array<object>} findings  full finding records
  * @param {object} [opts]
  * @param {(path: string) => Promise<{buffer: Buffer}>} [opts.fetchUpload]  defaults to
  *   the authenticated Plextrac client
+ * @param {Function} [opts.fetcher]  a screenshotFetcher shared with other calls;
+ *   defaults to a new one using `fetchUpload`
  * @returns {Promise<{findings: Array<object>, inlined: number,
  *   missing: Array<{title: string, reason: string}>}>}  one `missing` entry per image
  *   that could not be printed, naming its finding
  */
-async function inlineScreenshots(findings, { fetchUpload = (path) => api.rawBinary('get', path) } = {}) {
-  // Each distinct upload is fetched once, however many times it's used.
+async function inlineScreenshots(findings, { fetchUpload, fetcher = screenshotFetcher({ fetchUpload }) } = {}) {
   const paths = new Set();
   for (const f of findings) {
     for (const s of strings(f)) {
@@ -100,19 +133,8 @@ async function inlineScreenshots(findings, { fetchUpload = (path) => api.rawBina
     }
   }
 
-  const slots = limiter(FETCH_CONCURRENCY);
   const fetched = new Map(); // path -> { uri } | { reason }
-  await Promise.all([...paths].map((path) => slots(async () => {
-    try {
-      const { buffer } = await fetchUpload(path);
-      const type = imageType(buffer);
-      if (!type) fetched.set(path, { reason: 'Plextrac did not return an image' });
-      else if (buffer.length > MAX_BYTES) fetched.set(path, { reason: `image is over ${Math.round(MAX_BYTES / 1024 / 1024)} MB` });
-      else fetched.set(path, { uri: `data:${type};base64,${buffer.toString('base64')}` });
-    } catch (err) {
-      fetched.set(path, { reason: err.message });
-    }
-  })));
+  await Promise.all([...paths].map(async (path) => { fetched.set(path, await fetcher(path)); }));
 
   let inlined = 0;
   const missing = [];
@@ -133,4 +155,4 @@ async function inlineScreenshots(findings, { fetchUpload = (path) => api.rawBina
   return { findings: out, inlined, missing };
 }
 
-module.exports = { inlineScreenshots, uploadPath, imageType };
+module.exports = { inlineScreenshots, screenshotFetcher, uploadPath, imageType };

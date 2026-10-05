@@ -24,8 +24,9 @@
 //   * Folder creation itself is serialised per parent folder (lib/google-drive), so
 //     two releases for one client can't create two client folders.
 //
-// Speed: the documents render in one renderer process per release, and their Drive
-// and Plextrac uploads run side by side.
+// Speed: each document renders in its own renderer process as soon as its data is in
+// (the summary documents don't wait for the full report's screenshots), and is
+// uploaded to Drive and Plextrac, side by side, the moment it's made.
 //
 // Best-effort, like the export before it: failures are logged and reported in the
 // release announcement's Slack thread, and never thrown — the release has happened
@@ -97,16 +98,18 @@ async function runReleaseExports({ clientId, reportId, clientName, reportName, c
         exportedAt: folderId ? reportExport.claimFileTime(folderId, startedAt) : startedAt,
       });
 
-      // 2. Make the documents: the full report, the executive summary, the letter.
-      const documents = await clientDocuments.generateClientDocuments(job).catch((err) => {
+      // 2. Make the documents: the full report, the executive summary, the letter —
+      // each rendering on its own as soon as its data is in.
+      const documents = await clientDocuments.startClientDocuments(job).catch((err) => {
         log.error('Release export: documents FAILED', { report_id: reportId, reason: err.message });
         problems.push(`The report documents could not be generated: ${err.message}`);
         return [];
       });
 
-      // 3. File each document that was made, all into the one folder.
+      // 3. File each document the moment it's made, all into the one folder.
       const folder = reportExport.releaseFolderPath({ clientName, exportedAt: startedAt });
-      await Promise.all(documents.map(async (document) => {
+      await Promise.all(documents.map(async (pending) => {
+        const document = await pending;
         const name = document.doc.name;
         if (!document.ok) {
           log.error(`Release export: ${name} FAILED`, { report_id: reportId, reason: document.error });

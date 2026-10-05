@@ -26,7 +26,7 @@ const SLACK_IDS = { 'ada@example.com': 'U777', 'alice.elvin@cognisys.group': 'UA
 slack.lookupUserIdByEmail = async (email) => SLACK_IDS[email] || null;
 // The release also files the client documents (tests/client-documents.test.js covers
 // that); here only the announcement is under test.
-require('../pipeline/client-documents').generateClientDocuments = async () => [];
+require('../pipeline/client-documents').startClientDocuments = async () => [];
 users.cuidMap = async () => new Map([
   ['cuid-ada', { cuid: 'cuid-ada', name: 'Ada Lovelace', email: 'ada@example.com' }],
   ['cuid-alice', { cuid: 'cuid-alice', name: 'Alice Elvin', email: 'alice.elvin@cognisys.group' }],

@@ -288,6 +288,93 @@ function fakeDrive(tree, unreadable = []) {
     assert.strictEqual(drive.folders.length, 4);
   });
 
+  console.log('\nuploads — transient failures are retried, never duplicated:');
+
+  process.env.GOOGLE_DRIVE_RETRY_DELAYS_MS = '1,1,1';
+  const { uploadToFolder, isTransient } = require('../lib/google-drive');
+  const crypto = require('crypto');
+  const md5 = (b) => crypto.createHash('md5').update(b).digest('hex');
+  const timedOut = () => Object.assign(new Error('request to https://www.googleapis.com/upload/drive/v3/files failed, reason: read ETIMEDOUT'), { code: 'ETIMEDOUT' });
+
+  // A Drive that stores uploads, failing the first `fail` creates. `landsAnyway` stores
+  // the file before failing — the answer lost on the way back, as with a read timeout.
+  function flakyDrive({ fail = 0, landsAnyway = false, error = timedOut } = {}) {
+    const files = [];
+    let creates = 0;
+    return {
+      files: {
+        store: files,
+        list: async ({ q }) => {
+          const parent = /'([^']+)' in parents/.exec(q)[1];
+          const name = /name = '([^']+)'/.exec(q)[1];
+          return { data: { files: files.filter((f) => f.parent === parent && f.name === name) } };
+        },
+        create: async ({ requestBody, media }) => {
+          const content = Buffer.concat(await media.body.toArray());
+          const file = { id: `F${files.length + 1}`, name: requestBody.name, parent: requestBody.parents[0], md5Checksum: md5(content), size: String(content.length) };
+          creates++;
+          if (creates <= fail) {
+            if (landsAnyway) files.push(file);
+            throw error();
+          }
+          files.push(file);
+          return { data: file };
+        },
+      },
+      creates: () => creates,
+    };
+  }
+  const upload = (drive, buffer = Buffer.from('ptrac bytes')) => uploadToFolder(drive, 'FOLDER', { buffer, filename: 'Report.ptrac', mimeType: 'application/octet-stream', overwrite: false });
+
+  await test('a timed-out upload that never landed is sent again, and succeeds', async () => {
+    const drive = flakyDrive({ fail: 2 });
+    const out = await upload(drive);
+    assert.strictEqual(drive.creates(), 3);
+    assert.strictEqual(drive.files.store.length, 1);
+    assert.strictEqual(out.md5Checksum, md5(Buffer.from('ptrac bytes')));
+  });
+
+  await test('a timed-out upload that DID land is used, not uploaded a second time', async () => {
+    const drive = flakyDrive({ fail: 1, landsAnyway: true });
+    const out = await upload(drive);
+    assert.strictEqual(drive.creates(), 1);
+    assert.strictEqual(drive.files.store.length, 1);
+    assert.strictEqual(out.id, 'F1');
+  });
+
+  await test('a same-named file with OTHER bytes is never taken for the upload', async () => {
+    const drive = flakyDrive({ fail: 1 });
+    drive.files.store.push({ id: 'OTHER', name: 'Report.ptrac', parent: 'FOLDER', md5Checksum: md5(Buffer.from('another report')) });
+    const out = await upload(drive);
+    assert.notStrictEqual(out.id, 'OTHER');
+    assert.strictEqual(drive.files.store.length, 2);
+  });
+
+  await test('gives up after the last retry, with the original error', async () => {
+    const drive = flakyDrive({ fail: 10 });
+    await assert.rejects(upload(drive), /read ETIMEDOUT/);
+    assert.strictEqual(drive.creates(), 4);
+  });
+
+  await test('a permanent failure is not retried', async () => {
+    const drive = flakyDrive({ fail: 10, error: () => Object.assign(new Error('File not found: FOLDER'), { status: 404, code: 404 }) });
+    await assert.rejects(upload(drive), /File not found/);
+    assert.strictEqual(drive.creates(), 1);
+  });
+
+  await test('what counts as transient', () => {
+    const t = (err) => isTransient(err);
+    assert.strictEqual(t(timedOut()), true);
+    assert.strictEqual(t(new Error('request failed, reason: socket hang up')), true);
+    assert.strictEqual(t({ code: 'ECONNRESET', message: 'x' }), true);
+    assert.strictEqual(t({ status: 503, message: 'Service Unavailable' }), true);
+    assert.strictEqual(t({ status: 429, message: 'Too Many Requests' }), true);
+    assert.strictEqual(t({ status: 403, errors: [{ reason: 'userRateLimitExceeded' }], message: 'x' }), true);
+    assert.strictEqual(t({ status: 403, errors: [{ reason: 'insufficientFilePermissions' }], message: 'x' }), false);
+    assert.strictEqual(t({ status: 404, message: 'File not found' }), false);
+    assert.strictEqual(t({ status: 400, message: 'Bad Request' }), false);
+  });
+
   console.log(`\n${passed} passed, ${failed} failed\n`);
   process.exit(failed ? 1 : 0);
 })();

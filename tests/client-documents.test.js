@@ -16,7 +16,7 @@ const fx = require('./fixtures/client-report');
 const data = require('../pipeline/client-documents/data');
 const clientDocuments = require('../pipeline/client-documents');
 // Kept before any test stubs it, for the tests that run the real thing.
-const realGenerate = clientDocuments.generateClientDocuments;
+const realStart = clientDocuments.startClientDocuments;
 const { runReleaseExports } = require('../pipeline/release-exports');
 
 const PDF = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(32, 0x20)]);
@@ -61,6 +61,9 @@ function test(description, fn) {
     .catch((err) => { console.error(`  ✗  ${description}\n       ${err.message}`); failed++; });
 }
 const eq = (a, b) => assert.deepStrictEqual(a, b);
+// Every job the renderer was given, across its runs, and one of them by document.
+const rendered = () => calls.render.flat();
+const renderedJob = (id) => rendered().find((j) => j.id === id);
 const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, findings: fx.findings, exportedAt: EXPORTED_AT });
 
 (async () => {
@@ -134,22 +137,21 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
 
   const job = { clientId: 12, reportId: 34, exportedAt: EXPORTED_AT, documents: DOCS };
 
-  await test('makes every document, renders them in ONE renderer run, names them by the release time', async () => {
+  await test('makes every document, each in its OWN renderer run, names them by the release time', async () => {
     reset();
     const out = await clientDocuments.generateClientDocuments(job);
     eq(out.map((d) => [d.doc.key, d.ok, d.filename]), [
       ['exec-summary', true, 'Executive Summary Report 2026-09-26 14-30-05.pdf'],
       ['letter-of-attestation', true, 'Letter of Attestation 2026-09-26 14-30-05.pdf'],
     ]);
-    eq(calls.render.length, 1);
-    eq(calls.render[0].map((j) => j.template), ['exec.j2', 'loa.j2']);
+    eq(calls.render.map((jobs) => jobs.map((j) => j.template)), [['exec.j2'], ['loa.j2']]);
     eq(calls.getReport, [[12, 34]]);
   });
 
   await test('both templates get the same reduced context, built from this report', async () => {
     reset();
     await clientDocuments.generateClientDocuments(job);
-    const [a, b] = calls.render[0].map((j) => j.context);
+    const [a, b] = rendered().map((j) => j.context);
     eq(a, b);
     eq(a.CLIENT_INFO.name, 'Acme Corp');
     eq(a.FINDINGS.length, 4);
@@ -192,7 +194,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     reset();
     const out = await withEnv({ TEST_EXEC_ENABLED: 'false' }, () => clientDocuments.generateClientDocuments(job));
     eq(out.map((d) => d.doc.key), ['letter-of-attestation']);
-    eq(calls.render[0].map((j) => j.template), ['loa.j2']);
+    eq(rendered().map((j) => j.template), ['loa.j2']);
   });
 
   await test('switching off the letter leaves only the executive summary', async () => {
@@ -287,7 +289,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
   const fullJob = { ...job, documents: [FULL_DOC, ...DOCS] };
   const byId = (list) => [...list].sort((a, b) => a[2] - b[2]);
 
-  await test('fetches every finding of THIS report, and renders with the other documents in one run', async () => {
+  await test('fetches every finding of THIS report, and renders each document in its own run', async () => {
     reset();
     const out = await clientDocuments.generateClientDocuments(fullJob);
     eq(out.map((d) => [d.doc.key, d.ok, d.filename]), [
@@ -296,8 +298,8 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
       ['letter-of-attestation', true, 'Letter of Attestation 2026-09-26 14-30-05.pdf'],
     ]);
     eq(byId(calls.getFinding), [[12, 34, 1], [12, 34, 2], [12, 34, 3], [12, 34, 4]]);
-    eq(calls.render.length, 1);
-    const [full, exec, letter] = calls.render[0];
+    eq(calls.render.every((jobs) => jobs.length === 1), true);
+    const [full, exec, letter] = ['full-report', 'exec-summary', 'letter-of-attestation'].map(renderedJob);
     eq([full.template, full.pdf_options, exec.pdf_options], ['full.j2', { dpi: 150 }, undefined]);
     eq(JSON.stringify(full.context).includes(fx.SECRET), true);
     // The summary documents still never see a write-up.
@@ -309,7 +311,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     reset();
     const [full] = await clientDocuments.generateClientDocuments(fullJob);
     eq(calls.fetched.sort(), [1, 2, 3, 4].map((i) => `/api/v2/uploads/shot-${i}.png`));
-    const poc = calls.render[0][0].context.FINDINGS[0].fields.proof_of_concept.value;
+    const poc = renderedJob('full-report').context.FINDINGS[0].fields.proof_of_concept.value;
     eq(poc.includes(`<img src="data:image/png;base64,${PNG.toString('base64')}" />`), true);
     eq([full.screenshots, full.notices], [{ inlined: 4, missing: 0 }, []]);
   });
@@ -324,7 +326,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     eq(full.ok, true);
     eq(full.screenshots, { inlined: 3, missing: 1 });
     eq(full.notices, ['a screenshot in "Stored XSS" is missing from the PDF (HTTP 404)']);
-    const xss = calls.render[0][0].context.FINDINGS.find((f) => f.title === 'Stored XSS');
+    const xss = renderedJob('full-report').context.FINDINGS.find((f) => f.title === 'Stored XSS');
     eq(xss.fields.proof_of_concept.value.includes('[Screenshot missing'), true);
   });
 
@@ -337,7 +339,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     const out = await clientDocuments.generateClientDocuments(fullJob);
     eq(out.map((d) => d.ok), [false, true, true]);
     eq(out[0].error, 'the findings could not be loaded from Plextrac: Plextrac 502');
-    eq(calls.render[0].map((j) => j.id), ['exec-summary', 'letter-of-attestation']);
+    eq(rendered().map((j) => j.id), ['exec-summary', 'letter-of-attestation']);
   });
 
   await test('a finding that says it belongs to another report is refused', async () => {
@@ -353,6 +355,34 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     const out = await withEnv({ TEST_FULL_ENABLED: 'false' }, () => clientDocuments.generateClientDocuments(fullJob));
     eq(out.map((d) => d.doc.key), ['exec-summary', 'letter-of-attestation']);
     eq([calls.getFinding.length, calls.fetched.length], [0, 0]);
+  });
+
+  await test('the summary documents render while the full report findings are still loading', async () => {
+    reset();
+    let releaseFindings;
+    const findingsHeld = new Promise((r) => { releaseFindings = r; });
+    const getFinding = api.getFinding;
+    api.getFinding = async (...args) => { await findingsHeld; return getFinding(...args); };
+    const pending = await clientDocuments.startClientDocuments(fullJob);
+    const [exec, letter] = await Promise.all([pending[1], pending[2]]);
+    eq([exec.ok, letter.ok], [true, true]);
+    eq(rendered().map((j) => j.id), ['exec-summary', 'letter-of-attestation']);
+    releaseFindings();
+    const full = await pending[0];
+    eq([full.ok, rendered().length], [true, 3]);
+  });
+
+  await test('a screenshot used by two findings is fetched once for the whole report', async () => {
+    reset();
+    const shared = '<p><img src="/api/v2/uploads/shared.png" /></p>';
+    api.getFinding = async (c, r, id) => {
+      const f = structuredClone(fx.fullFindings[id]);
+      f.fields.proof_of_concept.value = shared;
+      return f;
+    };
+    const [full] = await clientDocuments.generateClientDocuments(fullJob);
+    eq(calls.fetched, ['/api/v2/uploads/shared.png']);
+    eq(full.screenshots, { inlined: 4, missing: 0 });
   });
 
   console.log('\nscreenshots:');
@@ -476,7 +506,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
 
   const release = { clientId: 12, reportId: 34, clientName: 'Acme Corp', reportName: 'Web App', channel: 'C1', threadTs: 't1' };
   const stubDocuments = () => {
-    clientDocuments.generateClientDocuments = async (j) => {
+    clientDocuments.startClientDocuments = async (j) => {
       calls.jobs.push(j);
       return [FULL_DOC, ...DOCS].map((d) => ({
         doc: d, ok: true, buffer: PDF, filename: `${d.filename || d.name} ${j.exportedAt.toISOString()}.pdf`,
@@ -521,7 +551,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     reset();
     const order = [];
     let n = 0;
-    clientDocuments.generateClientDocuments = async () => {
+    clientDocuments.startClientDocuments = async () => {
       const run = ++n;
       order.push(`start ${run}`);
       await new Promise((r) => setTimeout(r, 20));
@@ -535,7 +565,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
   await test('different reports are not held up by each other', async () => {
     reset();
     const order = [];
-    clientDocuments.generateClientDocuments = async (j) => {
+    clientDocuments.startClientDocuments = async (j) => {
       order.push(`start ${j.reportId}`);
       await new Promise((r) => setTimeout(r, 20));
       order.push(`end ${j.reportId}`);
@@ -543,6 +573,22 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
     };
     await Promise.all([runReleaseExports(release), runReleaseExports({ ...release, reportId: 35 })]);
     eq(order.slice(0, 2), ['start 34', 'start 35']);
+  });
+
+  await test('each document is filed the moment it is made, not after the others', async () => {
+    reset();
+    let finishFull;
+    const fullDone = new Promise((r) => { finishFull = r; });
+    clientDocuments.startClientDocuments = async (j) => [FULL_DOC, ...DOCS].map((d) => {
+      const made = { doc: d, ok: true, buffer: PDF, filename: `${d.name} ${j.exportedAt.toISOString()}.pdf` };
+      return d === FULL_DOC ? fullDone.then(() => made) : made;
+    });
+    const run = runReleaseExports(release);
+    for (let i = 0; i < 20 && calls.uploads.length < 2; i++) await new Promise((r) => setTimeout(r, 1));
+    eq(calls.uploads.map((u) => u.filename.split(' ')[0]), ['Executive', 'Letter']);
+    finishFull();
+    await run;
+    eq(calls.uploads.length, 3);
   });
 
   await test('a Drive folder failure files nothing in Drive but still uploads to Plextrac, and says so', async () => {
@@ -557,7 +603,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
 
   await test('document failures are listed together in one thread reply', async () => {
     reset();
-    clientDocuments.generateClientDocuments = async () => DOCS.map((d) => ({ doc: d, ok: false, error: 'Rendering failed: boom' }));
+    clientDocuments.startClientDocuments = async () => DOCS.map((d) => ({ doc: d, ok: false, error: 'Rendering failed: boom' }));
     await runReleaseExports(release);
     eq(calls.replies.length, 1);
     eq(calls.replies[0].includes('Executive Summary Report: Rendering failed'), true);
@@ -566,7 +612,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
 
   await test('a screenshot missing from the full report is raised in the thread; the report is still filed', async () => {
     reset();
-    clientDocuments.generateClientDocuments = async () => [{
+    clientDocuments.startClientDocuments = async () => [{
       doc: FULL_DOC, ok: true, buffer: PDF, filename: 'Full-Pentest-Report-Tech-Details x.pdf',
       screenshots: { inlined: 3, missing: 1 },
       notices: ['a screenshot in "Stored XSS" is missing from the PDF (HTTP 404)'],
@@ -644,7 +690,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
 
   await test('a switched-off document shows in the release trail as skipped, and the run is not a problem', async () => {
     reset();
-    clientDocuments.generateClientDocuments = realGenerate;
+    clientDocuments.startClientDocuments = realStart;
     // The real config, with only the letter switched off; the exec summary still runs
     // through the stubbed Plextrac / renderer / Drive.
     const lines = await withEnv({ CLIENT_DOCS_LETTER_OF_ATTESTATION_ENABLED: 'no' },
@@ -657,7 +703,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
 
   await test('Plextrac data failing is reported, never thrown into the webhook', async () => {
     reset();
-    clientDocuments.generateClientDocuments = async () => { throw new Error('Plextrac 500'); };
+    clientDocuments.startClientDocuments = async () => { throw new Error('Plextrac 500'); };
     await runReleaseExports(release);
     eq(/could not be generated: Plextrac 500/.test(calls.replies[0]), true);
     eq(calls.uploads.length, 0);

@@ -159,9 +159,16 @@ ever scaled to several, they need to move to MongoDB.
 
 ### Many releases at once
 
+Each document renders in its own WeasyPrint process as soon as its data is in, and is
+uploaded to Drive and Plextrac the moment it's made. The executive summary and letter
+don't wait for the full report's findings and screenshots, and none of the three
+waits for another to render (WeasyPrint is single-threaded, so one process per release
+would lay them out one after another on one core).
+
 A burst of releases queues rather than piling up. At most `PDF_RENDER_CONCURRENCY`
-(default 4) PDF renders run at a time, because each WeasyPrint process uses 100 MB or
-more.
+(default 4) PDF renders run at a time across everything — releases, client merges and
+the weekly backup — because each WeasyPrint process uses 100 MB or more. One release
+uses up to three; raise it towards the server's core count if memory allows.
 
 `tests/release-stress.test.js` releases 100 reports at once, plus 5 webhooks delivered
 twice, across 30 clients with 3-4 reports each. Each report has its own hosts, its own
@@ -175,8 +182,8 @@ document back and checks:
 - nothing was overwritten or duplicated
 - every artifact is on the right report
 
-It runs the real code, including a separate Python renderer process per release on
-both real templates. Only Drive and Plextrac are simulated, with random latency so the
+It runs the real code, including a separate Python renderer process per document on
+the real templates. Only Drive and Plextrac are simulated, with random latency so the
 releases interleave as badly as possible.
 
 A re-release makes a new set of files with a new timestamp. Nothing is overwritten.
