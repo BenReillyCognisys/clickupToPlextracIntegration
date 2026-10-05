@@ -54,6 +54,7 @@ const drive = require('../lib/google-drive');
 const store = require('../lib/client-merge-store');
 const deliveryflow = require('../lib/deliveryflow-api');
 const suppression = require('../lib/webhook-suppression');
+const statusStore = require('../lib/report-status-store');
 const backup = require('./report-backup');
 const DOCUMENTS = require('../config/client-documents');
 const { exportTimestamp, safeFilename } = require('./report-export');
@@ -69,6 +70,8 @@ const backupRoot = () => process.env.CLIENT_MERGE_DRIVE_FOLDER_ID || '1YxrZz42lK
 const backupConcurrency = () => Number(process.env.CLIENT_MERGE_BACKUP_CONCURRENCY) || 2;
 const importWaitMs = () => Number(process.env.CLIENT_MERGE_IMPORT_WAIT_MS) || 180000;
 const pollMs = () => Number(process.env.CLIENT_MERGE_POLL_MS) || 5000;
+// How long a moved report's webhooks stay ignored after its move has finished.
+const SUPPRESS_TAIL_MS = 2 * 60 * 1000;
 
 const { md5, JSON_MIME } = backup;
 
@@ -505,6 +508,10 @@ async function moveReport(job, entry, event, save) {
       newClientId: keepId, newReportId: found.id, newCuid: copy.cuid, newReportUrl: m.new_report_url, mergeId: job.merge_id,
     });
     m.repointed = repointed.counts;
+    // The status guard (pipeline/status-guard.js) puts a disallowed change back to the
+    // status on record — record the copy's, so its first change is judged correctly.
+    await statusStore.set({ reportId: found.id, clientId: keepId, cuid: copy.cuid, status: entry.status, source: 'client-merge' })
+      .catch((err) => event('warn', `Could not record the status of the copy of "${entry.name}": ${err.message}`, { new_report_id: found.id }));
     m.deliveryflow = await notifyDeliveryFlow(repointed.engagements, { entry, reportId: found.id, url: m.new_report_url, status: entry.status });
     await step('repointed', `Records for "${entry.name}" now point at report ${found.id}`, { ...repointed.counts });
 
@@ -513,6 +520,15 @@ async function moveReport(job, entry, event, save) {
     const still = (await loadReports(entry.client_id)).some((r) => r.id === entry.report_id);
     if (still) throw new Error(`Plextrac accepted the delete of "${entry.name}" (${entry.report_id}) but it is still listed`);
     await step('deleted', `Moved "${entry.name}": ${entry.report_id} → ${found.id}, original deleted`, { new_report_id: found.id });
+
+    // Moved: hand the report back to its automations. A short tail stays in case
+    // Plextrac's webhook for the import arrives late; anything later that break.services
+    // itself did is ignored by its actor (pipeline/status-guard.js). Without this, a
+    // real change in the next 15 minutes — say, submitting the report for QA — would
+    // be dropped.
+    const keys = { cuid: copy.cuid, clientName: job.keep_client.name, reportName: entry.name };
+    await suppression.release(keys);
+    await suppression.suppress({ ...keys, reason: `client merge ${job.merge_id} (tail)` }, SUPPRESS_TAIL_MS);
   } catch (err) {
     m.error = err.message;
     m.failed_at = m.state;

@@ -18,6 +18,7 @@ const store = require('../lib/client-merge-store');
 const deliveryflow = require('../lib/deliveryflow-api');
 const clientDocuments = require('../pipeline/client-documents');
 const suppression = require('../lib/webhook-suppression');
+const statusStore = require('../lib/report-status-store');
 const log = require('../lib/logger');
 const DOCUMENTS = require('../config/client-documents');
 
@@ -59,7 +60,7 @@ function reset() {
   };
   nextReportId = 900;
   hooks = {};
-  calls = { imports: [], deletes: [], clientDeletes: [], uploads: [], artifactUploads: [], repoint: [], aliases: [], saves: 0, events: [], notify: [] };
+  calls = { imports: [], deletes: [], clientDeletes: [], uploads: [], artifactUploads: [], repoint: [], aliases: [], saves: 0, events: [], notify: [], statuses: [] };
   suppression.clear();
 
   api.listClients = async () => Object.values(pt.clients).map((c) => ({ id: `client_${c.client_id}`, data: [c.client_id, c.name, null] }));
@@ -137,6 +138,7 @@ function reset() {
   store.repointAliases = async () => {};
   store.saveAlias = async (a) => { calls.aliases.push(a); };
   store.findAlias = async () => hooks.alias || null;
+  statusStore.set = async ({ reportId, status }) => { calls.statuses.push([reportId, status]); };
 
   deliveryflow.isConfigured = () => true;
   deliveryflow.sendEvent = async (event, ids, data) => { calls.events.push({ event, ids, data }); };
@@ -206,13 +208,24 @@ const quiet = async (fn) => {
     eq(JSON.stringify(job).includes('BIGLOGO'), false);
   });
 
-  await test('webhook events for the reports being moved are suppressed', async () => {
+  await test('a moved report\'s webhooks are ignored only briefly after its move, then flow again', async () => {
     reset();
     await quiet(() => merge.runMerge(newJob()));
     eq(await suppression.isSuppressed({ text: 'Acme Ltd||Acme | Infra | Feb 2026' }), true);
     eq(await suppression.isSuppressed({ cuid: 'cuid-900' }), true);
     // ...but not other reports of the kept client.
     eq(await suppression.isSuppressed({ text: 'Acme Ltd||Something Else' }), false);
+    // Three minutes on, a real change (e.g. submitting it for QA) is handled again.
+    const realNow = Date.now;
+    Date.now = () => realNow() + 3 * 60 * 1000;
+    try {
+      eq(await quiet(() => suppression.isSuppressed({ text: 'Acme Ltd||Acme | Infra | Feb 2026' })), false);
+      eq(await quiet(() => suppression.isSuppressed({ cuid: 'cuid-900' })), false);
+    } finally {
+      Date.now = realNow;
+    }
+    // The copies' statuses are on record for the status guard.
+    eq(calls.statuses, [[900, 'Published'], [901, 'Published']]);
   });
 
   await test('the Plextrac webhook drops a suppressed report\'s status change, and handles others', async () => {

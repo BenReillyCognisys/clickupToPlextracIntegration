@@ -150,8 +150,11 @@ async function putBack({ decision, clientId, reportId, cuid, clientName, reportN
     .catch(() => {});
 
   const who = decision.actor ? await mention(decision.actor, 'Someone') : WHO[decision.reason] || 'Someone';
+  // The webhook's mapping often has no client name (ClickUp mappings don't store one),
+  // or an old one (a client merge), so ask Plextrac.
+  const client = await api.getClient(clientId).catch(() => null);
   const text = buildRevertMessage({
-    clientName, reportName,
+    clientName: client?.name || clientName || `client ${clientId}`, reportName,
     clientUrl: `${plextracBase}/client/${clientId}`,
     reportUrl: `${plextracBase}/client/${clientId}/report/${reportId}`,
     who, attempted, previous, allowed: await allowedNames(attempted), putBack: ok, error,
