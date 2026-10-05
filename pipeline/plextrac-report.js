@@ -200,4 +200,4 @@ async function createReport(clientId, task, testingType) {
   return { name, reportId: report.reportId, existed: false };
 }
 
-module.exports = { createReport, createPlextracReport, buildReportName, epochToISO };
+module.exports = { createReport, createPlextracReport, buildReportName, epochToISO, resolveTemplateId, resolveLayoutId, templateNameForType };

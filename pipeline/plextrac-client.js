@@ -1,4 +1,5 @@
 const api = require('../lib/plextrac-api');
+const mergeStore = require('../lib/client-merge-store');
 const log = require('../lib/logger');
 
 /**
@@ -25,6 +26,19 @@ async function findOrCreateClient(clientName) {
   if (match) {
     log.info('Plextrac Client found', { client: clientName, client_id: match.client_id });
     return { clientId: match.client_id, clientCreated: false };
+  }
+
+  // A name that was merged into another client (pipeline/client-merge) goes to that
+  // client rather than recreating the duplicate. Best-effort: if the alias store can't
+  // be read, the client is created as before.
+  const alias = await mergeStore.findAlias(clientName).catch((err) => {
+    log.warn('Plextrac client alias lookup failed — continuing without it', { client: clientName, reason: err.message });
+    return null;
+  });
+  const aliased = alias && clients.find((c) => String(c.client_id) === String(alias.client_id));
+  if (aliased) {
+    log.info('Plextrac Client found via merge alias', { client: clientName, client_id: aliased.client_id, merged_into: aliased.name });
+    return { clientId: aliased.client_id, clientCreated: false };
   }
 
   const created = await api.createClient(clientName);

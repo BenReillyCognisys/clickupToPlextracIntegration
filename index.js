@@ -160,6 +160,19 @@ app.use('/api/deliveryflow', require('./routes/deliveryflow'));
 // Auth is per route in both routers, so they can share the prefix.
 app.use('/api/deliveryflow', require('./routes/deliveryflow-portal'));
 
+// SFE-portal → break.services: merge duplicate Plextrac clients (X-API-Key:
+// BREAK_SERVICES_API_KEY). Every report of both clients is backed up to Drive first;
+// the removed client's reports are then moved (.ptrac export → import) and the client
+// deleted — see pipeline/client-merge.js and routes/client-merge.js.
+//   GET  /api/plextrac/clients?q=…              client list for the picker
+//   GET  /api/plextrac/client-merges/preview    what a merge would do
+//   POST /api/plextrac/client-merges            start one (runs in the background)
+//   GET  /api/plextrac/client-merges[/:mergeId] progress and history
+// Its own limiter: the portal polls a running merge's progress, which must not eat
+// into the budget its /clickup and /api/deliveryflow calls share.
+const clientMergeLimiter = rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false });
+app.use('/api/plextrac', clientMergeLimiter, require('./routes/client-merge'));
+
 // Manual repair endpoints for missed or mis-mapped automations (X-API-Key:
 // AVAILABILITY_API_KEY). Unlike the /jobs/* triggers below these answer
 // synchronously with what they did — see routes/task-admin.js.
@@ -268,6 +281,11 @@ app.listen(PORT, async () => {
   }
   // Warm + schedule the availability cache that backs /schedule/pentest.
   startAvailabilityCache();
+
+  // A client merge still "running" died with the previous process — say so on its record.
+  require('./lib/client-merge-store').markInterrupted()
+    .then((n) => { if (n) log.warn('Client merges interrupted by the restart — check them before re-running', { count: n }); })
+    .catch((err) => log.error('Could not check for interrupted client merges', { reason: err.message }));
 
   // Which client documents a release will make (their .env switches)...
   log.info('Client documents on release', Object.fromEntries(

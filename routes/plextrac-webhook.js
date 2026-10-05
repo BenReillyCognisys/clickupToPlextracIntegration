@@ -13,6 +13,7 @@ const qaQueue = require('../lib/qa-queue-store');
 const kpiStore = require('../lib/qa-kpi-store');
 const submissionStore = require('../lib/qa-submission-store');
 const { hoursLate, trackingStartMs } = require('../lib/report-lateness');
+const webhookSuppression = require('../lib/webhook-suppression');
 const log = require('../lib/logger');
 
 // Pre-integration reports carry their client/report names in the webhook `text`
@@ -257,6 +258,13 @@ async function handler(req, res) {
   const { event, targetCuid, targetType, text, actorCuid } = payload;
 
   if (event !== 'ReportStatusChanged' || targetType !== 'report' || typeof targetCuid !== 'string' || !targetCuid) {
+    return;
+  }
+
+  // A client merge is importing this report into another client: the event is the
+  // merge's doing, not a real status change (lib/webhook-suppression.js).
+  if (await webhookSuppression.isSuppressed({ cuid: targetCuid, text })) {
+    log.info('Plextrac webhook ignored — report is being moved by a client merge', { cuid: targetCuid, text });
     return;
   }
 
