@@ -142,9 +142,10 @@ const nothingRan = () => {
     eq(status, 'In Review');
     eq(recorded[101], 'In Review');
     nothingRan();
-    eq(calls.slack.length, 1);
-    const { channel, text } = calls.slack[0];
-    eq(channel, 'C0C08NCU0MV');
+    // The ready-for-release channel and the status-violations channel, same message.
+    eq(calls.slack.map((m) => m.channel), ['C0C08NCU0MV', 'C0B6SN0023D']);
+    eq(calls.slack[0].text, calls.slack[1].text);
+    const { text } = calls.slack[1];
     assert.ok(text.includes('Client: <https://test.plextrac.com/client/10|Acme Ltd> - <https://test.plextrac.com/client/10/report/101|Acme | Web>'), text);
     assert.ok(text.includes('<@UJO> moved the report from *In Review* to *Approved*'), text);
     assert.ok(text.includes('only Alice Elvin, Ben Reilly, Soham Bakore, Punit Sharma, Karan Luniyal and Rajveer Parmar can set *Approved*'), text);
@@ -265,6 +266,36 @@ const nothingRan = () => {
     // ...and the put-back's echo doesn't re-run the release.
     await moved('Published', 'cuid-api');
     eq(calls.ran, []);
+  });
+
+  await test('the person is tagged even when Slack knows them under the other Cognisys domain', async () => {
+    reset({ before: 'In Review' });
+    PEOPLE['cuid-sam'] = { cuid: 'cuid-sam', name: 'Sam Tester', email: 'sam.tester@cognisys.co.uk' };
+    SLACK_IDS['sam.tester@cognisys.group'] = 'USAM';
+    await moved('Approved', 'cuid-sam');
+    assert.ok(calls.slack[1].text.includes('<@USAM> moved the report from *In Review* to *Approved*'), calls.slack[1].text);
+    // Not in Slack at all: named instead.
+    reset({ before: 'In Review' });
+    PEOPLE['cuid-kim'] = { cuid: 'cuid-kim', name: 'Kim Nobody', email: 'kim@cognisys.group' };
+    await moved('Approved', 'cuid-kim');
+    assert.ok(calls.slack[1].text.includes('Kim Nobody moved the report'), calls.slack[1].text);
+  });
+
+  await test('one channel failing does not stop the other', async () => {
+    reset({ before: 'In Review' });
+    const real = slack.postMessage;
+    slack.postMessage = async (channel, text) => {
+      if (channel === 'C0C08NCU0MV') throw new Error('not_in_channel');
+      calls.slack.push({ channel, text });
+    };
+    try {
+      await moved('Approved', 'cuid-jo');
+    } finally {
+      slack.postMessage = real;
+    }
+    eq(calls.slack.map((m) => m.channel), ['C0B6SN0023D']);
+    eq(calls.updates, [{ status: 'In Review' }]);
+    nothingRan();
   });
 
   await test('choosePrevious', async () => {

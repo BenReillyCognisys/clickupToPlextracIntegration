@@ -6,7 +6,8 @@
 // before anything else happens. When the change isn't allowed:
 //   1. the report is put back to its previous status (lib/report-status-store.js), and
 //      that put-back is marked as ours so its own webhook is ignored;
-//   2. the ready-for-release channel is told: client - report - who - from/to statuses;
+//   2. the ready-for-release channel and the status-violations channel are told: client -
+//      report - who (tagged in Slack) - from/to statuses;
 //   3. NOTHING else runs for the change — no QA posts, no release announcement or j2
 //      exports, no QA queue / KPI / ClickUp / DeliveryFlow updates.
 //
@@ -25,6 +26,8 @@ const PERMS = require('../config/report-status-permissions');
 const log = require('../lib/logger');
 
 const READY_FOR_RELEASE_CHANNEL = () => process.env.SLACK_READY_FOR_RELEASE_CHANNEL || 'C0C08NCU0MV';
+// Every disallowed change is also posted here, tagging the person who made it.
+const STATUS_VIOLATIONS_CHANNEL = () => process.env.SLACK_STATUS_VIOLATIONS_CHANNEL || 'C0B6SN0023D';
 
 const norm = (s) => String(s ?? '').trim().toLowerCase();
 const sameStatus = (a, b) => norm(a) === norm(b);
@@ -87,9 +90,19 @@ function choosePrevious({ known, attempted, actorEmail }) {
 }
 
 // "<@U123>" when Slack knows the email, else the name. Never throws.
+// Plextrac and Slack don't always hold someone under the same Cognisys domain
+// (alice@cognisys.group in one, alice@cognisys.co.uk in the other), so the other one is
+// tried too.
+const COGNISYS_DOMAINS = ['cognisys.group', 'cognisys.co.uk'];
+function emailsToTry(email) {
+  const [local, domain] = norm(email).split('@');
+  if (!local || !domain) return [];
+  return [norm(email), ...COGNISYS_DOMAINS.filter((d) => d !== domain && COGNISYS_DOMAINS.includes(domain)).map((d) => `${local}@${d}`)];
+}
+
 async function mention(user, fallback) {
-  if (user?.email) {
-    const id = await slack.lookupUserIdByEmail(user.email).catch(() => null);
+  for (const email of emailsToTry(user?.email)) {
+    const id = await slack.lookupUserIdByEmail(email).catch(() => null);
     if (id) return `<@${id}>`;
   }
   return user?.name || user?.email || fallback;
@@ -159,11 +172,14 @@ async function putBack({ decision, clientId, reportId, cuid, clientName, reportN
     reportUrl: `${plextracBase}/client/${clientId}/report/${reportId}`,
     who, attempted, previous, allowed: await allowedNames(attempted), putBack: ok, error,
   });
-  try {
-    await slack.postMessage(READY_FOR_RELEASE_CHANNEL(), text);
-  } catch (err) {
-    log.error('Status guard: could not post to the ready-for-release channel', { reason: err.message, report_id: reportId });
-  }
+  // The ready-for-release channel, and the status-violations channel — where the
+  // person who made the change is tagged so they see it. Each post stands alone.
+  await Promise.all([
+    [READY_FOR_RELEASE_CHANNEL(), 'ready-for-release'],
+    [STATUS_VIOLATIONS_CHANNEL(), 'status-violations'],
+  ].map(([channel, label]) => slack.postMessage(channel, text).catch((err) => {
+    log.error(`Status guard: could not post to the ${label} channel`, { reason: err.message, channel, report_id: reportId });
+  })));
 
   const data = {
     client: clientName, report: reportName, report_id: reportId, attempted, previous,
@@ -201,4 +217,6 @@ module.exports = {
   buildRevertMessage,
   allowedFor,
   READY_FOR_RELEASE_CHANNEL,
+  STATUS_VIOLATIONS_CHANNEL,
+  emailsToTry,
 };

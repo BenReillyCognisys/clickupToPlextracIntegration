@@ -26,12 +26,10 @@ const emails = (envValue, fallback) => {
 
 const PUBLISHERS = emails(process.env.PLEXTRAC_PUBLISHER_EMAILS, [
   'alice.elvin@cognisys.group',   // Alice Elvin
-  'ben.reilly@cognisys.group',    // Ben Reilly
 ]);
 
 const APPROVERS = emails(process.env.PLEXTRAC_APPROVER_EMAILS, [
   'alice.elvin@cognisys.group',   // Alice Elvin
-  'ben.reilly@cognisys.group',    // Ben Reilly
   'soham.bakore@cognisys.group',  // Soham Bakore
   'punit.sharma@cognisys.co.uk',  // Punit Sharma
   'karan.luniyal@cognisys.co.uk', // Karan Luniyal
