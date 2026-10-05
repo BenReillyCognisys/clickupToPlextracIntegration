@@ -47,6 +47,9 @@ reportsDue.crossOffReport = async () => ({ updated: false });
 qaReview.runQaReview = async () => {};
 secondRound.postSecondRoundQa = async () => {};
 released.postReleaseAnnouncement = async () => {};
+// Who may set which status is tested in tests/status-guard.test.js; here every change
+// is allowed, so the DeliveryFlow forwarding is what's under test.
+require('../pipeline/status-guard').guardStatusChange = async () => ({ proceed: true, verdict: 'allowed' });
 
 const events = [];
 let sendMode = 'ok';

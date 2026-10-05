@@ -82,7 +82,8 @@ function queueLine(e) {
 }
 
 // Builds the full queue message from the stored entries, grouped into the two QA
-// rounds. Empty sections render as "_None_" so the shape is always predictable.
+// rounds and the approved reports waiting to be published. Empty sections render as
+// "_None_" so the shape is always predictable.
 function renderQueue(entries) {
   const section = (title, stage) => {
     const items = entries.filter((e) => e.stage === stage);
@@ -94,6 +95,8 @@ function renderQueue(entries) {
     section('First Round QA', 'first'),
     '',
     section('Second Round QA', 'second'),
+    '',
+    section('Ready for Release', 'release'),
   ].join('\n');
 }
 

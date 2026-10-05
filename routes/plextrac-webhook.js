@@ -8,6 +8,9 @@ const lookup = require('../lib/plextrac-lookup');
 const { runQaReview } = require('../pipeline/qa-review');
 const { postSecondRoundQa } = require('../pipeline/qa-second-round');
 const { postReleaseAnnouncement } = require('../pipeline/qa-released');
+const approved = require('../pipeline/qa-approved');
+const statusGuard = require('../pipeline/status-guard');
+const { withTaskLock } = require('../lib/task-lock');
 const { crossOffReport } = require('../pipeline/reports-due');
 const qaQueue = require('../lib/qa-queue-store');
 const kpiStore = require('../lib/qa-kpi-store');
@@ -38,6 +41,9 @@ const QA_TRIGGER_STATUS = process.env.PLEXTRAC_QA_STATUS || 'Ready For Review';
 const QA_FIRST_STATUS  = process.env.PLEXTRAC_QA_FIRST_STATUS  || QA_TRIGGER_STATUS;
 const QA_SECOND_STATUS = process.env.PLEXTRAC_QA_SECOND_STATUS || 'In Review';
 const QA_RELEASED_STATUS = process.env.PLEXTRAC_RELEASED_STATUS || 'Published';
+// Third round of QA: approved and ready for release (only approvers may set it — see
+// pipeline/status-guard.js). Listed as "Ready for Release" in the QA queue.
+const QA_APPROVED_STATUS = process.env.PLEXTRAC_APPROVED_STATUS || 'Approved';
 
 // Base Plextrac instance URL for building report links shown in the queue.
 const PLEXTRAC_BASE = `https://${process.env.PLEXTRAC_INSTANCE || 'cognisys.plextrac.com'}`;
@@ -157,7 +163,7 @@ async function recordSubmission(reportStatus, actorCuid, ctx) {
 }
 
 // Maintains the QA queue from a report's current status: add/move it for the two QA
-// rounds, remove it on release, and ignore every other status. Best-effort — any
+// rounds and the approved (ready-for-release) stage, remove it on release, and ignore every other status. Best-effort — any
 // failure is logged and swallowed so it never disrupts the rest of the webhook.
 async function updateQaQueue(reportStatus, { reportId, cuid, clientId, clientName, reportName }) {
   const reportUrl = `${PLEXTRAC_BASE}/client/${clientId}/report/${reportId}`;
@@ -167,6 +173,8 @@ async function updateQaQueue(reportStatus, { reportId, cuid, clientId, clientNam
       await qaQueue.upsert({ ...base, stage: 'first' });
     } else if (reportStatus === QA_SECOND_STATUS) {
       await qaQueue.upsert({ ...base, stage: 'second' });
+    } else if (reportStatus === QA_APPROVED_STATUS) {
+      await qaQueue.upsert({ ...base, stage: 'release' });
     } else if (reportStatus === QA_RELEASED_STATUS) {
       await qaQueue.remove(reportId);
     }
@@ -268,6 +276,12 @@ async function handler(req, res) {
     return;
   }
 
+  // One report's events are handled one at a time, so each sees the status the last
+  // one left (the status guard puts a report back to it).
+  await withTaskLock(`plextrac-status:${targetCuid}`, () => processStatusChange({ payload, targetCuid, text, actorCuid }));
+}
+
+async function processStatusChange({ payload, targetCuid, text, actorCuid }) {
   // Look up the ClickUp task mapping using the report's CUID
   let mapping = await findByCuid(targetCuid).catch(err => {
     log.error('MongoDB CUID lookup failed', { reason: err.message, cuid: targetCuid });
@@ -364,6 +378,23 @@ async function handler(req, res) {
     return;
   }
 
+  // Is the person who made this change allowed to set this status? Approved and
+  // Published are restricted (config/report-status-permissions.js). If not, the report
+  // is put back and the ready-for-release channel told — and NOTHING below runs: no QA
+  // posts, release announcement or exports, queue, KPI, ClickUp or DeliveryFlow
+  // updates. Changes break.services made itself also stop here.
+  const guard = await statusGuard.guardStatusChange({
+    cuid:         targetCuid,
+    actorCuid,
+    status:       reportStatus,
+    clientId:     mapping.plextrac_client_id,
+    reportId:     mapping.plextrac_report_id,
+    clientName:   mapping.client_name,
+    reportName:   report?.name || mapping.task_name,
+    plextracBase: PLEXTRAC_BASE,
+  });
+  if (!guard.proceed) return;
+
   // Keep the QA queue (the /reportqueue Slack commands) in step with the report's
   // status. Runs for mapped and pre-integration reports alike, before the mapped-only
   // ClickUp sync below, so both show up in the queue.
@@ -426,6 +457,25 @@ async function handler(req, res) {
       report,
     }).catch(err => {
       log.error('Second-round QA announcement threw', {
+        reason: err.message, cuid: targetCuid, report_id: mapping.plextrac_report_id,
+      });
+    });
+  }
+
+  // When the report reaches Approved, the third round of QA is done: announce it in the
+  // ready-for-release channel, pinging the publishers. Fire-and-forget, self-logging.
+  if (reportStatus === QA_APPROVED_STATUS) {
+    approved.postApprovedAnnouncement({
+      clientId:   mapping.plextrac_client_id,
+      clientName: mapping.client_name,
+      clientUrl:  `${PLEXTRAC_BASE}/client/${mapping.plextrac_client_id}`,
+      reportName: report?.name || mapping.task_name,
+      reportUrl:  `${PLEXTRAC_BASE}/client/${mapping.plextrac_client_id}/report/${mapping.plextrac_report_id}`,
+      actorCuid,
+      reportId:   mapping.plextrac_report_id,
+      report,
+    }).catch(err => {
+      log.error('Approved announcement threw', {
         reason: err.message, cuid: targetCuid, report_id: mapping.plextrac_report_id,
       });
     });

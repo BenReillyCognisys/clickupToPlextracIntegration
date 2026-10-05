@@ -21,8 +21,12 @@ const { postEmptyFieldsNotice } = require('./qa-review/empty-fields');
 const { runReleaseExports } = require('./release-exports');
 const log = require('../lib/logger');
 
-// Channel for the release announcement (shares #pt-second-round-qa by default; override).
-const RELEASED_QA_CHANNEL = process.env.SLACK_RELEASED_QA_CHANNEL || 'C09GDNG20JF';
+// The ready-for-release channel, shared with the Approved announcement
+// (pipeline/qa-approved.js) and the status guard's notices (pipeline/status-guard.js).
+// SLACK_READY_FOR_RELEASE_CHANNEL; the old SLACK_RELEASED_QA_CHANNEL is no longer read.
+const { READY_FOR_RELEASE_CHANNEL } = require('./status-guard');
+
+const RELEASED_QA_CHANNEL = READY_FOR_RELEASE_CHANNEL();
 
 // Slack user ids @-mentioned on a release announcement. Override with
 // SLACK_RELEASED_QA_MENTIONS (comma/space-separated ids); falls back to the built-in list.
@@ -116,4 +120,4 @@ async function postReleaseAnnouncement({ clientId, clientName, clientUrl, report
   });
 }
 
-module.exports = { postReleaseAnnouncement, buildReleaseMessage, resolveReleaseQaName };
+module.exports = { postReleaseAnnouncement, buildReleaseMessage, resolveReleaseQaName, resolveClientName };
