@@ -148,7 +148,7 @@ function reset() {
 
 const newJob = (overrides = {}) => ({
   merge_id: 'M1', status: 'queued', stage: 'queued',
-  keep_client: { id: 10, name: 'Acme Ltd' }, merge_client: { id: 20, name: 'Acme Limited' },
+  keep_client: { id: 10, name: 'Acme Ltd' }, merge_clients: [{ id: 20, name: 'Acme Limited' }],
   requested_by: 'admin@cognisys.co.uk', created_at: new Date(), reports: [], events: [], ...overrides,
 });
 
@@ -175,7 +175,7 @@ const quiet = async (fn) => {
     reset();
     const job = await quiet(() => merge.runMerge(newJob()));
     eq(job.status, 'completed');
-    eq(job.client_deleted, true);
+    eq([job.merge_clients[0].state, job.merge_clients[0].deleted], ['merged', true]);
     eq(calls.clientDeletes, [20]);
     eq(pt.clients[20], undefined);
 
@@ -322,6 +322,18 @@ const quiet = async (fn) => {
     eq(calls.clientDeletes, []);
   });
 
+  await test('a role that may not delete clients: reports moved, client left empty, the fix named', async () => {
+    reset();
+    api.deleteClient = async (id) => {
+      throw new Error(`Plextrac API DELETE /api/v1/client/${id} failed (HTTP 403): {"statusCode":403,"error":"Forbidden","message":"User is not authorized to perform this action.","status":"error"}`);
+    };
+    const job = await quiet(() => merge.runMerge(newJob()));
+    eq(job.status, 'failed');
+    eq(calls.deletes, [201, 202]);
+    eq([job.merge_clients[0].state, job.merge_clients[0].failed_at, job.merge_clients[0].alias_saved], ['failed', 'deleting', true]);
+    eq(/role is not allowed to delete clients.*deleting it by hand in Plextrac finishes this merge/.test(job.error), true);
+  });
+
   await test('a report added to the removed client mid-merge keeps the client', async () => {
     reset();
     let added = false;
@@ -330,7 +342,7 @@ const quiet = async (fn) => {
     };
     const job = await quiet(() => merge.runMerge(newJob()));
     eq(job.status, 'failed');
-    eq(job.stage, 'delete_client');
+    eq([job.merge_clients[0].state, job.merge_clients[0].failed_at], ['failed', 'deleting']);
     eq(calls.clientDeletes, []);
     eq(calls.aliases, []);
     eq(/still has 1 report/.test(job.error), true);
@@ -346,15 +358,124 @@ const quiet = async (fn) => {
     eq(job.reports.map((r) => r.backup.ok), [true]);
   });
 
-  await test('startMerge needs the removed client named exactly, two different clients, and no merge in flight', async () => {
+  await test('startMerge needs the kept client named, different clients, and no merge in flight', async () => {
     reset();
-    await assert.rejects(merge.startMerge({ keepClientId: 10, mergeClientId: 20, confirmClientName: 'Acme Ltd' }),
-      (err) => err.status === 400 && /Acme Limited/.test(err.message));
-    await assert.rejects(merge.startMerge({ keepClientId: 10, mergeClientId: 10, confirmClientName: 'Acme Ltd' }), /two different clients/);
-    await assert.rejects(merge.startMerge({ keepClientId: 10, mergeClientId: 99, confirmClientName: 'x' }), (err) => err.status === 404);
+    pt.clients[30] = { client_id: 30, name: 'ACME Corp' };
+    await assert.rejects(merge.startMerge({ keepClientId: 10, mergeClientIds: [20, 30], confirmClientName: 'Acme' }),
+      (err) => err.status === 400 && /being kept \("Acme Ltd"\)/.test(err.message));
+    // With several clients, naming one of the removed ones is not enough.
+    await assert.rejects(merge.startMerge({ keepClientId: 10, mergeClientIds: [20, 30], confirmClientName: 'Acme Limited' }), /being kept/);
+    await assert.rejects(merge.startMerge({ keepClientId: 10, mergeClientIds: [20, 10], confirmClientName: 'Acme Ltd' }), /kept client cannot also be merged/);
+    await assert.rejects(merge.startMerge({ keepClientId: 10, mergeClientIds: [20, 20], confirmClientName: 'Acme Ltd' }), /listed twice/);
+    await assert.rejects(merge.startMerge({ keepClientId: 10, mergeClientIds: [], confirmClientName: 'Acme Ltd' }), /at least one client/);
+    await assert.rejects(merge.startMerge({ keepClientId: 10, mergeClientIds: [20, 99], confirmClientName: 'Acme Ltd' }), (err) => err.status === 404);
+    process.env.CLIENT_MERGE_MAX_CLIENTS = '1';
+    await assert.rejects(merge.startMerge({ keepClientId: 10, mergeClientIds: [20, 30], confirmClientName: 'Acme Ltd' }), /At most 1 clients/);
+    delete process.env.CLIENT_MERGE_MAX_CLIENTS;
     hooks.active = { merge_id: 'OLD', status: 'running' };
-    await assert.rejects(merge.startMerge({ keepClientId: 10, mergeClientId: 20, confirmClientName: ' acme  limited ' }),
+    await assert.rejects(merge.startMerge({ keepClientId: 10, mergeClientIds: [20, 30], confirmClientName: ' acme  ltd ' }),
       (err) => err.status === 409);
+  });
+
+  await test('one client to merge: the old single-client request still works, confirmed by either name', async () => {
+    reset();
+    for (const confirmClientName of ['Acme Limited', 'Acme Ltd']) {
+      const started = await quiet(() => merge.startMerge({ keepClientId: 10, mergeClientId: 20, confirmClientName }));
+      eq(started.merge_clients, [{ id: 20, name: 'Acme Limited', state: 'pending' }]);
+      await quiet(() => new Promise((r) => setTimeout(r, 200))); // let the background run finish
+      reset();
+    }
+  });
+
+  // ── Several clients at once ─────────────────────────────────────────────────
+  const three = () => {
+    pt.clients[30] = { client_id: 30, name: 'ACME Corp' };
+    pt.clients[40] = { client_id: 40, name: 'Acme (old)' };
+    pt.reports[30] = [report(301, 'Acme | Mobile | Mar 2026')];
+    pt.reports[40] = [report(401, 'Acme | API | Apr 2026'), report(402, 'Acme | Cloud | May 2026')];
+    return newJob({ merge_clients: [{ id: 20, name: 'Acme Limited' }, { id: 30, name: 'ACME Corp' }, { id: 40, name: 'Acme (old)' }] });
+  };
+
+  await test('three clients into one: all backed up once, every report moved, every client deleted', async () => {
+    reset();
+    const job = await quiet(() => merge.runMerge(three()));
+    eq(job.status, 'completed');
+    eq(job.merge_clients.map((c) => [c.id, c.state, c.deleted]), [[20, 'merged', true], [30, 'merged', true], [40, 'merged', true]]);
+    eq(calls.clientDeletes, [20, 30, 40]);
+    eq(calls.aliases.map((a) => [a.aliasName, a.clientId]), [['Acme Limited', 10], ['ACME Corp', 10], ['Acme (old)', 10]]);
+    // The kept client's report is backed up once, alongside every report being moved.
+    eq(job.reports.map((r) => [r.report_id, r.role, r.backup.ok]),
+      [[201, 'move', true], [202, 'move', true], [301, 'move', true], [401, 'move', true], [402, 'move', true], [101, 'keep', true]]);
+    eq(calls.imports.map((i) => [i.clientId, i.from]), [[10, 201], [10, 202], [10, 301], [10, 401], [10, 402]]);
+    eq(calls.deletes, [201, 202, 301, 401, 402]);
+    eq(pt.reports[10].length, 6);
+    eq(job.drive_folder.name.startsWith('Acme Limited + 2 more - Acme Ltd Merge - '), true);
+    eq(calls.uploads.filter((u) => u.filename === 'client.json').length, 4);
+    eq(/"Acme Limited", "ACME Corp", "Acme \(old\)" merged into .*3 old clients deleted/.test(calls.notify[0]), true);
+  });
+
+  await test('a client whose backup fails is skipped untouched; the others are merged', async () => {
+    reset();
+    hooks.exportFails = (reportId) => reportId === 301;
+    const job = await quiet(() => merge.runMerge(three()));
+    eq(job.status, 'partial');
+    eq(job.merge_clients.map((c) => [c.id, c.state]), [[20, 'merged'], [30, 'skipped'], [40, 'merged']]);
+    eq(calls.imports.some((i) => i.from === 301), false);
+    eq([calls.deletes.includes(301), calls.clientDeletes], [false, [20, 40]]);
+    eq(pt.reports[30].map((r) => r.id), [301]);
+    eq(/nothing of this client was changed/.test(job.merge_clients[1].error), true);
+    eq(/"ACME Corp"/.test(job.error), true);
+    eq(/2 of 3 client\(s\) merged.*NOT merged: "ACME Corp"/.test(calls.notify[0]), true);
+  });
+
+  await test('a client that fails mid-move keeps its other reports; the merge goes on', async () => {
+    reset();
+    // The first of 40's two reports is edited during the merge.
+    hooks.afterImport = (ptrac) => { if (ptrac.report_info.id === 401) findReport(40, 401).edits++; };
+    const job = await quiet(() => merge.runMerge(three()));
+    eq(job.status, 'partial');
+    eq(job.merge_clients.map((c) => [c.id, c.state]), [[20, 'merged'], [30, 'merged'], [40, 'failed']]);
+    eq(job.merge_clients[2].failed_at, 'moving');
+    eq(/edited during the merge/.test(job.merge_clients[2].error), true);
+    // 401 not deleted, 402 never started, client 40 kept.
+    eq(calls.deletes, [201, 202, 301]);
+    eq(calls.imports.some((i) => i.from === 402), false);
+    eq(job.reports.find((r) => r.report_id === 402).move.state, 'pending');
+    eq(pt.clients[40] !== undefined, true);
+  });
+
+  await test('a failure on the first client does not stop the ones after it', async () => {
+    reset();
+    let n = 0;
+    api.deleteReport = async (c, r) => { // only the very first delete (client 20's) is ignored
+      calls.deletes.push(Number(r));
+      if (n++ > 0) pt.reports[Number(c)] = pt.reports[Number(c)].filter((x) => x.id !== Number(r));
+    };
+    const job = await quiet(() => merge.runMerge(three()));
+    eq(job.merge_clients.map((c) => c.state), ['failed', 'merged', 'merged']);
+    eq(job.status, 'partial');
+    eq(calls.clientDeletes, [30, 40]);
+  });
+
+  await test('the kept client failing to back up stops everything, whatever the other clients', async () => {
+    reset();
+    hooks.exportFails = (reportId) => reportId === 101;
+    const job = await quiet(() => merge.runMerge(three()));
+    eq(job.status, 'failed');
+    eq(/kept client "Acme Ltd" could not be backed up.*nothing was changed in Plextrac/.test(job.error), true);
+    eq([calls.imports.length, calls.clientDeletes.length], [0, 0]);
+  });
+
+  await test('preview of several clients: each one\'s reports, clashes and totals', async () => {
+    reset();
+    const job = three();
+    const p = await merge.preview({ keepClientId: 10, mergeClientIds: job.merge_clients.map((c) => c.id) });
+    eq(p.merges.map((m) => [m.name, m.reports.length, m.nameClashes]),
+      [['Acme Limited', 2, ['Acme | Web | Jan 2026']], ['ACME Corp', 1, []], ['Acme (old)', 2, []]]);
+    eq(p.nameClashes, ['Acme | Web | Jan 2026']);
+    eq(p.backup.reports, 6);
+    eq(p.backup.folderName.startsWith('Acme Limited + 2 more - Acme Ltd Merge - '), true);
+    eq(p.linkedTotals, { clickupTasks: 0, deliveryflowEngagements: 0 });
   });
 
   await test('preview lists both clients\' reports and flags same-named reports', async () => {
@@ -450,7 +571,31 @@ const quiet = async (fn) => {
     const v = require('../routes/client-merge').view(job);
     eq(JSON.stringify(v).includes('fingerprint'), false);
     eq(JSON.stringify(v).includes('import_reply'), false);
-    eq(v.progress, { reports: 3, backedUp: 3, backupFailed: 0, toMove: 2, moved: 2 });
+    eq(v.progress, { reports: 3, backedUp: 3, backupFailed: 0, toMove: 2, moved: 2, clients: 1, clientsMerged: 1, clientsNotMerged: 0 });
+    // A record saved before several clients could be merged reads as a list too.
+    const old = require('../routes/client-merge').view({ ...job, merge_clients: undefined, merge_client: { id: 20, name: 'Acme Limited', state: 'merged' } });
+    eq([old.merge_clients, 'merge_client' in old], [[{ id: 20, name: 'Acme Limited', state: 'merged' }], false]);
+  });
+
+  await test('POST /client-merges takes a list of clients, confirmed with the kept client\'s name', async () => {
+    reset();
+    pt.clients[30] = { client_id: 30, name: 'ACME Corp' };
+    pt.reports[30] = [];
+    const res = await quiet(() => call('/client-merges', { method: 'POST', body: { keepClientId: 10, mergeClientIds: [20, 30], confirmClientName: 'acme ltd' } }));
+    eq(res.status, 202);
+    eq(res.body.merge.merge_clients.map((c) => c.id), [20, 30]);
+    eq(res.body.merge.progress.clients, 2);
+    await quiet(() => new Promise((r) => setTimeout(r, 300)));
+  });
+
+  await test('GET /client-merges/preview takes mergeClientIds=20,30', async () => {
+    reset();
+    pt.clients[30] = { client_id: 30, name: 'ACME Corp' };
+    pt.reports[30] = [report(301, 'Acme | Infra | Feb 2026')];
+    const res = await call('/client-merges/preview?keepClientId=10&mergeClientIds=20,30');
+    eq(res.status, 200);
+    eq(res.body.preview.merges.map((m) => [m.id, m.reports.length]), [[20, 2], [30, 1]]);
+    eq(res.body.preview.merge, undefined); // the single-client shape only for one client
   });
 
   server.close();

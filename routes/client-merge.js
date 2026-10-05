@@ -1,5 +1,6 @@
 /**
- * SFE-portal → break.services: merging duplicate Plextrac clients
+ * SFE-portal → break.services: merging duplicate Plextrac clients — one or more of them
+ * into the one being kept
  * (pipeline/client-merge.js). The portal is only the screen; everything happens here.
  *
  * Server-to-server, authenticated like the portal's other calls: X-API-Key =
@@ -11,17 +12,18 @@
  *                                                (case-insensitive). The counts are cached
  *                                                and null until the first count finishes;
  *                                                ?refresh=1 recounts
- *   GET  /api/plextrac/client-merges/preview?keepClientId=1&mergeClientId=2
- *                                                both clients' reports, name clashes, the
+ *   GET  /api/plextrac/client-merges/preview?keepClientId=1&mergeClientIds=2,3,4
+ *                                                every client's reports, name clashes, the
  *                                                records that move, the backup folder name
- *   POST /api/plextrac/client-merges             { keepClientId, mergeClientId,
+ *   POST /api/plextrac/client-merges             { keepClientId, mergeClientIds: [..],
  *                                                  confirmClientName, requestedBy }
  *                                                → 202 { merge } — runs in the background
  *   GET  /api/plextrac/client-merges             recent merges, newest first
  *   GET  /api/plextrac/client-merges/:mergeId    one merge, with its progress and step log
  *
- * `confirmClientName` must equal the name of the client being removed (mergeClientId):
- * the merge deletes it, so the caller has to say which one it means twice.
+ * `confirmClientName` must equal the name of the client being KEPT, typed after seeing
+ * the list of clients the merge will delete. A single `mergeClientId` is still accepted
+ * (and, for one client, its own name as the confirmation), as the portal used to send.
  */
 
 const express = require('express');
@@ -60,21 +62,27 @@ function fail(res, err, what) {
 function progress(job) {
   const reports = job.reports || [];
   const moving = reports.filter((r) => r.role === 'move');
+  const clients = merge.mergeClientsOf(job);
   return {
     reports: reports.length,
     backedUp: reports.filter((r) => r.backup?.ok).length,
     backupFailed: reports.filter((r) => r.backup && !r.backup.ok && r.backup.error).length,
     toMove: moving.length,
     moved: moving.filter((r) => r.move?.state === 'deleted').length,
+    clients: clients.length,
+    clientsMerged: clients.filter((c) => c.state === 'merged').length,
+    clientsNotMerged: clients.filter((c) => ['failed', 'skipped'].includes(c.state)).length,
   };
 }
 
 // The record as the portal sees it: no fingerprints or raw import replies.
 function view(job, { events = true } = {}) {
   if (!job) return null;
-  const { _id, events: log_, ...rest } = job;
+  const { _id, events: log_, merge_client: _single, ...rest } = job;
   return {
     ...rest,
+    // Always a list, whichever shape the record was saved in.
+    merge_clients: merge.mergeClientsOf(job),
     reports: (job.reports || []).map(({ fingerprint, move, ...r }) => ({
       ...r,
       ...(move ? { move: (({ import_reply, ...m }) => m)(move) } : {}),
@@ -114,11 +122,11 @@ router.get('/client-merges/preview', async (req, res) => {
 });
 
 router.post('/client-merges', async (req, res) => {
-  const { keepClientId, mergeClientId, confirmClientName, requestedBy } = req.body || {};
+  const { keepClientId, mergeClientIds, mergeClientId, confirmClientName, requestedBy } = req.body || {};
   try {
-    const job = await merge.startMerge({ keepClientId, mergeClientId, confirmClientName, requestedBy });
+    const job = await merge.startMerge({ keepClientId, mergeClientIds, mergeClientId, confirmClientName, requestedBy });
     log.info('Client merge requested', {
-      merge_id: job.merge_id, keep: job.keep_client.id, merge: job.merge_client.id, requested_by: job.requested_by,
+      merge_id: job.merge_id, keep: job.keep_client.id, merge: job.merge_clients.map((c) => c.id).join(','), requested_by: job.requested_by,
     });
     res.status(202).json({ ok: true, merge: view(job) });
   } catch (err) {

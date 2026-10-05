@@ -1,5 +1,5 @@
-// Merges one Plextrac client into another: every report of the client being removed
-// is moved to the client being kept, then the removed client is deleted.
+// Merges one or more Plextrac clients into another: every report of each client being
+// removed is moved to the client being kept, then each removed client is deleted.
 //
 // Plextrac has no "move report". Its documented way to move one is the .ptrac export
 // and import, so that is what this does — the import creates a NEW report (new id and
@@ -7,9 +7,10 @@
 //
 // Order, and what has to be true before each step:
 //
-//   1. Snapshot   both clients and their reports, as they are now.
-//   2. Backup     EVERY report of BOTH clients to Google Drive:
+//   1. Snapshot   every client involved and its reports, as they are now.
+//   2. Backup     EVERY report of EVERY client to Google Drive:
 //                   <CLIENT_MERGE_DRIVE_FOLDER_ID>/<Removed> - <Kept> Merge - <timestamp>/
+//                   (<First removed> + N more - <Kept> Merge - ... for several)
 //                     manifest.json                     this merge, as recorded
 //                     <Client> (<id>)/client.json       the client record + report list
 //                     <Client> (<id>)/<Report> (<id>)/
@@ -18,10 +19,11 @@
 //                       Executive Summary Report <timestamp>.pdf
 //                       Letter of Attestation <timestamp>.pdf
 //                       Artifacts/<files on the report's Artifacts tab>
-//                 Every file is checked against the MD5 Drive reports for it. If ANY file
-//                 of ANY report fails, the merge stops here and nothing in Plextrac has
-//                 been changed.
-//   3. Move       one report at a time:
+//                 Every file is checked against the MD5 Drive reports for it. A file of
+//                 the KEPT client failing stops the whole merge here, with nothing in
+//                 Plextrac changed. A file of a client being removed failing means that
+//                 client is skipped — left exactly as it is — and the others go ahead.
+//   3. Move       client by client, one report at a time:
 //                   a. download the .ptrac BACK from Drive (MD5-checked) — the import uses
 //                      the backup itself, which also proves the backup restores;
 //                   b. import it into the kept client and find the new report;
@@ -33,12 +35,16 @@
 //                      engagement, QA queue/KPIs) to the copy, and send DeliveryFlow the
 //                      new link;
 //                   g. delete the original and confirm it is gone.
-//                 Any failure stops the merge where it is; the record says exactly which
-//                 report reached which step.
 //   4. Delete     the removed client — only once it has no reports left — after
 //                 recording its name as an alias of the kept client, so the ClickUp /
 //                 DeliveryFlow pipelines file future work under the kept client instead
 //                 of creating the duplicate again.
+//                 A failure in 3 or 4 stops THAT client where it is (its other reports
+//                 are left on it, untouched) and the merge carries on with the next one.
+//                 The record says which client, and which report, reached which step.
+//
+// The merge ends `completed` (every client merged), `partial` (some were) or `failed`
+// (none were).
 //
 // Not carried by a .ptrac, and so not moved: report comments. Their absence is noted in
 // the record; the PDFs in the backup are the reference copy.
@@ -47,6 +53,7 @@
 //   CLIENT_MERGE_DRIVE_FOLDER_ID       where the backup folders go
 //   CLIENT_MERGE_BACKUP_CONCURRENCY    reports backed up at once (default 2)
 //   CLIENT_MERGE_IMPORT_WAIT_MS        how long to wait for an import to land (default 180000)
+//   CLIENT_MERGE_MAX_CLIENTS           clients one merge may remove (default 25)
 
 const crypto = require('crypto');
 const api = require('../lib/plextrac-api');
@@ -71,6 +78,7 @@ const backupRoot = () => process.env.CLIENT_MERGE_DRIVE_FOLDER_ID || '1YxrZz42lK
 const backupConcurrency = () => Number(process.env.CLIENT_MERGE_BACKUP_CONCURRENCY) || 2;
 const importWaitMs = () => Number(process.env.CLIENT_MERGE_IMPORT_WAIT_MS) || 180000;
 const pollMs = () => Number(process.env.CLIENT_MERGE_POLL_MS) || 5000;
+const maxClients = () => Number(process.env.CLIENT_MERGE_MAX_CLIENTS) || 25;
 // How long a moved report's webhooks stay ignored after its move has finished.
 const SUPPRESS_TAIL_MS = 2 * 60 * 1000;
 
@@ -139,49 +147,83 @@ async function fingerprint(clientId, reportId) {
 
 // ── Preview ───────────────────────────────────────────────────────────────────
 
-function mergeFolderName(mergeClient, keepClient, at) {
-  return `${safeFilename(mergeClient.name, 'Client')} - ${safeFilename(keepClient.name, 'Client')} Merge - ${exportTimestamp(at)}`;
+// The clients to remove, from `mergeClientIds` (an array, or "20,30,40" as a query
+// string gives it) or the single `mergeClientId` the portal used to send.
+function parseMergeIds({ keepClientId, mergeClientIds, mergeClientId }) {
+  const keepId = parseClientId(keepClientId, 'keepClientId');
+  let raw = mergeClientIds ?? mergeClientId;
+  if (typeof raw === 'string') raw = raw.split(',');
+  raw = (Array.isArray(raw) ? raw : [raw]).filter((v) => v != null && String(v).trim() !== '');
+  if (!raw.length) throw new MergeError('Choose at least one client to merge into the kept one');
+  const mergeIds = raw.map((v) => parseClientId(String(v).trim(), 'mergeClientIds'));
+  if (new Set(mergeIds).size !== mergeIds.length) throw new MergeError('A client is listed twice');
+  if (mergeIds.includes(keepId)) throw new MergeError('The kept client cannot also be merged away — choose different clients');
+  if (mergeIds.length > maxClients()) throw new MergeError(`At most ${maxClients()} clients can be merged at once (${mergeIds.length} chosen)`);
+  return { keepId, mergeIds };
+}
+
+// A few clients at a time, so a large merge doesn't fire dozens of reads at Plextrac.
+const readSlots = limiter(4);
+const loadAll = (ids, fn) => Promise.all(ids.map((id) => readSlots(() => fn(id))));
+
+function mergeFolderName(mergeClients, keepClient, at) {
+  const list = Array.isArray(mergeClients) ? mergeClients : [mergeClients];
+  const first = safeFilename(list[0].name, 'Client');
+  const removed = list.length > 1 ? `${first} + ${list.length - 1} more` : first;
+  return `${removed} - ${safeFilename(keepClient.name, 'Client')} Merge - ${exportTimestamp(at)}`;
 }
 
 /**
- * What a merge of `mergeClientId` into `keepClientId` would do, without doing any of it.
+ * What merging `mergeClientIds` into `keepClientId` would do, without doing any of it.
  */
-async function preview({ keepClientId, mergeClientId }) {
-  const keepId = parseClientId(keepClientId, 'keepClientId');
-  const mergeId = parseClientId(mergeClientId, 'mergeClientId');
-  if (keepId === mergeId) throw new MergeError('Choose two different clients');
+async function preview(query) {
+  const { keepId, mergeIds } = parseMergeIds(query);
 
-  const [keep, merge] = await Promise.all([loadClient(keepId), loadClient(mergeId)]);
-  const [keepReports, mergeReports] = await Promise.all([loadReports(keepId), loadReports(mergeId)]);
+  const [keep, ...removed] = await loadAll([keepId, ...mergeIds], loadClient);
+  const [keepReports, ...removedReports] = await loadAll([keepId, ...mergeIds], loadReports);
 
   const warnings = [];
-  const linked = await store.linkedRecords(mergeId).catch((err) => {
-    warnings.push(`Could not read break.services' own records for this client: ${err.message}`);
-    return null;
-  });
-  const active = await store.findActiveMerge([keepId, mergeId]).catch(() => null);
+  const active = await store.findActiveMerge([keepId, ...mergeIds]).catch(() => null);
   if (active) warnings.push(`A merge involving one of these clients is already ${active.status} (${active.merge_id}).`);
 
-  const nameClashes = mergeReports
-    .filter((r) => keepReports.some((k) => sameName(k.name, r.name)))
-    .map((r) => r.name);
+  const merges = await Promise.all(removed.map(async (client, i) => {
+    const linked = await store.linkedRecords(client.id).catch((err) => {
+      warnings.push(`Could not read break.services' own records for "${client.name}": ${err.message}`);
+      return null;
+    });
+    const reports = removedReports[i];
+    const nameClashes = reports.filter((r) => keepReports.some((k) => sameName(k.name, r.name))).map((r) => r.name);
+    return { id: client.id, name: client.name, url: clientUrl(client.id), reports, nameClashes, linked };
+  }));
+
+  const nameClashes = [...new Set(merges.flatMap((m) => m.nameClashes))];
   if (nameClashes.length) {
     warnings.push(`${nameClashes.length} report name(s) already exist under ${keep.name}; the moved copies will sit alongside them with the same name.`);
   }
+  // Reports that clash with each other, from two of the clients being removed.
+  const seen = new Map();
+  for (const m of merges) for (const r of m.reports) {
+    const key = store.aliasKey(r.name);
+    if (seen.has(key) && seen.get(key) !== m.id) { warnings.push(`"${r.name}" is on more than one of the clients being merged; each will be moved, with the same name.`); }
+    seen.set(key, m.id);
+  }
+  const sum = (key) => merges.reduce((n, m) => n + (m.linked?.[key]?.length || 0), 0);
 
   return {
     keep: { id: keepId, name: keep.name, url: clientUrl(keepId), reports: keepReports },
-    merge: { id: mergeId, name: merge.name, url: clientUrl(mergeId), reports: mergeReports },
+    merges,
+    // The single-client shape the portal used before several clients could be merged.
+    ...(merges.length === 1 ? { merge: merges[0], linked: merges[0].linked } : {}),
     nameClashes,
-    linked,
+    linkedTotals: { clickupTasks: sum('clickupTasks'), deliveryflowEngagements: sum('deliveryflowEngagements') },
     backup: {
-      folderName: mergeFolderName(merge, keep, new Date()),
+      folderName: mergeFolderName(removed, keep, new Date()),
       parentFolderUrl: drive.driveFolderUrl(backupRoot()),
-      reports: keepReports.length + mergeReports.length,
+      reports: keepReports.length + removedReports.reduce((n, r) => n + r.length, 0),
       documentsPerReport: DOCUMENTS.map((d) => d.name),
     },
     notCarried: ['Report comments (not included in a .ptrac export)'],
-    warnings,
+    warnings: [...new Set(warnings)],
   };
 }
 
@@ -189,22 +231,24 @@ async function preview({ keepClientId, mergeClientId }) {
 
 /**
  * Validates and records a merge, starts it in the background, and returns its record.
- * `confirmClientName` must match the name of the client being removed — a deliberate
- * second step so a mis-click can't delete a client.
+ * `confirmClientName` must match the name of the client being KEPT, typed by the person
+ * starting it after seeing the list of clients that will be deleted — a deliberate
+ * second step so a mis-click can't delete clients. (A single-client merge also accepts
+ * the removed client's name, as the portal used to ask for.)
  */
-async function startMerge({ keepClientId, mergeClientId, confirmClientName, requestedBy }) {
-  const keepId = parseClientId(keepClientId, 'keepClientId');
-  const mergeId = parseClientId(mergeClientId, 'mergeClientId');
-  if (keepId === mergeId) throw new MergeError('Choose two different clients');
+async function startMerge({ keepClientId, mergeClientIds, mergeClientId, confirmClientName, requestedBy }) {
+  const { keepId, mergeIds } = parseMergeIds({ keepClientId, mergeClientIds, mergeClientId });
 
-  const [keep, merge] = await Promise.all([loadClient(keepId), loadClient(mergeId)]);
-  if (!sameName(confirmClientName, merge.name)) {
-    throw new MergeError(`confirmClientName must be the name of the client being removed ("${merge.name}")`);
+  const [keep, ...removed] = await loadAll([keepId, ...mergeIds], loadClient);
+  const confirmed = sameName(confirmClientName, keep.name)
+    || (removed.length === 1 && sameName(confirmClientName, removed[0].name));
+  if (!confirmed) {
+    throw new MergeError(`confirmClientName must be the name of the client being kept ("${keep.name}")`);
   }
 
   // Check-and-record under one lock, so two clicks can't start two merges.
   const job = await withTaskLock('client-merge:start', async () => {
-    const active = await store.findActiveMerge([keepId, mergeId]);
+    const active = await store.findActiveMerge([keepId, ...mergeIds]);
     if (active) throw new MergeError(`A merge involving one of these clients is already ${active.status} (${active.merge_id})`, 409);
     const now = new Date();
     const record = {
@@ -212,14 +256,13 @@ async function startMerge({ keepClientId, mergeClientId, confirmClientName, requ
       status: 'queued',
       stage: 'queued',
       keep_client: { id: keepId, name: keep.name },
-      merge_client: { id: mergeId, name: merge.name },
+      merge_clients: removed.map((c) => ({ id: c.id, name: c.name, state: 'pending' })),
       requested_by: requestedBy ? String(requestedBy).slice(0, 200) : null,
       created_at: now,
       started_at: null,
       finished_at: null,
       drive_folder: null,
       reports: [],
-      client_deleted: false,
       error: null,
       events: [],
     };
@@ -249,11 +292,19 @@ function tracker(job) {
   return { event, save };
 }
 
+// The clients being removed. A record from before several clients could be merged
+// has one `merge_client` instead.
+const mergeClientsOf = (job) => job.merge_clients || (job.merge_client ? [job.merge_client] : []);
+const allClientIds = (job) => [job.keep_client.id, ...mergeClientsOf(job).map((c) => c.id)];
+
 async function runMerge(job) {
   const { event, save } = tracker(job);
+  job.merge_clients = mergeClientsOf(job).map((c) => ({ state: 'pending', ...c }));
+  delete job.merge_client;
+  const clients = job.merge_clients;
   job.status = 'running';
   job.started_at = new Date();
-  event('info', `STARTED — "${job.merge_client.name}" (${job.merge_client.id}) into "${job.keep_client.name}" (${job.keep_client.id})`,
+  event('info', `STARTED — ${clients.map((c) => `"${c.name}" (${c.id})`).join(', ')} into "${job.keep_client.name}" (${job.keep_client.id})`,
     { requested_by: job.requested_by });
   await save();
 
@@ -265,18 +316,38 @@ async function runMerge(job) {
     job.stage = 'backup';
     await backupAll(job, event, save, clientRecords);
 
-    job.stage = 'move';
-    for (const entry of job.reports.filter((r) => r.role === 'move')) {
-      await moveReport(job, entry, event, save);
+    // Client by client. One that fails stays as it is, and the merge goes on.
+    for (const client of clients.filter((c) => c.state === 'pending')) {
+      try {
+        job.stage = 'move';
+        client.state = 'moving';
+        await save();
+        for (const entry of job.reports.filter((r) => r.role === 'move' && r.client_id === client.id)) {
+          await moveReport(job, entry, event, save);
+        }
+        job.stage = 'delete_client';
+        client.state = 'deleting';
+        await save();
+        await removeClient(job, client, event);
+        client.state = 'merged';
+      } catch (err) {
+        client.failed_at = client.state;
+        client.state = 'failed';
+        client.error = err.message;
+        const left = clients.some((c) => c.state === 'pending');
+        event('error', `"${client.name}" NOT merged: ${err.message}${left ? ' — carrying on with the other clients' : ''}`, { client_id: client.id });
+      }
+      await save();
     }
 
-    job.stage = 'delete_client';
-    await save();
-    await removeClient(job, event);
-
     job.stage = 'done';
-    job.status = 'completed';
-    event('info', `FINISHED — ${job.reports.filter((r) => r.move?.state === 'deleted').length} report(s) moved, "${job.merge_client.name}" deleted`);
+    const merged = clients.filter((c) => c.state === 'merged');
+    const notMerged = clients.filter((c) => c.state !== 'merged');
+    job.status = !notMerged.length ? 'completed' : merged.length ? 'partial' : 'failed';
+    job.error = notMerged.length ? notMerged.map((c) => `"${c.name}": ${c.error}`).join(' | ') : null;
+    const moved = job.reports.filter((r) => r.move?.state === 'deleted').length;
+    event(notMerged.length ? 'warn' : 'info', `FINISHED — ${merged.length} of ${clients.length} client(s) merged and deleted, ${moved} report(s) moved`
+      + (notMerged.length ? `; not merged: ${notMerged.map((c) => `"${c.name}"`).join(', ')}` : ''));
   } catch (err) {
     job.status = 'failed';
     job.error = err.message;
@@ -285,8 +356,8 @@ async function runMerge(job) {
 
   job.finished_at = new Date();
   await save();
-  // The client picker's report counts: both clients just changed (one may be gone).
-  await reportCounts.refreshClients([job.keep_client.id, job.merge_client.id])
+  // The client picker's report counts: every client involved just changed (some may be gone).
+  await reportCounts.refreshClients(allClientIds(job))
     .catch((err) => log.warn('Client merge: report counts not refreshed', { merge_id: job.merge_id, reason: err.message }));
   await writeManifest(job).catch((err) => event('warn', `Could not update manifest.json in Drive: ${err.message}`));
   await save();
@@ -295,26 +366,31 @@ async function runMerge(job) {
 }
 
 async function snapshot(job, event) {
-  const [keep, merge] = await Promise.all([loadClient(job.keep_client.id), loadClient(job.merge_client.id)]);
-  const [keepReports, mergeReports] = await Promise.all([loadReports(keep.id), loadReports(merge.id)]);
+  const ids = allClientIds(job);
+  const [keep, ...removed] = await loadAll(ids, loadClient);
+  const [keepReports, ...removedReports] = await loadAll(ids, loadReports);
   job.keep_client = { id: keep.id, name: keep.name, report_count: keepReports.length };
-  job.merge_client = { id: merge.id, name: merge.name, report_count: mergeReports.length };
+  job.merge_clients.forEach((c, i) => Object.assign(c, { name: removed[i].name, report_count: removedReports[i].length }));
   const entry = (client, role) => (r) => ({
     role, client_id: client.id, client_name: client.name, report_id: r.id, name: r.name, status: r.status,
     backup: null, ...(role === 'move' ? { move: { state: 'pending' } } : {}),
   });
-  job.reports = [...mergeReports.map(entry(merge, 'move')), ...keepReports.map(entry(keep, 'keep'))];
-  event('info', `Snapshot: ${mergeReports.length} report(s) to move, ${keepReports.length} already on the kept client`);
+  job.reports = [
+    ...removed.flatMap((client, i) => removedReports[i].map(entry(client, 'move'))),
+    ...keepReports.map(entry(keep, 'keep')),
+  ];
+  const toMove = job.reports.filter((r) => r.role === 'move').length;
+  event('info', `Snapshot: ${toMove} report(s) to move from ${removed.length} client(s), ${keepReports.length} already on the kept client`);
   // The full client records go into the backup's client.json, not the merge record
   // (a client logo alone can be a large base64 string).
-  return { [keep.id]: keep.record, [merge.id]: merge.record };
+  return Object.fromEntries([keep, ...removed].map((c) => [c.id, c.record]));
 }
 
 // ── Backup ────────────────────────────────────────────────────────────────────
 // Each report is backed up by pipeline/report-backup.js, shared with the weekly backup.
 
 async function backupAll(job, event, save, clientRecords) {
-  const rootName = mergeFolderName(job.merge_client, job.keep_client, job.started_at);
+  const rootName = mergeFolderName(job.merge_clients, job.keep_client, job.started_at);
   const rootId = await backup.folderUnder(backupRoot(), rootName);
   job.drive_folder = { id: rootId, name: rootName, url: drive.driveFolderUrl(rootId) };
   event('info', `Backup folder ready: ${rootName}`, { drive: job.drive_folder.url });
@@ -322,7 +398,7 @@ async function backupAll(job, event, save, clientRecords) {
 
   // One folder per client, holding the client record and the list of its reports.
   const clientFolders = {};
-  for (const client of [job.merge_client, job.keep_client]) {
+  for (const client of [...job.merge_clients, job.keep_client]) {
     const folderId = await backup.folderUnder(rootId, backup.clientFolderName(client));
     clientFolders[client.id] = folderId;
     await backup.backupClientRecord({
@@ -348,11 +424,26 @@ async function backupAll(job, event, save, clientRecords) {
 
   await writeManifest(job).catch((err) => { throw new Error(`manifest.json could not be written: ${err.message}`); });
 
-  const failed = job.reports.filter((r) => !r.backup?.ok);
-  if (failed.length) {
-    throw new Error(`${failed.length} report(s) could not be backed up (${failed.map((r) => `"${r.name}"`).join(', ')}) — nothing was changed in Plextrac`);
+  const failedNames = (reports) => reports.map((r) => `"${r.name}"`).join(', ');
+  // The kept client's backup is the safety net for every client: without all of it,
+  // nothing goes ahead.
+  const keepFailed = job.reports.filter((r) => r.role === 'keep' && !r.backup?.ok);
+  if (keepFailed.length) {
+    throw new Error(`${keepFailed.length} report(s) of the kept client "${job.keep_client.name}" could not be backed up (${failedNames(keepFailed)}) — nothing was changed in Plextrac`);
   }
-  event('info', `Backup complete: ${job.reports.length} report(s), ${job.reports.reduce((n, r) => n + r.backup.files.length, 0)} file(s), all verified`);
+  // A client being removed is only touched once ALL of its reports are backed up.
+  for (const client of job.merge_clients) {
+    const failed = job.reports.filter((r) => r.client_id === client.id && !r.backup?.ok);
+    if (!failed.length) continue;
+    client.state = 'skipped';
+    client.error = `${failed.length} report(s) could not be backed up (${failedNames(failed)}) — nothing of this client was changed`;
+    event('error', `Skipping "${client.name}": ${client.error}`, { client_id: client.id });
+  }
+  if (job.merge_clients.every((c) => c.state === 'skipped')) {
+    throw new Error(`no client to merge could be fully backed up — nothing was changed in Plextrac. ${job.merge_clients.map((c) => `"${c.name}": ${c.error}`).join(' | ')}`);
+  }
+  const ok = job.reports.filter((r) => r.backup?.ok);
+  event('info', `Backup complete: ${ok.length} report(s), ${ok.reduce((n, r) => n + r.backup.files.length, 0)} file(s), all verified`);
 }
 
 async function backupReport(job, entry, clientFolderId) {
@@ -560,8 +651,8 @@ async function notifyDeliveryFlow(engagements, { entry, reportId, url, status })
 
 // ── Delete the client ─────────────────────────────────────────────────────────
 
-async function removeClient(job, event) {
-  const { id, name } = job.merge_client;
+async function removeClient(job, client, event) {
+  const { id, name } = client;
   const left = await loadReports(id);
   if (left.length) {
     throw new Error(`"${name}" still has ${left.length} report(s) (${left.map((r) => `"${r.name}"`).join(', ')}) — created during the merge? The client was NOT deleted`);
@@ -572,25 +663,42 @@ async function removeClient(job, event) {
   const repointedRecords = await store.repointClient({ oldClientId: id, newClientId: job.keep_client.id });
   await store.repointAliases({ oldClientId: id, newClientId: job.keep_client.id, newClientName: job.keep_client.name });
   await store.saveAlias({ aliasName: name, clientId: job.keep_client.id, clientName: job.keep_client.name, mergeId: job.merge_id });
-  job.alias_saved = true;
+  client.alias_saved = true;
   event('info', `"${name}" recorded as an alias of "${job.keep_client.name}"`, repointedRecords);
 
-  await api.deleteClient(id);
+  try {
+    await api.deleteClient(id);
+  } catch (err) {
+    // Plextrac's answer when the API account's ROLE lacks the permission (deleting
+    // reports is a separate permission, which it has by this point).
+    if (/\(HTTP 403\).*not authorized/i.test(err.message)) {
+      throw new Error(`Plextrac refused to delete client "${name}" (${id}): the API account's role is not allowed to delete clients. `
+        + 'Grant it in Plextrac (Admin → Security → Roles → the API account\'s role → delete clients). '
+        + `"${name}" is now empty and recorded as an alias, so deleting it by hand in Plextrac finishes this merge`);
+    }
+    throw err;
+  }
   const still = (await listClients()).some((c) => c.id === id);
   if (still) throw new Error(`Plextrac accepted the delete of client "${name}" (${id}) but it is still listed`);
-  job.client_deleted = true;
+  client.deleted = true;
   event('info', `Deleted client "${name}" (${id})`);
 }
 
 function notifySlack(job) {
+  const clients = mergeClientsOf(job);
+  const merged = clients.filter((c) => c.state === 'merged');
+  const notMerged = clients.filter((c) => c.state !== 'merged');
   const moved = job.reports.filter((r) => r.move?.state === 'deleted').length;
-  const total = job.reports.filter((r) => r.role === 'move').length;
   const backup = job.drive_folder ? ` Backup: <${job.drive_folder.url}|${job.drive_folder.name}>` : '';
   const by = job.requested_by ? ` (by ${job.requested_by})` : '';
+  const names = (list) => list.map((c) => `"${c.name}"`).join(', ');
+  const kept = `<${clientUrl(job.keep_client.id)}|${job.keep_client.name}>`;
   if (job.status === 'completed') {
-    log.notify(`:white_check_mark: Plextrac client merge${by}: "${job.merge_client.name}" merged into <${clientUrl(job.keep_client.id)}|${job.keep_client.name}> — ${moved} report(s) moved, old client deleted.${backup}`);
+    log.notify(`:white_check_mark: Plextrac client merge${by}: ${names(merged)} merged into ${kept} — ${moved} report(s) moved, ${merged.length === 1 ? 'old client' : `${merged.length} old clients`} deleted.${backup}`);
+  } else if (job.status === 'partial') {
+    log.notify(`:warning: Plextrac client merge${by} into ${kept}: ${merged.length} of ${clients.length} client(s) merged (${moved} report(s) moved). NOT merged: ${notMerged.map((c) => `"${c.name}" (${c.error})`).join('; ')}.${backup}`);
   } else {
-    log.notify(`:warning: Plextrac client merge${by} of "${job.merge_client.name}" into "${job.keep_client.name}" FAILED at ${job.stage} (${moved}/${total} report(s) moved): ${job.error}.${backup}`);
+    log.notify(`:warning: Plextrac client merge${by} of ${names(clients)} into "${job.keep_client.name}" FAILED at ${job.stage} (${moved} report(s) moved): ${job.error}.${backup}`);
   }
 }
 
@@ -601,6 +709,7 @@ module.exports = {
   startMerge,
   runMerge,
   mergeFolderName,
+  mergeClientsOf,
   // exposed for tests
   findImported,
   fingerprint,

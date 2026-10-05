@@ -414,8 +414,27 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
       notdef('U+0008'), notdef('U+0008'), notdef('U+008A'), 'Ignored `aspect-ratio:1/1` at 1:1, unknown property.',
       notdef('U+0008'), 'Ignored `aspect-ratio:1/1` at 1:1, unknown property.',
     ]);
-    eq(out, ['4 characters no font can draw were printed as boxes: U+0008 x3, U+008A x1', 'Ignored `aspect-ratio:1/1` at 1:1, unknown property.']);
-    eq(clientDocuments.summariseWarnings(['a', 'b']), ['a', 'b']);
+    eq(out, ['4 characters no font can draw were printed as boxes: U+0008 x3, U+008A x1']);
+    eq(clientDocuments.summariseWarnings(['a', 'Ignored `margin-trim:block` at 1:1, unknown property.']),
+      ['a', 'Ignored `margin-trim:block` at 1:1, unknown property.']);
+  });
+
+  await test('aspect-ratio warnings are not logged at all; nothing is logged when they were the only ones', async () => {
+    reset();
+    const ratio = (r) => `Ignored \`aspect-ratio:${r}\` at 1:1, unknown property.`;
+    eq(clientDocuments.summariseWarnings([ratio('3020/1448'), ratio('838/437'), ratio(' 2000 / 1074')]), []);
+    renderer.renderTemplates = async (jobs) => new Map(jobs.map((j) => [j.id, { ok: true, buffer: PDF, warnings: [ratio('831/606')] }]));
+    const log = require('../lib/logger');
+    const warned = [];
+    const saved = log.warn;
+    log.warn = (msg, data) => warned.push(msg);
+    try {
+      const out = await clientDocuments.generateClientDocuments({ clientId: 12, reportId: 34, exportedAt: EXPORTED_AT, documents: DOCS });
+      eq(out.map((d) => [d.ok, d.warnings]), [[true, []], [true, []]]);
+    } finally {
+      log.warn = saved;
+    }
+    eq(warned.filter((m) => /rendered with warnings/.test(m)), []);
   });
 
   console.log('\npublishClientDocument:');

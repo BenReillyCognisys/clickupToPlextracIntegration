@@ -88,13 +88,18 @@ async function loadReportData({ clientId, reportId }) {
 
 // WeasyPrint logs one ".notdef glyph rendered ... (U+0008)" warning per character no
 // font can draw, which for a pasted binary blob is thousands of lines. They become one
-// line, counted by character; every other warning is kept, once each.
+// line, counted by character; every other warning is kept, once each — except
+// aspect-ratio, which Plextrac's editor puts on every pasted image and WeasyPrint
+// doesn't support. Harmless (images keep their own proportions), so not logged at all.
+// ./images drops it from finding screenshots; this catches any elsewhere (narratives).
 const NOTDEF = /^\.notdef glyph rendered .*\((U\+[0-9A-F]+)\)$/;
+const IGNORED = /^Ignored `aspect-ratio\s*:[^`]*` at \d+:\d+, unknown property\.$/;
 
 function summariseWarnings(warnings = []) {
   const missing = new Map();
   const other = new Set();
   for (const w of warnings) {
+    if (IGNORED.test(w)) continue;
     const m = NOTDEF.exec(w);
     if (m) missing.set(m[1], (missing.get(m[1]) || 0) + 1);
     else other.add(w);
@@ -201,8 +206,8 @@ async function generateClientDocuments({
       r.ok = false;
       r.error = 'renderer output is not a PDF';
     }
+    if (r.warnings?.length) r.warnings = summariseWarnings(r.warnings);
     if (r.warnings?.length) {
-      r.warnings = summariseWarnings(r.warnings);
       log.warn('Client document rendered with warnings', { document: doc.key, report_id: reportId, warnings: r.warnings });
     }
     if (!r.ok) return { doc, ok: false, error: `Rendering failed: ${r.error}` };
