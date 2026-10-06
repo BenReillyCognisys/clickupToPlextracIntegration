@@ -22,6 +22,20 @@ const posts = [];   // { channel, text } from postMessage
 const replies = []; // { channel, threadTs, text } from postReply
 slack.postMessage = async (channel, text) => { posts.push({ channel, text }); return 'ts-1'; };
 slack.postReply = async (channel, threadTs, text) => { replies.push({ channel, threadTs, text }); };
+const updates = [];   // { channel, ts, text } from updateMessage
+const reactions = []; // { channel, ts, name } from addReaction
+slack.updateMessage = async (channel, ts, text) => { updates.push({ channel, ts, text }); return true; };
+let reactionError = null; // set to make reactions.add fail for a name
+slack.addReaction = async (channel, ts, name) => {
+  if (reactionError && reactionError(name)) throw new Error(`Slack API error: ${reactionError(name)}`);
+  reactions.push({ channel, ts, name });
+  return true;
+};
+// The report's approved message, as lib/approved-message-store.js would return it.
+const approvedStore = require('../lib/approved-message-store');
+let approvedRecord = null;
+approvedStore.get = async () => approvedRecord;
+approvedStore.set = async () => {};
 const SLACK_IDS = { 'ada@example.com': 'U777', 'alice.elvin@cognisys.group': 'UALICE', 'ben.reilly@cognisys.group': 'UBEN' };
 slack.lookupUserIdByEmail = async (email) => SLACK_IDS[email] || null;
 // The release also files the client documents (tests/client-documents.test.js covers
@@ -454,44 +468,38 @@ test('omits the mention block when the reviewer list is empty', () => {
 
 console.log('\nbuildReleaseMessage:');
 
-test('hyperlinks names, pings reviewers, credits release QA, and bookends with a check', () => {
+test('hyperlinks names, credits second QA and release, and bookends with a tick', () => {
   eq(
     buildReleaseMessage({
       clientName: 'Acme Corp',
       clientUrl: 'https://x/client/1',
       reportName: 'Web App Pentest',
       reportUrl: 'https://x/client/1/report/2',
-      releaseQaName: 'Ben Reilly',
-      mentions: ['U111', 'U222'],
+      secondQaName: 'Punit Sharma',
+      releaseQaName: 'Alice Elvin',
     }),
-    ':white_check_mark: Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> released <@U111> <@U222>. Release QA done by Ben Reilly :white_check_mark:',
+    ':white_tick: Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> - Second QA by Punit Sharma - Release by Alice Elvin :white_tick:',
   );
 });
 
-test('the release message tags nobody unless told who to tag (no fixed list)', () => {
-  const msg = buildReleaseMessage({
-    clientName: 'Acme', reportName: 'Report 5', releaseQaName: 'Ada Lovelace',
-  });
-  eq(msg, ':white_check_mark: Client: Acme - Report 5 released. Release QA done by Ada Lovelace :white_check_mark:');
+test('leaves out "Second QA by" when the approver is not known', () => {
+  eq(
+    buildReleaseMessage({ clientName: 'Acme', reportName: 'Report 5', releaseQaName: 'Grace' }),
+    ':white_tick: Client: Acme - Report 5 - Release by Grace :white_tick:',
+  );
 });
 
-test('escapes mrkdwn-special characters in names and the release-QA name', () => {
+test('escapes mrkdwn-special characters in names', () => {
   const msg = buildReleaseMessage({
     clientName: 'A & B <Ltd>',
     reportName: 'Q1 <draft>',
+    secondQaName: 'C>d',
     releaseQaName: 'A<b>',
-    mentions: [],
   });
   eq(msg.includes('A &amp; B &lt;Ltd&gt;'), true);
   eq(msg.includes('Q1 &lt;draft&gt;'), true);
-  eq(msg.includes('Release QA done by A&lt;b&gt;'), true);
-});
-
-test('omits the mention block when the release reviewer list is empty', () => {
-  eq(
-    buildReleaseMessage({ clientName: 'Acme', reportName: 'Report 5', releaseQaName: 'Grace', mentions: [] }),
-    ':white_check_mark: Client: Acme - Report 5 released. Release QA done by Grace :white_check_mark:',
-  );
+  eq(msg.includes('Second QA by C&gt;d'), true);
+  eq(msg.includes('Release by A&lt;b&gt;'), true);
 });
 
 console.log('');
@@ -545,7 +553,7 @@ const ANNOUNCEMENT = {
   actorCuid: 'cuid-ada', reportId: 2,
 };
 
-function resetSlack() { posts.length = 0; replies.length = 0; }
+function resetSlack() { posts.length = 0; replies.length = 0; updates.length = 0; reactions.length = 0; approvedRecord = null; reactionError = null; }
 
 (async () => {
   console.log('');
@@ -569,7 +577,7 @@ function resetSlack() { posts.length = 0; replies.length = 0; }
     resetSlack();
     await postReleaseAnnouncement({ ...ANNOUNCEMENT, report: REPORT_WITH_GAPS });
     eq(posts.length, 1);
-    eq(posts[0].text.includes('released'), true);
+    eq(posts[0].text.includes('Release by'), true);
     eq(replies.length, 1);
     eq(replies[0].threadTs, 'ts-1');
     eq(replies[0].text.includes('<@U777>'), true);
@@ -578,22 +586,53 @@ function resetSlack() { posts.length = 0; replies.length = 0; }
     eq(replies[0].text.includes('Released with empty custom fields'), true);
   });
 
-  await atest('the release tags the OTHER publisher: Ben releases → Alice, Alice releases → Ben', async () => {
-    const report = { custom_fields: [] };
+  await atest('the release edits the approved message in place, threads under it and ticks it', async () => {
     resetSlack();
-    await postReleaseAnnouncement({ ...ANNOUNCEMENT, actorCuid: 'cuid-ben', report });
-    eq(posts[0].text, ':white_check_mark: Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> released <@UALICE>. Release QA done by Ben Reilly :white_check_mark:');
-    resetSlack();
-    await postReleaseAnnouncement({ ...ANNOUNCEMENT, actorCuid: 'cuid-alice', report });
-    eq(posts[0].text.includes('released <@UBEN>. Release QA done by Alice Elvin'), true);
-    // Katie and Charlotte are never tagged.
-    eq(/U09CF6MLUF3|U06NJCD93RT/.test(posts[0].text), false);
+    approvedRecord = { channel: 'C-READY', ts: 'ts-approved', approverName: 'Punit Sharma' };
+    await postReleaseAnnouncement({ ...ANNOUNCEMENT, actorCuid: 'cuid-alice', report: REPORT_WITH_GAPS });
+    eq(posts.length, 0);
+    eq(updates, [{
+      channel: 'C-READY', ts: 'ts-approved',
+      text: ':white_tick: Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> - Second QA by Punit Sharma - Release by Alice Elvin :white_tick:',
+    }]);
+    eq(reactions, [{ channel: 'C-READY', ts: 'ts-approved', name: 'white_tick' }]);
+    eq(replies.length, 1);
+    eq(replies[0].channel, 'C-READY');
+    eq(replies[0].threadTs, 'ts-approved');
   });
 
-  await atest('a release by someone unknown tags every publisher', async () => {
+  await atest('with no approved message on record, the release line is posted and ticked', async () => {
     resetSlack();
-    await postReleaseAnnouncement({ ...ANNOUNCEMENT, actorCuid: null, report: { custom_fields: [] } });
-    eq(posts[0].text.includes('released <@UALICE> <@UBEN>. Release QA done by an unknown user'), true);
+    await postReleaseAnnouncement({ ...ANNOUNCEMENT, actorCuid: 'cuid-ben', report: { custom_fields: [] } });
+    eq(updates.length, 0);
+    eq(posts[0].text, ':white_tick: Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> - Release by Ben Reilly :white_tick:');
+    eq(reactions, [{ channel: posts[0].channel, ts: 'ts-1', name: 'white_tick' }]);
+  });
+
+  await atest('an approved message since deleted falls back to a new message', async () => {
+    resetSlack();
+    approvedRecord = { channel: 'C-READY', ts: 'ts-gone', approverName: 'Punit Sharma' };
+    const realUpdate = slack.updateMessage;
+    slack.updateMessage = async () => false; // message_not_found
+    try {
+      await postReleaseAnnouncement({ ...ANNOUNCEMENT, actorCuid: 'cuid-ben', report: { custom_fields: [] } });
+    } finally {
+      slack.updateMessage = realUpdate;
+    }
+    eq(posts.length, 1);
+    eq(posts[0].text.includes('Second QA by Punit Sharma - Release by Ben Reilly'), true);
+  });
+
+  await atest('the tick falls back to white_check_mark if Slack has no white_tick, and never blocks the release', async () => {
+    resetSlack();
+    reactionError = (name) => (name === 'white_tick' ? 'invalid_name' : null);
+    await postReleaseAnnouncement({ ...ANNOUNCEMENT, report: REPORT_WITH_GAPS });
+    eq(reactions.map((r) => r.name), ['white_check_mark']);
+    resetSlack();
+    reactionError = () => 'missing_scope';
+    await postReleaseAnnouncement({ ...ANNOUNCEMENT, report: REPORT_WITH_GAPS });
+    eq(posts.length, 1);
+    eq(replies.length, 1); // the empty-fields notice still went out
   });
 
   await atest('nothing extra is posted when every required field is filled', async () => {

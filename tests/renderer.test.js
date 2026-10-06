@@ -177,6 +177,24 @@ const tableRows = (html) => [...scopeHtml(html).matchAll(/<tr>([\s\S]*?)<\/tr>/g
     }
   });
 
+  await test('test accounts are left out however they are headed, and hosts after them are kept', async () => {
+    const hosts = (url) => '<figure class="table"><table><tbody><tr><td>URL</td><td>Notes</td></tr>'
+      + `<tr><td>${url}</td><td>App</td></tr></tbody></table></figure>`;
+    const creds = '<figure class="table"><table><tbody><tr><td><strong>Credential</strong></td><td>Role</td></tr>'
+      + '<tr><td>tester@northgate.example</td><td>Admin</td></tr></tbody></table></figure>';
+    const scope = `<h5>In-Scope URLs</h5>${hosts('https://a.example')}`
+      + `<p><strong>User Accounts:</strong></p>${creds}<ul><li>password: hunter2</li></ul>`
+      + `<h5>In-Scope Subnets</h5>${hosts('10.0.0.0/24')}`
+      + creds // no heading at all
+      + `<h5>In-Scope AWS Accounts</h5>${hosts('123456789012')}`
+      + '<p>The following activities were out of scope for this engagement:</p>';
+    const html = scopeHtml(await letterHtml({ scope }));
+    for (const s of ['tester@', 'Credential', 'User Accounts', 'hunter2', 'In-Scope']) {
+      assert.ok(!html.includes(s), `letter contains "${s}"`);
+    }
+    for (const s of ['https://a.example', '10.0.0.0/24', '123456789012']) assert.ok(html.includes(s), `letter is missing "${s}"`);
+  });
+
   await test('a scope written as paragraphs or bullets is printed as written', async () => {
     const scope = '<p>In-Scope URL(s):</p><ul><li>https://a.example</li><li>Mobile app (iOS)</li></ul>'
       + '<p>The following activities were out of scope for this engagement:</p><ul><li>x</li></ul>';

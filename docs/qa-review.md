@@ -47,9 +47,11 @@ routes/plextrac-webhook.js          verify signature → ack 200 → look up map
    └─ if report status === PLEXTRAC_RELEASED_STATUS → postReleaseAnnouncement(...)  [fire-and-forget]
         ▼
         pipeline/qa-released.js
-          post msg ":white_check_mark: Client: {client} - {report} released
-          {@reviewers}. Release QA done by {name} :white_check_mark:".
+          edit the report's "approved — ready for release" message into
+          ":white_tick: Client: {client} - {report} - Second QA by {approver}
+          - Release by {name} :white_tick:" and react to it with a tick.
           {name} = the actor who released it, resolved cuid → name. No write-back.
+          No approved message on record → the same line is posted as a new message.
           Then the same empty-custom-field check (louder wording — it has already
           gone out), and the PDF export to Google Drive, both replied into that
           thread.
@@ -58,9 +60,17 @@ routes/plextrac-webhook.js          verify signature → ack 200 → look up map
 Reaching the second-round status means the first round of QA is **done**, so that
 announcement pings the second-round reviewers (`SLACK_SECOND_ROUND_QA_MENTIONS`,
 default list in `pipeline/qa-second-round.js`) and credits whoever performed it.
-Likewise, reaching the released status posts the release announcement, pinging the
-release reviewers (`SLACK_RELEASED_QA_MENTIONS`, default in `pipeline/qa-released.js`)
-and crediting whoever released it. Both share the second-round channel by default.
+Reaching Approved posts "approved — ready for release" to the ready-for-release
+channel, pinging the publishers, and records that message per report
+(`lib/approved-message-store.js`, MongoDB `approved_announcements`). Reaching the
+released status then **edits that message** rather than posting another: it credits
+the approver ("Second QA by") and whoever released it, swaps the green circles for
+`:white_tick:`, and adds a tick reaction. The edit pings no one. A report approved
+before messages were recorded (or whose message was deleted) gets the release line as
+a new message instead, without "Second QA by". The reaction needs the Slack app's
+`reactions:write` scope; without it the release still goes ahead and the log says so.
+If the workspace has no `:white_tick:` emoji, the reaction falls back to
+`:white_check_mark:`.
 
 The QA review runs **fire-and-forget** so the (slower, billable) review never
 blocks the fast ClickUp status sync. The report CUID → `{clientId, reportId}`

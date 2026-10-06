@@ -1,7 +1,7 @@
-// Report-released announcement: posted when a Plextrac report reaches the released
+// Report-released announcement: made when a Plextrac report reaches the released
 // status (default "Published"). Reaching it means the report has cleared release QA and
-// gone out, so we ping the release reviewers and credit whoever released it (the actor
-// who made this status change).
+// gone out, so the report's "approved — ready for release" message is edited to credit
+// whoever approved it and whoever released it (the actor who made this status change).
 //
 // Like the second-round announcement (pipeline/qa-second-round), this does NO AI review
 // and never touches the Plextrac report — it is a single Slack notification, plus the
@@ -28,26 +28,66 @@ const { READY_FOR_RELEASE_CHANNEL } = require('./status-guard');
 
 const RELEASED_QA_CHANNEL = READY_FOR_RELEASE_CHANNEL();
 
-// Who is @-mentioned on a release announcement: the publishers
-// (config/report-status-permissions.js) other than the one who released it — Ben
-// releases, Alice is tagged, and the other way round (lib/slack-people.js). The old
-// fixed list and SLACK_RELEASED_QA_MENTIONS are no longer used.
-const people = require('../lib/slack-people');
+// The report's "approved — ready for release" message (pipeline/qa-approved.js), which
+// the release edits rather than posting its own.
+const approvedMessages = require('../lib/approved-message-store');
 
 // Escapes the three characters special in Slack mrkdwn link text.
 function slackEscape(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Builds the release announcement, matching the other QA announcements (client and
-// report hyperlinked), bookended with a :white_check_mark::
-//   :white_check_mark: Client: <client> - <report> released <@u1> <@u2>…. Release QA done by <name> :white_check_mark:
-function buildReleaseMessage({ clientName, clientUrl, reportName, reportUrl, releaseQaName, mentions = [] }) {
+// The emoji either side of the release line, replacing the approved message's green
+// circles, and the tick reaction added to the message on release.
+const RELEASED_EMOJI = ':white_tick:';
+const RELEASED_REACTION = 'white_tick';
+// Reacted with instead if Slack doesn't know RELEASED_REACTION (invalid_name).
+const FALLBACK_REACTION = 'white_check_mark';
+
+// Ticks the release message. Needs the bot's `reactions:write` scope; without it the
+// release goes ahead and the log says what to add. Never throws.
+async function addReleasedReaction(channel, ts, reportId) {
+  try {
+    await slack.addReaction(channel, ts, RELEASED_REACTION);
+  } catch (err) {
+    if (/invalid_name/.test(err.message)) {
+      try {
+        await slack.addReaction(channel, ts, FALLBACK_REACTION);
+        return;
+      } catch (err2) {
+        err = err2;
+      }
+    }
+    log.warn('Could not add the release tick reaction', {
+      reason: err.message, report_id: reportId,
+      ...(/missing_scope/.test(err.message) ? { fix: 'add the reactions:write scope to the Slack app and reinstall it' } : {}),
+    });
+  }
+}
+
+// Builds the release line, client and report hyperlinked as in the other QA announcements:
+//   :white_tick: Client: <client> - <report> - Second QA by <approver> - Release by <releaser> :white_tick:
+// It replaces the report's "approved — ready for release" message in place, so it
+// pings no one. "Second QA by" is left out when the approver isn't known (a report
+// approved before the approved message was recorded).
+function buildReleaseMessage({ clientName, clientUrl, reportName, reportUrl, secondQaName, releaseQaName }) {
   const client = clientUrl ? `<${clientUrl}|${slackEscape(clientName)}>` : slackEscape(clientName);
   const report = reportUrl ? `<${reportUrl}|${slackEscape(reportName)}>` : slackEscape(reportName);
-  const pings = (mentions || []).map(id => `<@${id}>`).join(' ');
-  const mentionPart = pings ? ` ${pings}` : '';
-  return `:white_check_mark: Client: ${client} - ${report} released${mentionPart}. Release QA done by ${slackEscape(releaseQaName)} :white_check_mark:`;
+  const secondQa = secondQaName ? ` - Second QA by ${slackEscape(secondQaName)}` : '';
+  return `${RELEASED_EMOJI} Client: ${client} - ${report}${secondQa} - Release by ${slackEscape(releaseQaName)} ${RELEASED_EMOJI}`;
+}
+
+// The report's approved message, or null if there isn't one on record (or the store
+// can't be reached — the release then posts a new message rather than failing).
+async function findApprovedMessage(reportId) {
+  try {
+    return await approvedMessages.get(reportId);
+  } catch (err) {
+    log.warn('Could not look up the Approved announcement — posting the release as a new message', {
+      reason: err.message, report_id: reportId,
+    });
+    return null;
+  }
 }
 
 // The actor who released the report (the user who moved it into the released status),
@@ -87,31 +127,54 @@ async function resolveClientName(clientId, fallback) {
   }
 }
 
-// Posts the release announcement to the release channel. Best-effort — any failure is
-// logged and swallowed so it never disrupts the rest of the webhook.
+// Announces the release by editing the report's "approved — ready for release" message
+// into the release line; its thread then carries the release's notices and exports.
+// With no approved message to edit (approved before they were recorded, or since
+// deleted), the release line is posted as a new message instead. Best-effort — any
+// failure is logged and swallowed so it never disrupts the rest of the webhook.
 async function postReleaseAnnouncement({ clientId, clientName, clientUrl, reportName, reportUrl, actorCuid, reportId, report }) {
-  const releaser = await resolveReleaser(actorCuid);
-  const releaseQaName = releaser.name;
-  // Unknown releaser: every publisher is tagged.
-  const [resolvedClientName, mentions] = await Promise.all([
+  const [releaser, resolvedClientName, approvedMessage] = await Promise.all([
+    resolveReleaser(actorCuid),
     resolveClientName(clientId, clientName),
-    people.publisherMentions({ except: releaser.email }),
+    findApprovedMessage(reportId),
   ]);
-  const text = buildReleaseMessage({ clientName: resolvedClientName, clientUrl, reportName, reportUrl, releaseQaName, mentions });
+  const releaseQaName = releaser.name;
+  const text = buildReleaseMessage({
+    clientName: resolvedClientName, clientUrl, reportName, reportUrl,
+    secondQaName: approvedMessage?.approverName, releaseQaName,
+  });
+
+  let channel = RELEASED_QA_CHANNEL;
   let threadTs = null;
-  try {
-    threadTs = await slack.postMessage(RELEASED_QA_CHANNEL, text);
-    log.info('Release announcement posted', { report_id: reportId, release_qa: releaseQaName });
-  } catch (err) {
-    log.error('Failed to post release announcement to Slack', { reason: err.message, report_id: reportId });
+  if (approvedMessage) {
+    try {
+      if (await slack.updateMessage(approvedMessage.channel, approvedMessage.ts, text)) {
+        channel = approvedMessage.channel;
+        threadTs = approvedMessage.ts;
+        log.info('Release announcement: Approved message edited', { report_id: reportId, release_qa: releaseQaName });
+      }
+    } catch (err) {
+      log.error('Failed to edit the Approved message — posting the release as a new message', {
+        reason: err.message, report_id: reportId,
+      });
+    }
   }
+  if (!threadTs) {
+    try {
+      threadTs = await slack.postMessage(channel, text);
+      log.info('Release announcement posted', { report_id: reportId, release_qa: releaseQaName });
+    } catch (err) {
+      log.error('Failed to post release announcement to Slack', { reason: err.message, report_id: reportId });
+    }
+  }
+  if (threadTs) await addReleasedReaction(channel, threadTs, reportId);
 
   // Same empty-custom-field check the earlier rounds run, reported in this
   // announcement's thread and @-ing whoever released the report. The release wording
   // is deliberately louder: this one went out with the holes still in it.
   // Best-effort and self-logging — it never throws.
   await postEmptyFieldsNotice({
-    report, channel: RELEASED_QA_CHANNEL, threadTs, actorCuid, reportId, round: 'released',
+    report, channel, threadTs, actorCuid, reportId, round: 'released',
   });
 
   // File the release: the full report PDF in Google Drive, plus the client documents
@@ -123,7 +186,7 @@ async function postReleaseAnnouncement({ clientId, clientName, clientUrl, report
     reportId,
     clientName: resolvedClientName,
     reportName,
-    channel: RELEASED_QA_CHANNEL,
+    channel,
     threadTs,
   });
 }

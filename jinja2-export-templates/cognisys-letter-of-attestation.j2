@@ -28,8 +28,9 @@
 {#- (LINKS and APP NAMES) - see SCOPE below for how the narrative is read. -#}
 {%- set SCOPE_NARRATIVE     = "Scope" -%}           {#- narrative the in-scope hosts are read from -#}
 {%- set SCOPE_END           = "The following activities were out of scope for this engagement" -%}   {#- everything from here on is left out -#}
-{%- set SCOPE_DROP_LINES    = ["In-Scope URLs", "In-Scope URL(s)", "In-Scope URL"] -%}   {#- headings removed from the host list -#}
-{%- set SCOPE_STOP_HEADINGS = ["User Authentication"] -%}   {#- a section from one of these headings on is left out: it lists test accounts, not hosts. Set [] to include it. -#}
+{%- set SCOPE_DROP_LINES    = ["In-Scope", "In Scope"] -%}   {#- a heading starting with one of these ("In-Scope URLs", "In-Scope Subnets", ...) is removed: the letter labels the section "Host(s)" itself -#}
+{%- set SCOPE_SKIP_WORDS    = ["authentication", "account", "credential", "password", "username", "login"] -%}   {#- the test accounts never reach the letter: a heading containing one of these words ("User Authentication", "User Accounts") starts a section left out up to the next heading - unless it is an "In-Scope" heading. Set [] to include them. -#}
+{%- set SCOPE_SKIP_TABLES   = ["credential", "password", "username", "login"] -%}   {#- a table whose first cell contains one of these ("Credentials | Role") is left out wherever it is, heading or not -#}
 {%- set SCOPE_TABLE_HEADERS = true -%}              {#- true = the first row of each scope table is its header row (URL | Notes): always printed, and a table with nothing under it is left out -#}
 {%- set SCOPE_DROP_BLANK_ROWS = true -%}            {#- true = table rows left blank in PlexTrac's scope template are not printed -#}
 {%- set COUNT_SEVERITIES    = ["Critical", "High", "Medium", "Low", "Informational"] -%}   {#- severities counted, in print order -#}
@@ -169,29 +170,33 @@
 {%- set total_issues = num(nn.total)|string ~ (" issue" if nn.total == 1 else " issues") -%}
 
 {#- ========================= (LINKS and APP NAMES) =========================
-    Printed straight from the SCOPE_NARRATIVE narrative - tables and all - as
-    PlexTrac holds it:
+    Printed straight from the SCOPE_NARRATIVE narrative - tables, bullets and
+    all - as PlexTrac holds it:
 
       <h5>In-Scope URLs</h5>
       <figure class="table"><table>
         URL | Notes                          <- header row, PlexTrac's fill
         https://app.example.com | Portal     <- one row per host
       </table></figure>
-      <h5>User Authentication</h5> <table> test accounts </table>
+      <h5>User Authentication</h5> <table> Credentials | Role ... </table>
       <p>The following activities were out of scope for this engagement:</p> ...
 
     The narrative is taken apart into its blocks - headings, paragraphs, lists,
     whole tables - and printed in order, leaving out:
       - everything from SCOPE_END on;
-      - everything from a SCOPE_STOP_HEADINGS block on (the test accounts);
-      - SCOPE_DROP_LINES blocks (the "In-Scope URLs" heading: the letter labels
-        the section "Host(s)" itself);
+      - the test accounts (SCOPE_SKIP_WORDS): a heading such as "User
+        Authentication" and everything under it up to the next heading, and
+        any "Credentials | Role" table even without its heading
+        (SCOPE_SKIP_TABLES);
+      - SCOPE_DROP_LINES headings ("In-Scope URLs": the letter labels the
+        section "Host(s)" itself);
       - blocks with no text (the template's empty spacer paragraphs), and with
         SCOPE_DROP_BLANK_ROWS, table rows left blank in the template.
-    What is kept is output as PlexTrac's own HTML; the stylesheet only fits it
-    to the page (.scope-table). A table with no host rows under its header -
-    a scope left unfilled - is left out, so an empty scope prints the red
-    placeholder rather than an empty table.
+    What is kept is output as PlexTrac's own HTML, inline styles and all; the
+    stylesheet only supplies what PlexTrac's editor draws round it (.scope-table).
+    A table with no host rows under its header - a scope left unfilled - is
+    left out, so an empty scope prints the red placeholder rather than an
+    empty table.
 =========================================================================== -#}
 {%- set ss.scope = "" -%}
 {%- set _es = REPORT_INFO.exec_summary if REPORT_INFO.exec_summary
@@ -206,15 +211,20 @@
 {%- endfor -%}
 {%- set ss.scope = ss.scope.split(SCOPE_END)[0] -%}
 
-{%- set _drop = [] -%}{%- for _l in SCOPE_DROP_LINES -%}{%- set _ = _drop.append(_l|lower) -%}{%- endfor -%}
-{%- set _stop = [] -%}{%- for _l in SCOPE_STOP_HEADINGS -%}{%- set _ = _stop.append(_l|lower) -%}{%- endfor -%}
-{%- set sc = namespace(stopped=false, tables=0, text="", table="", rows=0) -%}
+{%- set sc = namespace(skipping=false, hit=false, tables=0, text="", table="", rows=0) -%}
 {%- set scope_blocks = [] -%}   {#- the HTML printed under "Host(s)", in order -#}
+
+{#- Sets sc.hit when the lower-cased text contains one of the words. -#}
+{%- macro _skip_word(text, words) -%}
+  {%- set sc.hit = false -%}
+  {%- for _w in words if _w|lower in text -%}{%- set sc.hit = true -%}{%- endfor -%}
+{%- endmacro -%}
 
 {#- Everything outside tables, one block per heading / paragraph / list. A block
     runs up to and including its closing tag; striptags turns &nbsp; into a
-    space and trim removes it, so empty spacer blocks have no text. Printing the
-    kept blocks in order reproduces PlexTrac's HTML, minus what was left out. -#}
+    space and trim removes it, so empty spacer blocks have no text. A heading
+    is an <h1>-<h6>, or a short line of text naming the test accounts
+    ("User Accounts:") - that starts a skipped section too. -#}
 {%- macro _scope_blocks(html) -%}
   {%- set sc.text = html -%}
   {%- for _closer in ["</p>", "</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</ul>", "</ol>", "</div>", "</blockquote>", "</pre>", "</figure>"] -%}
@@ -222,9 +232,23 @@
   {%- endfor -%}
   {%- for _block in sc.text.split("@@SCOPE-BLOCK@@") -%}
     {%- set ss.key = _block|striptags|trim|lower|replace(":", "")|trim -%}
-    {%- if ss.key in _stop -%}{%- set sc.stopped = true -%}{%- endif -%}
-    {%- if ss.key and not sc.stopped and ss.key not in _drop -%}
-      {%- set _ = scope_blocks.append(_block) -%}
+    {%- set ss.tag = (_block|trim|lower)[:3] -%}
+    {%- set ss.list = ss.tag in ["<ul", "<ol"] -%}
+    {%- if ss.key -%}
+      {%- set ss.drop = false -%}
+      {%- if not ss.list and ss.key|length <= 40 -%}
+        {%- for _l in SCOPE_DROP_LINES if ss.key.startswith(_l|lower) -%}{%- set ss.drop = true -%}{%- endfor -%}
+      {%- endif -%}
+      {{- _skip_word(ss.key, SCOPE_SKIP_WORDS) -}}
+      {%- set sc.hit = sc.hit and not ss.drop -%}
+      {%- if ss.tag in ["<h1", "<h2", "<h3", "<h4", "<h5", "<h6"] -%}
+        {%- set sc.skipping = sc.hit -%}
+      {%- elif sc.hit and not ss.list and ss.key|length <= 40 -%}
+        {%- set sc.skipping = true -%}
+      {%- endif -%}
+      {%- if not sc.skipping and not ss.drop -%}
+        {%- set _ = scope_blocks.append(_block) -%}
+      {%- endif -%}
     {%- endif -%}
   {%- endfor -%}
 {%- endmacro -%}
@@ -233,9 +257,12 @@
 {{- _scope_blocks(_parts[0]) -}}
 {%- for _part in _parts[1:] -%}
   {%- set _split = _part.split("</table>", 1) -%}
-  {%- if not sc.stopped -%}
+  {%- set _rows = _split[0].split("<tr") -%}
+  {#- the first cell's text: "URL", "IP Range" - or "Credentials" -#}
+  {%- set ss.first = ("<td" ~ (_rows[1] if _rows|length > 1 else "").replace("<th", "<td").split("<td", 1)[-1])|striptags|trim|lower -%}
+  {{- _skip_word(ss.first, SCOPE_SKIP_TABLES) -}}
+  {%- if not sc.skipping and not sc.hit -%}
     {#- The table as PlexTrac wrote it, minus the rows left blank. -#}
-    {%- set _rows = _split[0].split("<tr") -%}
     {%- set sc.table = "<table" ~ _rows[0] -%}
     {%- set sc.rows = 0 -%}
     {%- for _row in _rows[1:] -%}
@@ -327,28 +354,34 @@ p { margin: 0; }
 .sp-11     { height: 11.97pt; }   /* empty 11pt line */
 .sp-10     { height: 10.88pt; }   /* empty 10pt line */
 
-/* Host(s): the Scope narrative's own HTML, printed as PlexTrac holds it - its
-   table, header fill and cell border colours included. These rules only fit it
-   to the letter: the full 452.25pt text width, the letter's font, and the 1px
-   grid PlexTrac's editor draws round every cell (each cell's inline
-   border-color still colours it). The px widths and heights PlexTrac puts on
-   cells are sized for its editor, not an A4 page, so they give way - an
-   !important rule beats an inline style. */
+/* Host(s): the Scope narrative's own HTML, printed as PlexTrac holds it. Its
+   inline styles are left to apply as written - column widths, row heights,
+   padding, header fill, text and border colours - so the table has PlexTrac's
+   proportions (1px = 0.75pt, as on screen) rather than the page's full width.
+   These rules are the defaults PlexTrac's editor (CKEditor 5) draws with, for
+   whatever a cell does not set itself: a 1px grey grid, 0.4em padding, bullets
+   indented 40px. The table is left-aligned under "Host(s)"; for CKEditor's
+   centred tables, set .scope-table table's margin to "0 auto". As in a browser,
+   a column widens past its PlexTrac width for a URL that won't fit it, and the
+   URL only breaks at its own hyphens and slashes, or if it outgrows the page. */
 .hosts-head { font-size: 9pt; color: var(--blue); min-height: 14.25pt; }
 .scope { margin-top: 4pt; }
 .scope p, .scope li { margin: 0; }
-.scope ul, .scope ol { margin: 2pt 0 4pt 14pt; padding: 0; }
+.scope ul, .scope ol { margin: 0 0 4pt; padding-left: 30pt; }
+.scope ul { list-style-type: disc; }
 .scope h1, .scope h2, .scope h3, .scope h4, .scope h5, .scope h6 {
   font-size: 10pt; font-weight: bold; margin: 6pt 0 3pt; color: var(--ink);
 }
 .scope-table { margin: 2pt 0 6pt; }
 .scope-table table {
-  width: 100% !important; table-layout: auto; border-collapse: collapse; border: 0;
+  table-layout: auto; border-collapse: collapse; border-spacing: 0;
+  border: 1px double hsl(0, 0%, 70%); max-width: 100%; margin: 0;
 }
 .scope-table td, .scope-table th {
-  border: 0.75pt solid #BFBFBF; padding: 2pt 5pt; vertical-align: top; text-align: left;
-  width: auto !important; height: auto !important; overflow-wrap: anywhere;
+  border: 1px solid hsl(0, 0%, 75%); padding: 0.4em; min-width: 2em;
+  vertical-align: middle; text-align: left; overflow-wrap: break-word;
 }
+.scope-table th { font-weight: bold; }
 .scope-table tr { break-inside: avoid; page-break-inside: avoid; }
 
 /* A placeholder the template could not fill. */

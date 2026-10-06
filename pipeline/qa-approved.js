@@ -7,8 +7,12 @@
 //
 // Like the release announcement, it also runs the empty-custom-field check in its
 // thread. Nothing is exported until the report is Published (pipeline/qa-released.js).
+//
+// The message is remembered per report (lib/approved-message-store.js) so that, on
+// release, it is edited into the release line rather than a second message posted.
 
 const slack = require('../lib/slack');
+const approvedMessages = require('../lib/approved-message-store');
 const people = require('../lib/slack-people');
 const { postEmptyFieldsNotice } = require('./qa-review/empty-fields');
 const { resolveReleaseQaName, resolveClientName } = require('./qa-released');
@@ -51,6 +55,15 @@ async function postApprovedAnnouncement({ clientId, clientName, clientUrl, repor
     log.info('Approved announcement posted', { report_id: reportId, approved_by: approverName });
   } catch (err) {
     log.error('Failed to post Approved announcement to Slack', { reason: err.message, report_id: reportId });
+  }
+  if (threadTs) {
+    try {
+      await approvedMessages.set({ reportId, channel, ts: threadTs, approverName });
+    } catch (err) {
+      log.warn('Could not record the Approved announcement — the release will post a new message instead of editing it', {
+        reason: err.message, report_id: reportId,
+      });
+    }
   }
   await postEmptyFieldsNotice({ report, channel, threadTs, actorCuid, reportId, round: 'approved' });
 }

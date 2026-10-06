@@ -58,18 +58,20 @@ CLIENT_DOCS_LETTER_OF_ATTESTATION_ENABLED=true
 |---|---|
 | (CLIENT NAME) | the Plextrac client's name, in all four places |
 | (MONTH YEAR) | the month the letter is issued (the release date, UK time), e.g. `September 2026` |
-| (LINKS and APP NAMES) | the **Scope** narrative's in-scope table, one row per host: the URL on the left, its notes (and any further columns, joined with " – ") on the right |
+| (LINKS and APP NAMES) | the **Scope** narrative's hosts, printed as Plextrac shows them: its own table (column widths, header fill, colours) or its own bullet list |
 | (TOTAL ISSUE COUNT) | the number of findings, e.g. `4 issues` |
 | (INSERT ISSUE COUNT HERE) | per severity, e.g. `1 Critical, 1 High, 1 Medium and 1 Informational`; a severity with no findings is left out |
 
 How the Scope narrative is read is set at the top of the template:
 
 - **`SCOPE_END`:** everything from "The following activities were out of scope for this engagement" onwards is dropped.
-- **`SCOPE_DROP_LINES`:** the "In-Scope URLs" heading is removed.
-- **`SCOPE_TABLE_HEADERS`:** each table's first row is its header (URL | Notes) and isn't a host.
+- **`SCOPE_DROP_LINES`:** headings starting "In-Scope" ("In-Scope URLs", "In-Scope Subnets") are removed; the letter labels the section "Host(s)" itself.
+- **`SCOPE_SKIP_WORDS`:** the test accounts never reach a letter sent to third parties. A heading containing one of these words ("User Authentication", "User Accounts:") starts a section that is left out, up to the next heading. An "In-Scope" heading never does, so "In-Scope AWS Accounts" is kept.
+- **`SCOPE_SKIP_TABLES`:** a table whose first cell names credentials ("Credentials | Role") is left out even without a heading above it.
+- **`SCOPE_TABLE_HEADERS`:** each table's first row is its header (URL | Notes): always printed, and a table with nothing under it is left out.
 - **Blank rows:** rows left blank in Plextrac's scope template are skipped.
-- **`SCOPE_STOP_HEADINGS`:** a section starting at one of these headings is left out. It defaults to `["User Authentication"]`, because that table lists the test accounts (emails and roles), not hosts, and doesn't belong in a letter sent to third parties. Set it to `[]` to include it.
-- **Scopes without a table:** a scope written as paragraphs or bullets gives one host per line.
+- **Layout:** Plextrac's HTML is printed as-is, inline styles included, so the table keeps Plextrac's column widths, row heights, padding and colours. The stylesheet only supplies the defaults Plextrac's editor (CKEditor 5) draws with. Tables are left-aligned under "Host(s)"; the CSS comment says how to centre them.
+- **Scopes without a table:** a scope written as paragraphs or bullets is printed as written.
 
 Anything the template can't fill prints its original placeholder **in red**, so a
 letter never goes out with a silent gap. This includes a report whose scope table was
