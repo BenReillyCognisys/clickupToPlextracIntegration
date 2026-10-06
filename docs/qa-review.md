@@ -48,8 +48,8 @@ routes/plextrac-webhook.js          verify signature → ack 200 → look up map
         ▼
         pipeline/qa-released.js
           edit the report's "approved — ready for release" message into
-          ":white_tick: Client: {client} - {report} - Second QA by {approver}
-          - Release by {name} :white_tick:" and react to it with a tick.
+          ":white_check_mark: Client: {client} - {report} - Second QA by {approver}
+          - Release by {name} :white_check_mark:" and react to it with a tick.
           {name} = the actor who released it, resolved cuid → name. No write-back.
           No approved message on record → the same line is posted as a new message.
           Then the same empty-custom-field check (louder wording — it has already
@@ -65,12 +65,10 @@ channel, pinging the publishers, and records that message per report
 (`lib/approved-message-store.js`, MongoDB `approved_announcements`). Reaching the
 released status then **edits that message** rather than posting another: it credits
 the approver ("Second QA by") and whoever released it, swaps the green circles for
-`:white_tick:`, and adds a tick reaction. The edit pings no one. A report approved
+`:white_check_mark:`, and adds a tick reaction. The edit pings no one. A report approved
 before messages were recorded (or whose message was deleted) gets the release line as
 a new message instead, without "Second QA by". The reaction needs the Slack app's
 `reactions:write` scope; without it the release still goes ahead and the log says so.
-If the workspace has no `:white_tick:` emoji, the reaction falls back to
-`:white_check_mark:`.
 
 The QA review runs **fire-and-forget** so the (slower, billable) review never
 blocks the fast ClickUp status sync. The report CUID → `{clientId, reportId}`

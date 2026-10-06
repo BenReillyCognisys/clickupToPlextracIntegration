@@ -478,14 +478,14 @@ test('hyperlinks names, credits second QA and release, and bookends with a tick'
       secondQaName: 'Punit Sharma',
       releaseQaName: 'Alice Elvin',
     }),
-    ':white_tick: Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> - Second QA by Punit Sharma - Release by Alice Elvin :white_tick:',
+    ':white_check_mark: Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> - Second QA by Punit Sharma - Release by Alice Elvin :white_check_mark:',
   );
 });
 
 test('leaves out "Second QA by" when the approver is not known', () => {
   eq(
     buildReleaseMessage({ clientName: 'Acme', reportName: 'Report 5', releaseQaName: 'Grace' }),
-    ':white_tick: Client: Acme - Report 5 - Release by Grace :white_tick:',
+    ':white_check_mark: Client: Acme - Report 5 - Release by Grace :white_check_mark:',
   );
 });
 
@@ -593,9 +593,9 @@ function resetSlack() { posts.length = 0; replies.length = 0; updates.length = 0
     eq(posts.length, 0);
     eq(updates, [{
       channel: 'C-READY', ts: 'ts-approved',
-      text: ':white_tick: Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> - Second QA by Punit Sharma - Release by Alice Elvin :white_tick:',
+      text: ':white_check_mark: Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> - Second QA by Punit Sharma - Release by Alice Elvin :white_check_mark:',
     }]);
-    eq(reactions, [{ channel: 'C-READY', ts: 'ts-approved', name: 'white_tick' }]);
+    eq(reactions, [{ channel: 'C-READY', ts: 'ts-approved', name: 'white_check_mark' }]);
     eq(replies.length, 1);
     eq(replies[0].channel, 'C-READY');
     eq(replies[0].threadTs, 'ts-approved');
@@ -605,8 +605,8 @@ function resetSlack() { posts.length = 0; replies.length = 0; updates.length = 0
     resetSlack();
     await postReleaseAnnouncement({ ...ANNOUNCEMENT, actorCuid: 'cuid-ben', report: { custom_fields: [] } });
     eq(updates.length, 0);
-    eq(posts[0].text, ':white_tick: Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> - Release by Ben Reilly :white_tick:');
-    eq(reactions, [{ channel: posts[0].channel, ts: 'ts-1', name: 'white_tick' }]);
+    eq(posts[0].text, ':white_check_mark: Client: <https://x/client/1|Acme Corp> - <https://x/client/1/report/2|Web App Pentest> - Release by Ben Reilly :white_check_mark:');
+    eq(reactions, [{ channel: posts[0].channel, ts: 'ts-1', name: 'white_check_mark' }]);
   });
 
   await atest('an approved message since deleted falls back to a new message', async () => {
@@ -623,11 +623,7 @@ function resetSlack() { posts.length = 0; replies.length = 0; updates.length = 0
     eq(posts[0].text.includes('Second QA by Punit Sharma - Release by Ben Reilly'), true);
   });
 
-  await atest('the tick falls back to white_check_mark if Slack has no white_tick, and never blocks the release', async () => {
-    resetSlack();
-    reactionError = (name) => (name === 'white_tick' ? 'invalid_name' : null);
-    await postReleaseAnnouncement({ ...ANNOUNCEMENT, report: REPORT_WITH_GAPS });
-    eq(reactions.map((r) => r.name), ['white_check_mark']);
+  await atest('a tick reaction Slack refuses never blocks the release', async () => {
     resetSlack();
     reactionError = () => 'missing_scope';
     await postReleaseAnnouncement({ ...ANNOUNCEMENT, report: REPORT_WITH_GAPS });

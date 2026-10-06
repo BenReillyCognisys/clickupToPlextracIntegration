@@ -37,12 +37,12 @@ function slackEscape(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// The emoji either side of the release line, replacing the approved message's green
-// circles, and the tick reaction added to the message on release.
-const RELEASED_EMOJI = ':white_tick:';
-const RELEASED_REACTION = 'white_tick';
-// Reacted with instead if Slack doesn't know RELEASED_REACTION (invalid_name).
-const FALLBACK_REACTION = 'white_check_mark';
+// The tick either side of the release line, replacing the approved message's green
+// circles, and the reaction added to the message on release. A name the workspace
+// doesn't have (":white_tick:" isn't one) prints as plain text, so this is Slack's
+// standard ✅.
+const RELEASED_REACTION = 'white_check_mark';
+const RELEASED_EMOJI = `:${RELEASED_REACTION}:`;
 
 // Ticks the release message. Needs the bot's `reactions:write` scope; without it the
 // release goes ahead and the log says what to add. Never throws.
@@ -50,14 +50,6 @@ async function addReleasedReaction(channel, ts, reportId) {
   try {
     await slack.addReaction(channel, ts, RELEASED_REACTION);
   } catch (err) {
-    if (/invalid_name/.test(err.message)) {
-      try {
-        await slack.addReaction(channel, ts, FALLBACK_REACTION);
-        return;
-      } catch (err2) {
-        err = err2;
-      }
-    }
     log.warn('Could not add the release tick reaction', {
       reason: err.message, report_id: reportId,
       ...(/missing_scope/.test(err.message) ? { fix: 'add the reactions:write scope to the Slack app and reinstall it' } : {}),
@@ -66,7 +58,7 @@ async function addReleasedReaction(channel, ts, reportId) {
 }
 
 // Builds the release line, client and report hyperlinked as in the other QA announcements:
-//   :white_tick: Client: <client> - <report> - Second QA by <approver> - Release by <releaser> :white_tick:
+//   :white_check_mark: Client: <client> - <report> - Second QA by <approver> - Release by <releaser> :white_check_mark:
 // It replaces the report's "approved — ready for release" message in place, so it
 // pings no one. "Second QA by" is left out when the approver isn't known (a report
 // approved before the approved message was recorded).
