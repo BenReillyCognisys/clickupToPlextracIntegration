@@ -269,6 +269,19 @@ const tableRows = (html) => [...scopeHtml(html).matchAll(/<tr>([\s\S]*?)<\/tr>/g
     for (const h of sections) assert.ok(!h.includes('Affected Assets') && !h.includes('<li>'), h);
   }, { skip: noJinja });
 
+  await test('Status: left out altogether when no finding is Closed', async () => {
+    const withStatus = (status) => ({ ...fx.fullFindings[2], status });
+    const sections = await fullFindingsHtml([withStatus('Open'), withStatus('In Process'), withStatus(''), withStatus(undefined)]);
+    for (const h of sections) assert.ok(!h.includes('Status'), h);
+  }, { skip: noJinja });
+
+  await test('Status: Open or Closed on every finding once one is Closed', async () => {
+    const withStatus = (status) => ({ ...fx.fullFindings[2], status });
+    const sections = await fullFindingsHtml([withStatus('Open'), withStatus(' closed '), withStatus('In Process'), withStatus(undefined)]);
+    eq(sections.map((h) => /<h3>Status<\/h3>\s*<p class="status"><span class="status-value">([^<]*)<\/span><\/p>/.exec(h)?.[1]),
+      ['Open', 'Closed', 'Open', 'Open']);
+  }, { skip: noJinja });
+
   await test('a screenshot already inlined as data: prints as an image', async () => {
     const png = 'data:image/png;base64,iVBORw0KGgo=';
     const f = { ...fx.fullFindings[1], fields: { proof_of_concept: { key: 'proof_of_concept', label: 'Technical Details', value: `<p><img src="${png}" /></p>` } } };

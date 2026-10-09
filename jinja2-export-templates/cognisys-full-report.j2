@@ -469,6 +469,17 @@
     {%- endif -%}
   {%- endif -%}
 {%- endfor -%}
+
+{#- Status (Open / Closed) is printed on each finding only when at least one finding
+    in the report is Closed in PlexTrac - a report where everything is still open
+    (a first test, not a retest) shows no Status at all. Anything that is not Closed
+    ("Open", "In Process", blank) prints as Open. -#}
+{%- set bb.show_status = false -%}
+{%- for f in report_findings -%}
+  {%- if (f.status|default("", true)|string|trim|lower) == "closed" -%}
+    {%- set bb.show_status = true -%}
+  {%- endif -%}
+{%- endfor -%}
 <!DOCTYPE html>
 <html lang="en-GB">
 <head>
@@ -723,6 +734,10 @@ td.finding-sev {
 ul.assets { margin: 6pt 0; }
 .finding ul.assets > li { line-height: var(--lh-tight); }
 
+/* Status: Open / Closed, only on a report where something has been closed. */
+.finding p.status { margin: 0 0 var(--finding-para-space); }
+.status-value { font-weight: 500; color: var(--brand); }
+
 /* CVSS score: the score in the brand colour, the vector under it in mono. */
 .finding p.cvss { margin: 0 0 var(--finding-para-space); }
 .cvss-score { font-weight: 500; color: var(--brand); }
@@ -904,6 +919,11 @@ data             {{ "yes" if data is defined else "no" }}</pre>
       <td class="finding-sev">{{ f.severity|replace("rmational", "")|e }}</td>
     </tr>
   </table>
+
+  {%- if bb.show_status %}
+  <h3>Status</h3>
+  <p class="status"><span class="status-value">{{ "Closed" if (f.status|default("", true)|string|trim|lower) == "closed" else "Open" }}</span></p>
+  {%- endif %}
 
   {#- CVSS score, newest CVSS version first. A version counts as set when it has a
       vector or a score above 0.0 - an untouched PlexTrac calculator has neither. -#}
