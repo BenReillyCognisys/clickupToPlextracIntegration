@@ -40,9 +40,11 @@ const apiLimiter = rateLimit({
 });
 
 // Both webhook routes need raw body buffers for HMAC signature verification.
+// 5mb, not 100kb: ClickUp sends before/after history_items, so an update to a task
+// with a long description (e.g. one carrying our auth-form block) easily exceeds 100kb.
 app.post('/webhook/clickup',
   webhookLimiter,
-  express.raw({ type: 'application/json', limit: '100kb' }),
+  express.raw({ type: 'application/json', limit: '5mb' }),
   require('./routes/clickup-webhook')
 );
 
@@ -50,7 +52,7 @@ app.post('/webhook/clickup',
 // enters the QA status) the automated AI QA review — see routes/plextrac-webhook.js.
 app.post('/webhook/plextrac',
   webhookLimiter,
-  express.raw({ type: 'application/json', limit: '100kb' }),
+  express.raw({ type: 'application/json', limit: '5mb' }),
   require('./routes/plextrac-webhook')
 );
 
