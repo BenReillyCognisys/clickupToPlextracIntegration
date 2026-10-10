@@ -179,6 +179,12 @@ app.use('/api/plextrac', clientMergeLimiter, require('./routes/client-merge'));
 //   GET  /api/plextrac/backups/status           last run, run in progress, next run
 app.use('/api/plextrac', clientMergeLimiter, require('./routes/plextrac-backup'));
 
+// Plextrac access for a signed auth form's contacts (routes/plextrac-client-users.js,
+// pipeline/plextrac-client-users.js) — sent by the SFE portal on submission
+// (X-API-Key: BREAK_SERVICES_API_KEY; PLEXTRAC_CLIENT_ACCESS switches it on):
+//   POST /api/plextrac/client-users   create missing users, authorise them on the client as Client
+app.use('/api/plextrac', apiLimiter, require('./routes/plextrac-client-users'));
+
 // PMs connecting their own Gmail for the report email (routes/report-email.js,
 // lib/gmail-oauth.js). From the SFE portal's Gmail page (X-API-Key:
 // BREAK_SERVICES_API_KEY; the portal limits it to its PMs and admins):
