@@ -11,7 +11,8 @@
 //
 // Releasing is also what triggers the report being exported to PDF and filed in Google
 // Drive and on its Plextrac Artifacts tab, along with the client documents
-// (pipeline/release-exports.js) — a released report is the version worth keeping.
+// (pipeline/release-exports.js) — a released report is the version worth keeping —
+// and the client's report email being drafted (pipeline/report-email.js).
 
 const slack = require('../lib/slack');
 const users = require('../lib/plextrac-users');
@@ -19,6 +20,7 @@ const api = require('../lib/plextrac-api');
 const fields = require('./qa-review/report-fields');
 const { postEmptyFieldsNotice } = require('./qa-review/empty-fields');
 const { runReleaseExports } = require('./release-exports');
+const { draftReportEmail } = require('./report-email');
 const log = require('../lib/logger');
 
 // The ready-for-release channel, shared with the Approved announcement
@@ -171,16 +173,29 @@ async function postReleaseAnnouncement({ clientId, clientName, clientUrl, report
 
   // File the release: the full report PDF in Google Drive, plus the client documents
   // (executive summary, letter of attestation) in the same Drive folder and on the
-  // report's Plextrac Artifacts tab. Problems are replied in this announcement's
-  // thread. Best-effort and self-logging — it never throws.
-  await runReleaseExports({
-    clientId,
-    reportId,
-    clientName: resolvedClientName,
-    reportName,
-    channel,
-    threadTs,
-  });
+  // report's Plextrac Artifacts tab. Alongside it, the report email: a reply in the
+  // client's onboarding email chain saying the report is in Plextrac
+  // (pipeline/report-email.js, REPORT_EMAIL_MODE). Neither waits on the other — the
+  // email is about Plextrac, not the exported files. Problems are replied in this
+  // announcement's thread. Both are best-effort and self-logging — they never throw.
+  await Promise.all([
+    runReleaseExports({
+      clientId,
+      reportId,
+      clientName: resolvedClientName,
+      reportName,
+      channel,
+      threadTs,
+    }),
+    draftReportEmail({
+      reportId,
+      clientName: resolvedClientName,
+      reportName,
+      channel,
+      threadTs,
+      releaserEmail: releaser.email,
+    }),
+  ]);
 }
 
 module.exports = { postReleaseAnnouncement, buildReleaseMessage, resolveReleaseQaName, resolveClientName };

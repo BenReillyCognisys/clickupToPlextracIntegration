@@ -179,6 +179,18 @@ app.use('/api/plextrac', clientMergeLimiter, require('./routes/client-merge'));
 //   GET  /api/plextrac/backups/status           last run, run in progress, next run
 app.use('/api/plextrac', clientMergeLimiter, require('./routes/plextrac-backup'));
 
+// PMs connecting their own Gmail for the report email (routes/report-email.js,
+// lib/gmail-oauth.js). From the SFE portal's Gmail page (X-API-Key:
+// BREAK_SERVICES_API_KEY; the portal limits it to its PMs and admins):
+//   GET    /api/report-email/connection?portalUserId=…
+//   POST   /api/report-email/connect      → Google's consent screen URL
+//   DELETE /api/report-email/connection?portalUserId=…
+// and the browser's return from Google's consent screen (single-use state, no key):
+//   GET    /report-email/oauth/callback   → back to the portal's Gmail page
+const reportEmailRoutes = require('./routes/report-email');
+app.use('/api/report-email', apiLimiter, reportEmailRoutes.portal);
+app.use('/report-email', webhookLimiter, reportEmailRoutes.callback);
+
 // Manual repair endpoints for missed or mis-mapped automations (X-API-Key:
 // AVAILABILITY_API_KEY). Unlike the /jobs/* triggers below these answer
 // synchronously with what they did — see routes/task-admin.js.
@@ -243,6 +255,23 @@ app.post('/jobs/plextrac-backup', apiLimiter, requireApiKey, (req, res) => {
   res.status(200).end();
   require('./pipeline/plextrac-backup').runBackup({ kind: 'manual', requestedBy: 'POST /jobs/plextrac-backup' })
     .catch(err => log.error('Plextrac backup failed', { reason: err.message }));
+});
+
+// Make (or remake) the report email for a report that's already been released —
+// pipeline/report-email.js. For when the release found no email chain and one has
+// since been sent or fixed, or a draft was deleted by mistake. Body:
+//   { "reportId": 277397777, "force": false }
+// force=true makes a new draft even if one was made before. Requires the X-API-Key
+// header and is rate-limited; answers 202 at once, and the outcome goes to the release
+// thread in Slack and the logs, like a release's own.
+app.post('/jobs/report-email', apiLimiter, requireApiKey, (req, res) => {
+  const reportId = Number(req.body?.reportId);
+  if (!Number.isInteger(reportId) || reportId <= 0) {
+    return res.status(400).json({ error: 'reportId (the Plextrac report id) is required' });
+  }
+  res.status(202).json({ ok: true, reportId });
+  require('./pipeline/report-email').rerunReportEmail({ reportId, force: req.body?.force === true })
+    .catch(err => log.error('Report email re-run failed', { reason: err.message, report_id: reportId }));
 });
 
 // Auth-form check at 14:00 on working days (Mon–Fri; server timezone unless
@@ -314,6 +343,23 @@ app.listen(PORT, async () => {
   log.info('Client documents on release', Object.fromEntries(
     CLIENT_DOCUMENTS.map((doc) => [doc.key, `${isDocumentEnabled(doc) ? 'on' : 'OFF'} (${doc.enabledBy})`]),
   ));
+
+  // The report email on release (pipeline/report-email.js): off, or drafted in the
+  // mailbox of the PM who sent the client's onboarding email.
+  // Which PMs have connected their Gmail is in the database, so it's logged once that answers.
+  {
+    const reportEmailMode = require('./pipeline/report-email').mode();
+    const gmailConnectable = require('./lib/gmail-oauth').isConfigured();
+    require('./lib/gmail-connections').mailboxes()
+      .then(({ usable, broken }) => log.info('Report email on release', {
+        mode: reportEmailMode, switch: 'REPORT_EMAIL_MODE',
+        connected: usable.join(', ') || '(none)', needs_reconnecting: broken.join(', ') || '(none)',
+      }))
+      .catch((err) => log.error('Report email: could not read the Gmail connections', { reason: err.message }));
+    if (!gmailConnectable) {
+      log.warn('Report email: PMs can\'t connect Gmail yet — set GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and REPORT_EMAIL_TOKEN_KEY', {});
+    }
+  }
 
   // ...and can they be rendered to PDF here? Said once, at startup, so a missing
   // `npm run setup:renderer` shows in the console before a release hits it.
