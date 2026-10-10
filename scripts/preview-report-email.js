@@ -50,6 +50,10 @@ const list = (addrs) => addrs.map((a) => (a.name ? `${a.name} <${a.email}>` : a.
       console.log(`Chain:   ${p.mailbox} ${gmail.threadUrl(p.threadId, p.mailbox)}`);
       console.log(`From:    ${p.from ? list([p.from]) : `${p.mailbox} (Gmail's default)`}`);
       console.log(`Signed:  ${p.signature ? 'with the Gmail signature' : 'NO Gmail signature found for that address'}`);
+      if (p.signature) {
+        console.log(`Images:  ${p.inlineImages.length} embedded${p.inlineImages.length ? ` (${p.inlineImages.map((i) => `${i.filename} ${Math.round(i.data.length / 1024)} KB`).join(', ')})` : ''}`);
+        for (const f of p.signatureImagesFailed) console.log(`         NOT embedded: ${f.src} — ${f.reason}`);
+      }
       console.log(`To:      ${list(p.to)}\nCc:      ${list(p.cc)}\nSubject: ${p.subject}`);
       console.log(`Threads: In-Reply-To ${p.inReplyTo || '(none)'}`);
       console.log(`\n${p.text.replace(/^/gm, '  | ')}\n`);

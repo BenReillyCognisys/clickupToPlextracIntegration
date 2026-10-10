@@ -17,6 +17,7 @@ const kpiStore = require('../lib/qa-kpi-store');
 const submissionStore = require('../lib/qa-submission-store');
 const { hoursLate, trackingStartMs } = require('../lib/report-lateness');
 const webhookSuppression = require('../lib/webhook-suppression');
+const { retestWindow } = require('../lib/retest-window');
 const log = require('../lib/logger');
 
 // Pre-integration reports carry their client/report names in the webhook `text`
@@ -202,10 +203,25 @@ function mappingFromEngagement(record) {
   };
 }
 
+// On Published, the free retest offer: Critical and High counts and the last day the
+// retest can take place (lib/retest-window.js). Null if the findings can't be read —
+// the status still goes, and DeliveryFlow leaves the Retest step for a person.
+async function retestFor(record, reportStatus) {
+  if (reportStatus !== QA_RELEASED_STATUS) return null;
+  try {
+    return await retestWindow({ clientId: record.plextrac_client_id, reportId: record.plextrac_report_id });
+  } catch (err) {
+    log.error('Could not work out the retest window for DeliveryFlow', {
+      reason: err.message, engagementId: record.engagement_id, report_id: record.plextrac_report_id,
+    });
+    return null;
+  }
+}
+
 // The DeliveryFlow counterpart of the ClickUp status sync below: every status change
 // of an engagement's report is sent to DeliveryFlow as a report_status event, and
-// DeliveryFlow moves the project on (QA, Report Published). Best-effort and logged —
-// the QA automations above have already run, and Plextrac is never retried.
+// DeliveryFlow moves the project on (QA, Report Published, the Retest step). Best-effort
+// and logged — the QA automations above have already run, and Plextrac is never retried.
 async function forwardReportStatus(record, reportStatus, report) {
   if (!deliveryflow.isConfigured()) {
     log.warn('Plextrac report status not sent to DeliveryFlow — DELIVERYFLOW_EVENTS_URL is not set', {
@@ -213,12 +229,14 @@ async function forwardReportStatus(record, reportStatus, report) {
     });
     return 'not_configured';
   }
+  const retest = await retestFor(record, reportStatus);
   try {
     await deliveryflow.sendEvent('report_status', { engagementId: record.engagement_id, dealId: record.deal_id ?? null }, {
       status:     reportStatus,
       reportId:   record.plextrac_report_id != null ? String(record.plextrac_report_id) : null,
       reportName: report?.name || record.report_name || null,
       reportUrl:  `${PLEXTRAC_BASE}/client/${record.plextrac_client_id}/report/${record.plextrac_report_id}`,
+      ...(retest ? { retest } : {}),
     });
     log.info('Plextrac report status sent to DeliveryFlow', {
       engagementId: record.engagement_id, status: reportStatus, report_id: record.plextrac_report_id,

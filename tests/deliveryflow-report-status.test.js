@@ -31,7 +31,14 @@ dfStore.findByReportId = async (id) => engagements.find((e) => String(e.plextrac
 
 const reportStatus = {}; // reportId -> current Plextrac status
 plextracApi.getReport = async (clientId, reportId) => ({ name: `Report ${reportId}`, status: reportStatus[reportId] });
-plextracApi.listReportFindings = async () => [];
+let findings = []; // what listReportFindings answers; a function throws instead
+plextracApi.listReportFindings = async () => {
+  if (typeof findings === 'function') return findings();
+  return findings;
+};
+// The retest window counts weekends only here (no GOV.UK call); the holiday
+// handling itself is in tests/working-days.test.js.
+require('../lib/working-days').ukBankHolidays = async () => new Set();
 lookup.resolveClientAndReport = async ({ clientName }) => (clientName === 'Named Ltd' ? { clientId: 30, reportId: 3003 } : null);
 
 const clickupUpdates = [];
@@ -113,9 +120,59 @@ const statusChange = (cuid, extra = {}) => ({ event: 'ReportStatusChanged', targ
 
   await test('Published is sent too (DeliveryFlow decides what each status means)', async () => {
     events.length = 0;
+    findings = [];
     reportStatus[1001] = 'Published';
     await deliver(statusChange('cuid-1001'));
     assert.strictEqual(events[0].data.status, 'Published');
+  });
+
+  await test('Published carries the retest offer: Critical and High counts and the last retest day', async () => {
+    events.length = 0;
+    // Plextrac's list rows: data = [flaw_id, severity, title, status, ...]
+    findings = [
+      { data: [1, 'Critical', 'SQLi', 'Open'] },
+      { data: [2, 'High', 'XSS', 'Open'] },
+      { data: [3, 'high', 'IDOR', 'Open'] },
+      { data: [4, 'Medium', 'Headers', 'Open'] },
+      { severity: 'Low', title: 'Banner' },
+    ];
+    reportStatus[1001] = 'Published';
+    await deliver(statusChange('cuid-1001'));
+    const { retest } = events[0].data;
+    assert.strictEqual(retest.critical, 1);
+    assert.strictEqual(retest.high, 2);
+    assert.strictEqual(retest.workingDays, 20);
+    assert.match(retest.publishedOn, /^\d{4}-\d{2}-\d{2}$/);
+    assert.match(retest.availableUntil, /^\d{4}-\d{2}-\d{2}$/);
+    assert.ok(retest.availableUntil > retest.publishedOn);
+  });
+
+  await test('a report with no Critical or High findings sends zero counts', async () => {
+    events.length = 0;
+    findings = { data: [{ data: [1, 'Medium', 'Headers', 'Open'] }] };
+    reportStatus[1001] = 'Published';
+    await deliver(statusChange('cuid-1001'));
+    assert.strictEqual(events[0].data.retest.critical, 0);
+    assert.strictEqual(events[0].data.retest.high, 0);
+  });
+
+  await test('unreadable findings still send Published, without a retest offer', async () => {
+    events.length = 0;
+    findings = () => { throw new Error('Plextrac 500'); };
+    reportStatus[1001] = 'Published';
+    await deliver(statusChange('cuid-1001'));
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].data.status, 'Published');
+    assert.ok(!('retest' in events[0].data));
+    findings = [];
+  });
+
+  await test('statuses before Published carry no retest offer', async () => {
+    events.length = 0;
+    reportStatus[1001] = 'Approved';
+    await deliver(statusChange('cuid-1001'));
+    assert.strictEqual(events[0].data.status, 'Approved');
+    assert.ok(!('retest' in events[0].data));
   });
 
   await test('a report without a recorded cuid is matched by the id the name lookup resolves', async () => {

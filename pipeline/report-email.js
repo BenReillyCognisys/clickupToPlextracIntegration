@@ -53,6 +53,7 @@ const approvedMessages = require('../lib/approved-message-store');
 const fields = require('./qa-review/report-fields');
 const { READY_FOR_RELEASE_CHANNEL } = require('./status-guard');
 const message = require('../lib/email-message');
+const { inlineImages } = require('../lib/inline-images');
 const EMAIL = require('../config/report-email');
 const log = require('../lib/logger');
 
@@ -242,7 +243,12 @@ async function prepareReportEmail({ reportId }) {
   }
 
   const signatureHtml = await signatureFor(mailbox, from?.email, reportId);
-  const body = message.renderBody(EMAIL.paragraphs(), { signatureHtml });
+  // The signature's images go in the email itself, so they show wherever it's read.
+  const signature = await inlineImages(signatureHtml);
+  for (const f of signature.failed) {
+    log.warn('Report email: a signature image couldn\'t be embedded — left as a link', { report_id: reportId, mailbox, src: f.src, reason: f.reason });
+  }
+  const body = message.renderBody(EMAIL.paragraphs(), { signatureHtml: signature.html });
   return {
     ok: true,
     mailbox,
@@ -254,7 +260,9 @@ async function prepareReportEmail({ reportId }) {
     subject: message.replySubject(latest.headers.subject || sent[0].headers.subject),
     ...message.threadingHeaders(latest.headers),
     ...body,
+    inlineImages: signature.images,
     signature: Boolean(signatureHtml),
+    signatureImagesFailed: signature.failed,
   };
 }
 
@@ -285,6 +293,9 @@ function draftedText({ prepared, clientName, mention }) {
   ];
   if (!prepared.signature) {
     lines.push(`:warning: No Gmail signature found for ${esc(from)} — add your signature before sending.`);
+  } else if (prepared.signatureImagesFailed?.length) {
+    lines.push(`:warning: ${prepared.signatureImagesFailed.length} signature image(s) couldn't be loaded `
+      + `(${esc(prepared.signatureImagesFailed.map((f) => f.reason).join('; '))}) — check the signature before sending.`);
   }
   return lines.join('\n');
 }

@@ -177,6 +177,13 @@ Signature) for the address the reply is from, or their default signature if that
 none. It's read with the Gmail access the PM already granted. If no signature is found, the
 email is still drafted without one, and the Slack message says to add it before sending.
 
+The signature's images (a logo, a photo) are downloaded when the draft is made and **embedded in
+the email itself** as inline attachments, so they show in the draft and for the client wherever
+they were hosted (`lib/inline-images.js`). Only `https://` images are fetched (up to 10, 1 MB each). An
+image that can't be downloaded, for example a Google Drive image that isn't shared publicly, is left as
+a link, and the Slack message says to check the signature before sending. The preview script lists
+which images were embedded.
+
 ## Once per report
 
 Each report's email is recorded in the `report_emails` collection. Releasing a report

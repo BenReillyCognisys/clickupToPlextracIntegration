@@ -19,6 +19,8 @@ const clickup = require('../lib/clickup-api');
 const slack = require('../lib/slack');
 const people = require('../lib/slack-people');
 const reportEmail = require('../pipeline/report-email');
+const axios = require('axios');
+const { inlineImages, sniff } = require('../lib/inline-images');
 
 let passed = 0;
 let failed = 0;
@@ -46,9 +48,22 @@ function decodeRaw(raw) {
     return [l.slice(0, i).toLowerCase(), l.slice(i + 1).trim()];
   }));
   const body = rest.join('\r\n\r\n');
-  const parts = body.split(/--report-email-[^\r\n-]+(?:--)?/).filter((p) => p.includes('Content-Type'));
-  const decode = (p) => Buffer.from(p.split('\r\n\r\n')[1].replace(/\s+/g, ''), 'base64').toString('utf8');
-  return { headers, text: decode(parts[0]), html: decode(parts[1]) };
+  // Every leaf part (multipart/alternative, and multipart/related inside it when images
+  // are embedded), by its own headers.
+  const parts = body.split(/--report-email-[^\r\n]*/).map((p) => p.replace(/^\r\n/, ''))
+    .filter((p) => /^Content-Type:/m.test(p) && !/^Content-Type: multipart\//m.test(p))
+    .map((p) => {
+      const [h, ...b] = p.split('\r\n\r\n');
+      const ph = Object.fromEntries(h.split('\r\n').map((l) => [l.slice(0, l.indexOf(':')).toLowerCase(), l.slice(l.indexOf(':') + 1).trim()]));
+      return { headers: ph, data: Buffer.from(b.join('').replace(/\s+/g, ''), 'base64') };
+    });
+  const of = (type) => parts.find((p) => p.headers['content-type'].startsWith(type));
+  return {
+    headers,
+    text: of('text/plain').data.toString('utf8'),
+    html: of('text/html').data.toString('utf8'),
+    images: parts.filter((p) => p.headers['content-id']),
+  };
 }
 const decodeWord = (s) => Buffer.from(s.slice(10, -2), 'base64').toString('utf8');
 
@@ -148,6 +163,59 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
     assert.ok(paragraphs.some((p) => p.includes('head to the artefacts section')));
     assert.ok(paragraphs.some((p) => p.includes('schedule a wash-up call')));
     eq(paragraphs[paragraphs.length - 1], 'Best wishes,');
+  });
+
+  const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+  const JPG = Buffer.from('ffd8ffe000104a46494600', 'hex');
+
+  await test('inlineImages: https and data: images become cid: attachments; the rest stay links and are reported', async () => {
+    const fetched = [];
+    const fetch = async (url) => {
+      fetched.push(url);
+      if (url.includes('broken')) throw new Error('HTTP 403');
+      return { data: url.includes('photo') ? JPG : PNG, contentType: url.includes('photo') ? 'image/jpeg' : 'image/png' };
+    };
+    const sig = [
+      '<img src="https://ci3.googleusercontent.com/mail-sig/logo?a=1&amp;b=2" width="120">',
+      '<img alt="me" src=\'https://example.com/photo.jpg\'>',
+      '<img src="https://ci3.googleusercontent.com/mail-sig/logo?a=1&amp;b=2">', // the same logo again
+      '<img src="http://insecure.example.com/x.png">',
+      '<img src="https://drive.google.com/broken">',
+      `<img src="data:image/png;base64,${PNG.toString('base64')}">`,
+    ].join('');
+    const r = await inlineImages(sig, { fetch });
+    eq(fetched, ['https://ci3.googleusercontent.com/mail-sig/logo?a=1&b=2', 'https://example.com/photo.jpg', 'https://drive.google.com/broken']);
+    eq(r.images.map((i) => [i.contentType, i.filename]), [['image/png', 'signature-1.png'], ['image/jpeg', 'signature-2.jpg'], ['image/png', 'signature-3.png']]);
+    eq(r.failed.map((f) => f.reason), ['not an https:// image', 'HTTP 403']);
+    const cids = [...r.html.matchAll(/src=["']cid:([^"']+)["']/g)].map((m) => m[1]);
+    eq(cids, [r.images[0].cid, r.images[1].cid, r.images[0].cid, r.images[2].cid]);
+    assert.ok(r.html.includes('width="120"'), 'other attributes kept');
+    assert.ok(r.html.includes('src="http://insecure.example.com/x.png"') && r.html.includes('src="https://drive.google.com/broken"'));
+  });
+
+  await test('inlineImages: no images, or no signature, changes nothing', async () => {
+    eq(await inlineImages('<div>Ben</div>', { fetch: async () => { throw new Error('no'); } }), { html: '<div>Ben</div>', images: [], failed: [] });
+    eq((await inlineImages('')).images, []);
+  });
+
+  await test('sniff tells the image type from its bytes when the server doesn\'t say', () => {
+    eq([sniff(PNG), sniff(JPG), sniff(Buffer.from('GIF89a')), sniff(Buffer.from('<html>'))], ['image/png', 'image/jpeg', 'image/gif', null]);
+  });
+
+  await test('buildRawMessage embeds images as multipart/related, found by Content-ID', () => {
+    const images = [{ cid: 'sig1.x@break.services', contentType: 'image/png', filename: 'signature-1.png', data: PNG }];
+    const raw = Buffer.from(msg.buildRawMessage({
+      to: [{ name: '', email: 'a@b.com' }], subject: 'Re: x', text: 'hi', html: '<p>hi</p><img src="cid:sig1.x@break.services">', inlineImages: images,
+    }), 'base64url').toString('utf8');
+    assert.ok(/Content-Type: multipart\/alternative/.test(raw));
+    assert.ok(/Content-Type: multipart\/related/.test(raw));
+    const d = decodeRaw(Buffer.from(raw).toString('base64url'));
+    eq(d.text, 'hi');
+    assert.ok(d.html.includes('cid:sig1.x@break.services'));
+    eq(d.images.length, 1);
+    eq(d.images[0].headers['content-id'], '<sig1.x@break.services>');
+    eq(d.images[0].headers['content-disposition'], 'inline; filename="signature-1.png"');
+    assert.ok(d.images[0].data.equals(PNG), 'image bytes survive');
   });
 
   await test('buildRawMessage without a From leaves it to Gmail', () => {
@@ -395,6 +463,39 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
     eq(await reportEmail.draftReportEmail(RELEASE), 'drafted');
     eq(w.markedBroken, []);
     assert.ok(w.slack[0].text.includes('No Gmail signature found'));
+  });
+
+  await test('signature images are downloaded and embedded in the draft', async () => {
+    stub({ signature: '<div>Ben Reilly<br><img src="https://ci3.googleusercontent.com/mail-sig/logo" alt="Cognisys"></div>' });
+    const realGet = axios.get;
+    axios.get = async (url) => ({ status: 200, headers: { 'content-type': 'image/png' }, data: PNG });
+    try {
+      eq(await reportEmail.draftReportEmail(RELEASE), 'drafted');
+    } finally {
+      axios.get = realGet;
+    }
+    const d = decodeRaw(w.drafts[0].raw);
+    eq(d.images.length, 1);
+    assert.ok(d.images[0].data.equals(PNG));
+    const cid = d.images[0].headers['content-id'].slice(1, -1);
+    assert.ok(d.html.includes(`<img src="cid:${cid}" alt="Cognisys">`), d.html);
+    assert.ok(!d.html.includes('googleusercontent'), 'no link left to load');
+    assert.ok(!w.slack[0].text.includes('couldn\'t be loaded'));
+  });
+
+  await test('a signature image that can\'t be downloaded stays a link, and Slack says to check it', async () => {
+    stub({ signature: '<div>Ben<img src="https://drive.google.com/uc?id=private"></div>' });
+    const realGet = axios.get;
+    axios.get = async () => ({ status: 403, headers: { 'content-type': 'text/html' }, data: Buffer.from('denied') });
+    try {
+      eq(await reportEmail.draftReportEmail(RELEASE), 'drafted');
+    } finally {
+      axios.get = realGet;
+    }
+    const d = decodeRaw(w.drafts[0].raw);
+    eq(d.images, []);
+    assert.ok(d.html.includes('https://drive.google.com/uc?id=private'));
+    assert.ok(w.slack[0].text.includes('1 signature image(s) couldn\'t be loaded (HTTP 403) — check the signature before sending'), w.slack[0].text);
   });
 
   await test('no chain at all: nothing drafted, and connections needing reconnecting are named', async () => {
