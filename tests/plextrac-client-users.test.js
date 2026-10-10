@@ -25,17 +25,18 @@ let hooks;
 function reset() {
   pt = {
     users: new Map([
-      ['ben.reilly@cognisys.group', { roles: ['ADMIN'], disabled: false }],
-      ['existing@acme.com', { roles: [ROLE], disabled: false }],
-      ['staffish@acme.com', { roles: ['STD_USER'], disabled: false }],
-      ['gone@acme.com', { roles: [ROLE], disabled: true }],
+      ['ben.reilly@cognisys.group', { roles: ['ADMIN'], disabled: false, default_group: true }],
+      ['existing@acme.com', { roles: [ROLE], disabled: false, default_group: false }],
+      ['staffish@acme.com', { roles: ['STD_USER'], disabled: false, default_group: false }],
+      ['gone@acme.com', { roles: [ROLE], disabled: true, default_group: false }],
+      ['everywhere@acme.com', { roles: [ROLE], disabled: false, default_group: true }],
     ]),
     clients: {
       10: { name: 'Acme Ltd', users: { 'ben.reilly@cognisys.group': { role: 'ADMIN' }, 'onalready@acme.com': { role: ROLE } } },
       20: { name: 'Other Co', users: {} },
     },
   };
-  pt.users.set('onalready@acme.com', { roles: [ROLE], disabled: false });
+  pt.users.set('onalready@acme.com', { roles: [ROLE], disabled: false, default_group: false });
   calls = { created: [], assigned: [], slack: [] };
   hooks = {};
   delete process.env.PLEXTRAC_CLIENT_ROLE;
@@ -54,7 +55,7 @@ api.listSecurityRoles = async () => {
 };
 // The v1 user/list shape: { id, doc_id, data: { email, roles, disabled, … } }.
 api.listTenantUsers = async () => [...pt.users].map(([email, u]) => ({
-  id: email, doc_id: [0], data: { email, roles: u.roles, disabled: u.disabled, name: { first: 'X', last: 'Y' } },
+  id: email, doc_id: [0], data: { email, roles: u.roles, disabled: u.disabled, default_group: u.default_group, name: { first: 'X', last: 'Y' } },
 }));
 api.getClient = async (id) => {
   const c = pt.clients[id];
@@ -66,7 +67,7 @@ api.bulkCreateUsers = async (users) => {
   for (const u of users) {
     if (hooks.createSilentlyFails) continue;
     if (pt.users.has(u.email)) throw new Error('Plextrac API POST … failed (400): user exists');
-    pt.users.set(u.email, { roles: [hooks.createWithRole || u.role], disabled: false });
+    pt.users.set(u.email, { roles: [hooks.createWithRole || u.role], disabled: false, default_group: hooks.forceDefaultGroup ? true : u.default_group });
   }
   return { status: 'success', message: 'Users created.' };
 };
@@ -117,7 +118,7 @@ const grant = (people, extra = {}) => users.grantClientAccess({ plextracClientId
     const r = await grant([{ email: 'New@Acme.com', firstName: 'New', lastName: 'Person' }]);
     eq(r.state, 'done');
     eq(outcomes(r), { 'new@acme.com': 'created' });
-    eq(calls.created, [{ email: 'new@acme.com', name: { first: 'New', last: 'Person' }, role: ROLE, default_group: true }]);
+    eq(calls.created, [{ email: 'new@acme.com', name: { first: 'New', last: 'Person' }, role: ROLE, default_group: false }]);
     eq(calls.assigned, [{ clientId: 10, users: [{ username: 'new@acme.com', role: ROLE }] }]);
     eq(pt.clients[10].users['new@acme.com'], { role: ROLE });
     eq(calls.slack.length, 1);
@@ -158,6 +159,31 @@ const grant = (people, extra = {}) => users.grantClientAccess({ plextracClientId
       'ben.reilly@cognisys.group': 'internal', 'someone@cognisys.co.uk': 'internal', 'first.last': 'invalid_email', 'gone@acme.com': 'disabled',
     });
     eq([calls.created, calls.assigned], [[], []]);
+  });
+
+  await test('every user is created outside the Default Group (which sees every client)', async () => {
+    await grant([{ email: 'a@acme.com' }, { email: 'b@acme.com' }]);
+    eq(calls.created.map((u) => u.default_group), [false, false]);
+    eq([pt.users.get('a@acme.com').default_group, pt.users.get('b@acme.com').default_group], [false, false]);
+  });
+
+  await test('a user Plextrac puts in the Default Group anyway is not authorised, and Slack raises the alarm', async () => {
+    hooks.forceDefaultGroup = true;
+    const r = await grant([{ email: 'new@acme.com' }]);
+    eq(outcomes(r), { 'new@acme.com': 'default_group' });
+    eq(calls.assigned, []);
+    assert.ok(/Default Group, so can see EVERY client/.test(calls.slack[0].text), calls.slack[0].text);
+  });
+
+  await test('an existing user in the Default Group is left alone and flagged — not authorised', async () => {
+    const r = await grant([{ email: 'everywhere@acme.com' }]);
+    eq(outcomes(r), { 'everywhere@acme.com': 'default_group' });
+    eq([calls.created, calls.assigned], [[], []]);
+  });
+
+  await test('a user list without default_group is read as in the Default Group (safe side)', async () => {
+    eq(users.usersByEmail([{ data: { email: 'x@acme.com', roles: [ROLE] } }]).get('x@acme.com').defaultGroup, true);
+    eq(users.usersByEmail([{ data: { email: 'x@acme.com', roles: [ROLE], default_group: false } }]).get('x@acme.com').defaultGroup, false);
   });
 
   await test('a built-in role in PLEXTRAC_CLIENT_ROLE is refused before anything is made', async () => {

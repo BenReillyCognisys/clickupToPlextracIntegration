@@ -20,6 +20,18 @@ SFE portal: form submitted
           5. Slack (SLACK_AUTH_FORM_CHANNEL): who was added, and anything to check
 ```
 
+## Never the Default Group
+
+Plextrac's **Default Group** gives a user access to **every client in the tenant**, both
+existing clients and any created later. Taking someone out of the group does not remove the
+client access they already got.
+
+- Users are created with `default_group: false`.
+- After creating them, the user list is read again. Anyone in the Default Group is **not**
+  authorised on the client, and Slack raises an alarm (`default_group`) so they can be fixed by hand.
+- An existing user in the Default Group is left alone and flagged in the same way.
+- If Plextrac's user list doesn't say whether a user is in the group, they're treated as in it.
+
 ## Only ever the Client role
 
 - Users are created with the Client role as their default role, and authorised on the client with the Client role.
@@ -49,6 +61,7 @@ SFE portal: form submitted
 | `other_role` | has a user with another role, left alone, check by hand |
 | `disabled` | has a disabled user, skipped |
 | `on_client_other_role` | already on the client with another role, left alone, check it |
+| `default_group` | **in the Default Group, so can see every client.** Not authorised. Fix it in Plextrac now |
 | `failed` | creating or authorising failed (detail says why) |
 
 If the form has no Plextrac client, or its tasks are on different clients, nobody is added

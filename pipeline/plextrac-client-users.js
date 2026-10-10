@@ -8,10 +8,11 @@
 //
 // For each email, in order:
 //   1. Not an email, or a Cognisys address  → skipped (staff are never given client access here)
-//   2. No Plextrac user with that email     → created, with the Client role as their default role
+//   2. No Plextrac user with that email     → created, with the Client role as their default role,
+//                                            and NOT in Plextrac's Default Group (which sees every client)
 //      A user with that email already      → used as is, but only if their role is the
 //                                            Client role; anyone else (staff, another
-//                                            role) is left alone and flagged
+//                                            role, or in the Default Group) is left alone and flagged
 //   3. Already on the client                → nothing to do (or flagged, if not as Client)
 //      Not on the client                    → authorised on it with the Client role
 //   4. The client is read back: each person must now be on it with the Client role.
@@ -90,7 +91,13 @@ function usersByEmail(raw) {
     const u = row?.data && !Array.isArray(row.data) ? row.data : row;
     const email = norm(u?.email || u?.username || row?.id);
     if (!email || !email.includes('@')) continue;
-    map.set(email, { roles: Array.isArray(u.roles) ? u.roles : [], disabled: Boolean(u.disabled) });
+    map.set(email, {
+      roles: Array.isArray(u.roles) ? u.roles : [],
+      disabled: Boolean(u.disabled),
+      // Plextrac's Default Group: access to EVERY client, now and future. A missing
+      // field counts as in it — the safe reading.
+      defaultGroup: u.default_group !== false,
+    });
   }
   return map;
 }
@@ -154,6 +161,7 @@ const LABELS = {
   other_role: 'has a Plextrac user with another role (not Client) — left alone, add by hand if right',
   disabled: 'has a disabled Plextrac user — not added',
   on_client_other_role: 'already on the client with another role — left alone, check it',
+  default_group: ':rotating_light: in Plextrac\'s Default Group, so can see EVERY client — remove them from it and from the other clients (or disable the user) now',
   failed: 'FAILED',
 };
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -198,6 +206,10 @@ async function grantLocked({ clientId, people, skipped }) {
       results.set(p.email, { email: p.email, outcome: 'other_role', detail: user.roles.join(', ') || 'no role' });
       continue;
     }
+    if (user && user.defaultGroup) {
+      results.set(p.email, { email: p.email, outcome: 'default_group' });
+      continue;
+    }
     if (clientRoleNow !== undefined) {
       results.set(p.email, clientRoleNow === role
         ? { email: p.email, outcome: 'already_on_client' }
@@ -213,8 +225,10 @@ async function grantLocked({ clientId, people, skipped }) {
 
   if (toCreate.length) {
     try {
+      // default_group MUST be false: Plextrac's Default Group gives a user access to every
+      // client in the tenant, existing and future.
       await api.bulkCreateUsers(toCreate.map((p) => ({
-        email: p.email, name: { first: p.first, last: p.last }, role, default_group: true,
+        email: p.email, name: { first: p.first, last: p.last }, role, default_group: false,
       })));
     } catch (err) {
       log.error('Plextrac client access: creating users failed', { client_id: clientId, reason: err.message });
@@ -225,10 +239,13 @@ async function grantLocked({ clientId, people, skipped }) {
       const made = after.get(p.email);
       if (!made) fail(p.email, 'user was not created');
       else if (!made.roles.includes(role)) fail(p.email, `user was created with role ${made.roles.join(', ') || 'none'}, not ${role}`);
+      else if (made.defaultGroup) {
+        results.set(p.email, { email: p.email, outcome: 'default_group', detail: 'created in the Default Group by Plextrac' });
+      }
     }
   }
 
-  const assignable = toAssign.filter((p) => results.get(p.email).outcome !== 'failed');
+  const assignable = toAssign.filter((p) => ['created', 'added'].includes(results.get(p.email).outcome));
   if (assignable.length) {
     const classificationId = process.env.PLEXTRAC_CLIENT_CLASSIFICATION_ID || undefined;
     try {
@@ -289,7 +306,7 @@ async function grantClientAccess({ plextracClientId = null, taskIds = [], client
   }
 
   for (const u of result.users) {
-    const line = u.outcome === 'failed' ? log.error : ['created', 'added', 'already_on_client'].includes(u.outcome) ? log.info : log.warn;
+    const line = ['failed', 'default_group'].includes(u.outcome) ? log.error : ['created', 'added', 'already_on_client'].includes(u.outcome) ? log.info : log.warn;
     line(`Plextrac client access: ${u.email} — ${u.outcome}`, { ...ctx, client_id: clientId, ...(u.detail ? { detail: u.detail } : {}) });
   }
   if (result.users.some((u) => u.outcome !== 'already_on_client')) {
