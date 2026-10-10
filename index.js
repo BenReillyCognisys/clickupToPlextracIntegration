@@ -263,6 +263,13 @@ app.post('/jobs/plextrac-backup', apiLimiter, requireApiKey, (req, res) => {
     .catch(err => log.error('Plextrac backup failed', { reason: err.message }));
 });
 
+// Run the weekly Plextrac user audit now (pipeline/plextrac-user-audit.js) — read-only;
+// findings go to Slack and the logs. Requires the X-API-Key header and is rate-limited.
+app.post('/jobs/plextrac-user-audit', apiLimiter, requireApiKey, (req, res) => {
+  res.status(202).json({ ok: true });
+  require('./pipeline/plextrac-user-audit').runUserAudit();
+});
+
 // Make (or remake) the report email for a report that's already been released —
 // pipeline/report-email.js. For when the release found no email chain and one has
 // since been sent or fixed, or a draft was deleted by mistake. Body:
@@ -320,6 +327,17 @@ if (START_DATE_WATCH_CRON) {
     console.log('[cron] Triggering start-date watch…');
     runStartDateWatch().catch(err => log.error('Start-date watch failed', { reason: err.message }));
   }, { timezone: START_DATE_WATCH_TZ });
+}
+
+// Weekly read-only audit of every Plextrac user (pipeline/plextrac-user-audit.js):
+// non-Cognisys users with a non-client role, more than one client, or the Default Group
+// are posted to PLEXTRAC_USER_AUDIT_CHANNEL. Mondays 07:00 UK by default; override with
+// PLEXTRAC_USER_AUDIT_SCHEDULE (cron syntax) or set it blank to turn the schedule off.
+const PLEXTRAC_USER_AUDIT_SCHEDULE = process.env.PLEXTRAC_USER_AUDIT_SCHEDULE ?? '0 7 * * 1';
+if (PLEXTRAC_USER_AUDIT_SCHEDULE) {
+  cron.schedule(PLEXTRAC_USER_AUDIT_SCHEDULE, () => {
+    require('./pipeline/plextrac-user-audit').runUserAudit();
+  }, { timezone: process.env.PLEXTRAC_USER_AUDIT_TZ || 'Europe/London' });
 }
 
 app.listen(PORT, async () => {

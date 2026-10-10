@@ -82,3 +82,23 @@ and Slack says so.
    portal's call fails harmlessly (logged as **Plextrac Access Failed** in the audit log).
 
 New users get Plextrac's own account email to set their password.
+
+## Weekly user audit
+
+`pipeline/plextrac-user-audit.js` checks every Plextrac user once a week (Mondays 07:00 UK,
+`PLEXTRAC_USER_AUDIT_SCHEDULE`). It is **read-only**: it lists users and clients and reads each
+client's authorised users, and changes nothing.
+
+Users on `cognisys.group` aren't checked (`PLEXTRAC_USER_AUDIT_EXEMPT_DOMAINS`). Everyone else is
+flagged when they:
+- have a role other than `TENANT_0_ROLE_CLIENT` or `TENANT_0_ROLE_CLIENT__CHANGE_STATUS_ENABLED` (`PLEXTRAC_USER_AUDIT_ROLES`), or no role
+- are authorised on more than one client
+- are in the Default Group
+
+Findings go to `PLEXTRAC_USER_AUDIT_CHANNEL` (default: the status-violations channel), each with
+the clients the user is on. A clean week posts nothing; it's only logged. Client counts only cover
+clients the service account can see.
+
+To run it now:
+- `node scripts/plextrac-user-audit.js` prints the full list and posts nothing
+- `POST /jobs/plextrac-user-audit` (X-API-Key) runs it like the weekly run
