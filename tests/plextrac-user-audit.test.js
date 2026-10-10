@@ -81,11 +81,10 @@ const byEmail = (r) => Object.fromEntries(r.flagged.map((u) => [u.email, u.reaso
       'analyst@acme.com': ['role ANALYST'],
       'everywhere@acme.com': ['authorised on 3 clients', 'in the Default Group (sees every client)'],
       global_admin: ['role ADMIN'],
-      'karan@cognisys.co.uk': ['role STD_USER'],
       'nobody@acme.com': ['no role'],
       'two@acme.com': ['authorised on 2 clients'],
     });
-    eq([r.checked, r.exempt, r.clients], [9, 1, 3]);
+    eq([r.checked, r.exempt, r.clients], [9, 2, 3]);
   });
 
   await test('both client roles pass; emails are matched to clients regardless of case', async () => {
@@ -94,12 +93,13 @@ const byEmail = (r) => Object.fromEntries(r.flagged.map((u) => [u.email, u.reaso
     eq(r.flagged.find((u) => u.email === 'two@acme.com').clients, ['Acme', 'Beta']);
   });
 
-  await test('only cognisys.group is exempt by default; the domains are configurable', async () => {
-    process.env.PLEXTRAC_USER_AUDIT_EXEMPT_DOMAINS = 'cognisys.group, cognisys.co.uk';
+  await test('cognisys.group and cognisys.co.uk are exempt by default; the domains are configurable', async () => {
+    assert.ok(!byEmail(await audit.auditUsers())['karan@cognisys.co.uk']);
+    process.env.PLEXTRAC_USER_AUDIT_EXEMPT_DOMAINS = 'cognisys.group';
     try {
       const r = await audit.auditUsers();
-      assert.ok(!byEmail(r)['karan@cognisys.co.uk']);
-      eq(r.exempt, 2);
+      eq(byEmail(r)['karan@cognisys.co.uk'], ['role STD_USER']);
+      eq(r.exempt, 1);
     } finally {
       delete process.env.PLEXTRAC_USER_AUDIT_EXEMPT_DOMAINS;
     }
@@ -116,7 +116,7 @@ const byEmail = (r) => Object.fromEntries(r.flagged.map((u) => [u.email, u.reaso
     await audit.runUserAudit();
     eq(posts.length, 1);
     eq(posts[0].channel, 'CAUDIT');
-    assert.ok(/6 of 8 non-Cognisys user\(s\) flagged/.test(posts[0].text), posts[0].text);
+    assert.ok(/5 of 7 non-Cognisys user\(s\) flagged/.test(posts[0].text), posts[0].text);
     assert.ok(/two@acme\.com — authorised on 2 clients\n {6}on: Acme, Beta/.test(posts[0].text), posts[0].text);
   });
 

@@ -3,7 +3,7 @@
 //   • has a role other than the client roles (PLEXTRAC_USER_AUDIT_ROLES), or
 //   • is authorised on more than one client, or
 //   • is in Plextrac's Default Group (which sees every client, now and future).
-// Cognisys staff (PLEXTRAC_USER_AUDIT_EXEMPT_DOMAINS, default cognisys.group) aren't
+// Cognisys staff (PLEXTRAC_USER_AUDIT_EXEMPT_DOMAINS, default cognisys.group and cognisys.co.uk) aren't
 // checked. Nothing in Plextrac is changed: the only calls are user/list, client/list and
 // a GET per client.
 //
@@ -24,7 +24,7 @@ const log = require('../lib/logger');
 const list = (value) => String(value || '').split(',').map((s) => s.trim()).filter(Boolean);
 const allowedRoles = () => list(process.env.PLEXTRAC_USER_AUDIT_ROLES
   || 'TENANT_0_ROLE_CLIENT,TENANT_0_ROLE_CLIENT__CHANGE_STATUS_ENABLED');
-const exemptDomains = () => list(process.env.PLEXTRAC_USER_AUDIT_EXEMPT_DOMAINS || 'cognisys.group').map((d) => d.toLowerCase());
+const exemptDomains = () => list(process.env.PLEXTRAC_USER_AUDIT_EXEMPT_DOMAINS || 'cognisys.group,cognisys.co.uk').map((d) => d.toLowerCase());
 const channel = () => process.env.PLEXTRAC_USER_AUDIT_CHANNEL || STATUS_VIOLATIONS_CHANNEL();
 const concurrency = () => Math.max(1, Number(process.env.PLEXTRAC_USER_AUDIT_CONCURRENCY) || 4);
 

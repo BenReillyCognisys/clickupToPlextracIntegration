@@ -89,7 +89,7 @@ New users get Plextrac's own account email to set their password.
 `PLEXTRAC_USER_AUDIT_SCHEDULE`). It is **read-only**: it lists users and clients and reads each
 client's authorised users, and changes nothing.
 
-Users on `cognisys.group` aren't checked (`PLEXTRAC_USER_AUDIT_EXEMPT_DOMAINS`). Everyone else is
+Users on `cognisys.group` or `cognisys.co.uk` aren't checked (`PLEXTRAC_USER_AUDIT_EXEMPT_DOMAINS`). Everyone else is
 flagged when they:
 - have a role other than `TENANT_0_ROLE_CLIENT` or `TENANT_0_ROLE_CLIENT__CHANGE_STATUS_ENABLED` (`PLEXTRAC_USER_AUDIT_ROLES`), or no role
 - are authorised on more than one client
