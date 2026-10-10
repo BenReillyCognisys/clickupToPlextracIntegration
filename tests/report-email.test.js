@@ -131,6 +131,25 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
     assert.ok(d.html.includes('Kind regards,<br>Team'));
   });
 
+  await test('renderBody adds the Gmail signature under the last paragraph, as HTML and as text', () => {
+    const sig = '<div dir="ltr"><b>Ben Reilly</b><br>Head of Delivery | Cognisys<br><a href="https://cognisys.co.uk">cognisys.co.uk</a></div>';
+    const { text, html } = msg.renderBody(['Hi team,', 'Best wishes,'], { signatureHtml: sig });
+    eq(text, 'Hi team,\n\nBest wishes,\nBen Reilly\nHead of Delivery | Cognisys\ncognisys.co.uk');
+    assert.ok(html.includes('<p>Best wishes,</p>\n<div class="gmail_signature" data-smartmail="gmail_signature">' + sig + '</div>'), html);
+    const none = msg.renderBody(['Hi team,', 'Best wishes,']);
+    eq(none.text, 'Hi team,\n\nBest wishes,');
+    assert.ok(!none.html.includes('gmail_signature'));
+  });
+
+  await test('the template: the wording in config/report-email.js, ending "Best wishes,"', () => {
+    const paragraphs = require('../config/report-email').paragraphs();
+    eq(paragraphs[0], 'Hi team,');
+    eq(paragraphs[1], 'Great news, your report is now ready!');
+    assert.ok(paragraphs.some((p) => p.includes('head to the artefacts section')));
+    assert.ok(paragraphs.some((p) => p.includes('schedule a wash-up call')));
+    eq(paragraphs[paragraphs.length - 1], 'Best wishes,');
+  });
+
   await test('buildRawMessage without a From leaves it to Gmail', () => {
     const d = decodeRaw(msg.buildRawMessage({ to: [{ name: '', email: 'a@b.com' }], subject: 'Re: x', text: 'x', html: 'x' }));
     assert.ok(!('from' in d.headers));
@@ -147,16 +166,6 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
 
   await test('linkQuery ORs the quoted tokens and leaves drafts out', () => {
     eq(reportEmail.linkQuery(['a', 'b']), '("a" OR "b") -in:drafts -in:chats');
-  });
-
-  await test('clientNameQuery strips quotes and looks back 6 months', () => {
-    eq(reportEmail.clientNameQuery(' Acme "Corp" '), 'subject:"Acme Corp" newer_than:6m -in:drafts -in:chats');
-    eq(reportEmail.clientNameQuery(''), null);
-  });
-
-  await test('reportTitle is the testing type from the report name', () => {
-    eq(reportEmail.reportTitle('External Infrastructure | October 2026'), 'External Infrastructure');
-    eq(reportEmail.reportTitle(''), 'penetration test');
   });
 
   // ── Chains across mailboxes ─────────────────────────────────────────────────
@@ -204,8 +213,14 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
   function stub({
     boxes = { [BEN]: { link: ['b-1'], threads: { 'b-1': BEN_COPY } }, [ALICE]: {} },
     usable = [BEN, ALICE], broken = [], failing = {}, claim = true, draftError = null,
+    signature = '<div>Ben Reilly<br>Cognisys</div>', signatureError = null,
   } = {}) {
-    w = { searches: [], drafts: [], finished: [], slack: [], markedBroken: [] };
+    w = { searches: [], drafts: [], finished: [], slack: [], markedBroken: [], signatures: [] };
+    gmail.getSignature = async (mailbox, from) => {
+      w.signatures.push({ mailbox, from });
+      if (signatureError) throw signatureError;
+      return signature;
+    };
     connections.mailboxes = async () => ({ usable, broken });
     connections.markBroken = async (mailbox, reason) => { w.markedBroken.push({ mailbox, reason }); };
     store.claim = async () => claim;
@@ -267,7 +282,10 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
     eq(decodeWord(d.headers.subject), `RE: ${SUBJECT}`);
     eq(d.headers['in-reply-to'], '<m2@x>');
     eq(d.headers.references, '<m1@x> <m2@x>');
-    assert.ok(d.text.includes('your External Infrastructure report has been completed and released'));
+    assert.ok(d.text.startsWith('Hi team,\n\nGreat news, your report is now ready!'), d.text);
+    assert.ok(d.text.endsWith('Best wishes,\nBen Reilly\nCognisys'), d.text);
+    assert.ok(d.html.includes('<div class="gmail_signature" data-smartmail="gmail_signature"><div>Ben Reilly<br>Cognisys</div></div>'));
+    eq(w.signatures, [{ mailbox: BEN, from: BEN }]);
     eq(w.finished[0].state, 'drafted');
     eq(w.finished[0].mailbox, BEN);
     eq(w.finished[0].to, ['jane@acme.com', 'bob@acme.com']);
@@ -276,7 +294,7 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
     assert.ok(w.slack[0].text.includes(`drafted in ${BEN}'s Drafts, from ${BEN}`));
     assert.ok(w.slack[0].text.includes('<@U_BEN> please check it and press send'));
     assert.ok(w.slack[0].text.includes('#all/b-1'));
-    assert.ok(!w.slack[0].text.includes('client\'s name only'));
+    assert.ok(!w.slack[0].text.includes('signature'));
   });
 
   await test('the chain in two mailboxes (Alice cc\'d) is one chain, drafted in Ben\'s — he sent it', async () => {
@@ -345,31 +363,45 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
     eq(d.headers['in-reply-to'], '<m3@x>');
   });
 
-  await test('no link match: one chain with the client name in its subject (in two mailboxes) is used, flagged', async () => {
+  await test('only a portal link matches: a thread with just the client name is never used', async () => {
     stub({ boxes: {
       [BEN]: { name: ['b-1'], threads: { 'b-1': BEN_COPY } },
       [ALICE]: { name: ['a-1'], threads: { 'a-1': ALICE_COPY } },
     } });
-    eq(await reportEmail.draftReportEmail(RELEASE), 'drafted');
-    eq(w.finished[0].match, 'client-name');
-    assert.ok(w.slack[0].text.includes('client\'s name only'));
-  });
-
-  await test('no link match and two different chains by name: nothing drafted, asks for it by hand', async () => {
-    const other = { id: 'b-2', messages: [m('z1', 500, true, { from: BEN, to: 'x@acme.com', subject: 'Acme Corp renewal' })] };
-    stub({ boxes: { [BEN]: { name: ['b-1', 'b-2'], threads: { 'b-1': BEN_COPY, 'b-2': other } } } });
     eq(await reportEmail.draftReportEmail(RELEASE), 'no_thread');
     eq(w.drafts.length, 0);
+    eq(w.searches.filter((x) => !x.q.startsWith('(')), [], 'no other kind of search');
     eq(w.finished[0].state, 'no_thread');
-    assert.ok(w.slack[0].text.includes('2 chains have "Acme Corp" in the subject'));
-    assert.ok(w.slack[0].text.includes('Please send the report email by hand'));
+    eq(w.slack[0].text, ':warning: Report email not drafted — the onboarding email thread for Acme Corp couldn\'t be found. Please send the report email by hand.');
+  });
+
+  await test('no portal links on record: nothing searched, and Slack says the thread couldn\'t be found', async () => {
+    stub();
+    dfStore.findByReportId = async () => null;
+    eq(await reportEmail.draftReportEmail(RELEASE), 'no_thread');
+    eq(w.searches, []);
+    assert.ok(w.slack[0].text.includes('couldn\'t be found (no portal links are on record for this report)'));
+  });
+
+  await test('no Gmail signature: still drafted, and Slack says to add it before sending', async () => {
+    stub({ signature: '' });
+    eq(await reportEmail.draftReportEmail(RELEASE), 'drafted');
+    assert.ok(decodeRaw(w.drafts[0].raw).text.endsWith('Best wishes,'));
+    assert.ok(w.slack[0].text.includes(`No Gmail signature found for ${BEN} — add your signature before sending`));
+  });
+
+  await test('a signature that can\'t be read never stops the draft, or marks the connection broken', async () => {
+    stub({ signatureError: new Error('Request had insufficient authentication scopes.') });
+    eq(await reportEmail.draftReportEmail(RELEASE), 'drafted');
+    eq(w.markedBroken, []);
+    assert.ok(w.slack[0].text.includes('No Gmail signature found'));
   });
 
   await test('no chain at all: nothing drafted, and connections needing reconnecting are named', async () => {
     stub({ boxes: { [BEN]: {} }, broken: ['carl@cognisys.group'], failing: { [ALICE]: new Error('invalid_grant') } });
     eq(await reportEmail.draftReportEmail(RELEASE), 'no_thread');
     eq(w.drafts.length, 0);
-    assert.ok(w.slack[0].text.includes('no onboarding email chain for Acme Corp'));
+    assert.ok(w.slack[0].text.includes('the onboarding email thread for Acme Corp couldn\'t be found'));
     assert.ok(w.slack[0].text.includes(`Gmail needs reconnecting in the SFE portal: carl@cognisys.group, ${ALICE}`));
   });
 

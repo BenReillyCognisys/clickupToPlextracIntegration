@@ -21,16 +21,15 @@
 // its draft goes in the copy of the PM who last wrote in it — or, when that PM hasn't
 // connected, a connected colleague who holds a copy. A connection Google refuses is
 // marked to be reconnected, skipped, and named in the release thread if the chain
-// isn't found. When no chain holds a link
-// (an onboarding email sent without them), one with the client's name in its subject
-// from the last 6 months is used — but only when there is exactly one, and Slack says
-// the match was on the name only.
+// isn't found. The chain is ONLY ever found by a portal link in it: when no chain holds
+// one, nothing is drafted and the release thread says the thread couldn't be found.
 //
 // Who it goes to. Reply-all on the chain's latest message that has the client on it:
 // every non-Cognisys address in To, the Cognisys people in Cc (pentestpm@ too, when it
 // was on the chain), the PM themselves never. It is from the address the PM last used
 // in the chain, and carries In-Reply-To/References so it threads for the client too.
-// The wording is config/report-email.js.
+// The wording is config/report-email.js, signed off with the PM's own Gmail signature
+// for that address.
 //
 // Once per report (lib/report-email-store): a second release of the same report, or
 // a webhook delivered twice, makes no second draft. A run that found no chain can be
@@ -115,10 +114,6 @@ const EXCLUDE = '-in:drafts -in:chats';
 function linkQuery(tokens) {
   return `(${tokens.map((t) => `"${t}"`).join(' OR ')}) ${EXCLUDE}`;
 }
-function clientNameQuery(clientName) {
-  const name = String(clientName || '').replace(/["\\]/g, ' ').replace(/\s+/g, ' ').trim();
-  return name ? `subject:"${name}" newer_than:6m ${EXCLUDE}` : null;
-}
 
 const sentMessages = (thread) => thread.messages.filter((m) => !m.draft);
 const latestDate = (messages) => Math.max(0, ...messages.map((m) => m.date || 0));
@@ -197,44 +192,38 @@ function pickCopy(chain, order = []) {
 }
 
 /**
- * The client's onboarding chain: { copy: { mailbox, thread }, match: 'link' | 'client-name',
- * unsearched }, or { copy: null, candidates, unsearched } when none was picked.
+ * The client's onboarding chain — the one holding their portal link: { copy: { mailbox,
+ * thread }, unsearched }, or { copy: null, unsearched } when no chain holds one (or there
+ * are no links to search for). Never guessed from anything else.
  */
-async function findThread({ tokens, clientName }) {
-  const unsearched = new Set();
-  let order = [];
-  const search = async (q) => {
-    const result = await searchMailboxes(q, 5);
-    result.unsearched.forEach((m) => unsearched.add(m));
-    order = result.order;
-    return groupChains(result.copies);
-  };
-  if (tokens.length) {
-    const chains = (await search(linkQuery(tokens))).sort((a, b) => chainActivity(b) - chainActivity(a));
-    if (chains.length) return { copy: pickCopy(chains[0], order), match: 'link', unsearched: [...unsearched] };
-  }
-  const q = clientNameQuery(clientName);
-  if (!q) return { copy: null, candidates: 0, unsearched: [...unsearched] };
-  const chains = await search(q);
-  if (chains.length === 1) return { copy: pickCopy(chains[0], order), match: 'client-name', unsearched: [...unsearched] };
-  return { copy: null, candidates: chains.length, unsearched: [...unsearched] };
+async function findThread({ tokens }) {
+  if (!tokens.length) return { copy: null, unsearched: [] };
+  const result = await searchMailboxes(linkQuery(tokens), 5);
+  const chains = groupChains(result.copies).sort((a, b) => chainActivity(b) - chainActivity(a));
+  return { copy: chains.length ? pickCopy(chains[0], result.order) : null, unsearched: result.unsearched };
 }
 
-/** "External Infrastructure" from "External Infrastructure | October 2026". */
-function reportTitle(reportName) {
-  return String(reportName || '').split('|')[0].trim() || 'penetration test';
+// The sender's Gmail signature, or '' — never fails the draft: a signature that can't be
+// read just means the PM adds it before sending (Slack says so).
+async function signatureFor(mailbox, fromEmail, reportId) {
+  try {
+    return await gmail.getSignature(mailbox, fromEmail);
+  } catch (err) {
+    log.warn('Report email: could not read the Gmail signature — drafting without it', { report_id: reportId, mailbox, reason: err.message });
+    return '';
+  }
 }
 
 /**
  * Everything the draft needs, read-only (scripts/preview-report-email.js prints it):
- *   { ok: true, mailbox, from, threadId, match, tokens, unsearched, to, cc, subject,
- *     inReplyTo, references, text, html }
- *   { ok: false, state: 'no_thread' | 'no_client', tokens, unsearched, candidates?, mailbox?, threadId? }
+ *   { ok: true, mailbox, from, threadId, tokens, unsearched, to, cc, subject,
+ *     inReplyTo, references, text, html, signature: boolean }
+ *   { ok: false, state: 'no_thread' | 'no_client', tokens, unsearched, mailbox?, threadId? }
  */
-async function prepareReportEmail({ reportId, clientName, reportName }) {
+async function prepareReportEmail({ reportId }) {
   const tokens = await portalTokens(reportId);
-  const { copy, match, candidates, unsearched } = await findThread({ tokens, clientName });
-  if (!copy) return { ok: false, state: 'no_thread', tokens, candidates, unsearched };
+  const { copy, unsearched } = await findThread({ tokens });
+  if (!copy) return { ok: false, state: 'no_thread', tokens, unsearched };
 
   const { mailbox, thread } = copy;
   const sent = sentMessages(thread);
@@ -249,24 +238,23 @@ async function prepareReportEmail({ reportId, clientName, reportName }) {
     recipients = message.replyRecipients(sent[i].headers, opts);
   }
   if (!recipients.to.length) {
-    return { ok: false, state: 'no_client', tokens, unsearched, mailbox, threadId: thread.id, match };
+    return { ok: false, state: 'no_client', tokens, unsearched, mailbox, threadId: thread.id };
   }
 
-  const body = message.renderBody(EMAIL.paragraphs({
-    reportTitle: reportTitle(reportName), plextracUrl: EMAIL.plextracUrl(),
-  }));
+  const signatureHtml = await signatureFor(mailbox, from?.email, reportId);
+  const body = message.renderBody(EMAIL.paragraphs(), { signatureHtml });
   return {
     ok: true,
     mailbox,
     from,
     threadId: thread.id,
-    match,
     tokens,
     unsearched,
     ...recipients,
     subject: message.replySubject(latest.headers.subject || sent[0].headers.subject),
     ...message.threadingHeaders(latest.headers),
     ...body,
+    signature: Boolean(signatureHtml),
   };
 }
 
@@ -295,8 +283,8 @@ function draftedText({ prepared, clientName, mention }) {
     `To: ${esc(emails(prepared.to))}${prepared.cc.length ? ` · Cc: ${esc(emails(prepared.cc))}` : ''}`,
     `<${gmail.threadUrl(prepared.threadId, prepared.mailbox)}|Open the email chain>`,
   ];
-  if (prepared.match === 'client-name') {
-    lines.push(':warning: The chain was matched on the client\'s name only (no portal link found in it) — make sure it\'s the right one.');
+  if (!prepared.signature) {
+    lines.push(`:warning: No Gmail signature found for ${esc(from)} — add your signature before sending.`);
   }
   return lines.join('\n');
 }
@@ -306,16 +294,12 @@ function notMadeText({ prepared, clientName }) {
     return `:warning: Report email not drafted — the email chain for ${esc(clientName)} in ${esc(prepared.mailbox)} `
       + `has no client address on it (<${gmail.threadUrl(prepared.threadId, prepared.mailbox)}|chain>). Please send the report email by hand.`;
   }
-  const searched = prepared.tokens.length ? 'the client\'s portal links' : 'no portal links on record';
-  const names = prepared.candidates > 1
-    ? `${prepared.candidates} chains have "${esc(clientName)}" in the subject, so none was picked`
-    : `nothing has "${esc(clientName)}" in the subject`;
+  const why = prepared.tokens.length ? '' : ' (no portal links are on record for this report)';
   const skipped = prepared.unsearched?.length
     ? ` Not searched — Gmail needs reconnecting in the SFE portal: ${esc(prepared.unsearched.join(', '))}.`
     : '';
-  return `:warning: Report email not drafted — no onboarding email chain for ${esc(clientName)} found in the connected `
-    + `PM mailboxes (searched for ${searched}; ${names}).${skipped} If the PM who sent the onboarding email hasn't `
-    + 'connected their Gmail in the SFE portal, that\'s why. Please send the report email by hand.';
+  return `:warning: Report email not drafted — the onboarding email thread for ${esc(clientName)} couldn't be found${why}.`
+    + `${skipped} Please send the report email by hand.`;
 }
 
 function failedText(err, mailbox = null) {
@@ -353,11 +337,10 @@ async function draftReportEmail({ reportId, clientName, reportName, channel, thr
   log.info('Report email STARTED', { ...ctx, mode: mode() });
   let prepared = null;
   try {
-    prepared = await prepareReportEmail({ reportId, clientName, reportName });
+    prepared = await prepareReportEmail({ reportId });
     if (!prepared.ok) {
       log.warn(`Report email not drafted — ${prepared.state}`, {
-        ...ctx, tokens: prepared.tokens.length, candidates: prepared.candidates ?? null,
-        unsearched: prepared.unsearched?.join(', ') || null,
+        ...ctx, tokens: prepared.tokens.length, unsearched: prepared.unsearched?.join(', ') || null,
       });
       await store.finish(reportId, {
         state: prepared.state, tokens: prepared.tokens,
@@ -371,13 +354,13 @@ async function draftReportEmail({ reportId, clientName, reportName, channel, thr
       raw: message.buildRawMessage(prepared), threadId: prepared.threadId,
     });
     await store.finish(reportId, {
-      state: 'drafted', mailbox: prepared.mailbox, from: prepared.from?.email || null, match: prepared.match,
+      state: 'drafted', mailbox: prepared.mailbox, from: prepared.from?.email || null,
       thread_id: draft.threadId, draft_id: draft.draftId, message_id: draft.messageId, subject: prepared.subject,
-      to: prepared.to.map((a) => a.email), cc: prepared.cc.map((a) => a.email),
+      to: prepared.to.map((a) => a.email), cc: prepared.cc.map((a) => a.email), signature: prepared.signature,
     });
     log.info('Report email DRAFTED', {
-      ...ctx, mailbox: prepared.mailbox, match: prepared.match, thread_id: draft.threadId,
-      to: emails(prepared.to), cc: emails(prepared.cc),
+      ...ctx, mailbox: prepared.mailbox, thread_id: draft.threadId,
+      to: emails(prepared.to), cc: emails(prepared.cc), signature: prepared.signature,
     });
 
     // The PM whose Drafts it is in sends it; whoever released the report if Slack can't find them.
@@ -441,5 +424,5 @@ async function rerunReportEmail({ reportId, force = false }) {
 module.exports = {
   draftReportEmail, rerunReportEmail, prepareReportEmail, reportContext, mode,
   // for tests
-  tokensIn, linkQuery, clientNameQuery, reportTitle, findThread, portalTokens, groupChains, pickCopy,
+  tokensIn, linkQuery, findThread, portalTokens, groupChains, pickCopy,
 };

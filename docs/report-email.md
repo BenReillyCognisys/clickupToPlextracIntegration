@@ -17,7 +17,8 @@ Plextrac: report → Published
        └ report email (this feature)
             1. find the client's portal links (auth form, test-files upload)
             2. search the CONNECTED PMs' mailboxes for the chain holding them
-            3. reply-all to it as a Gmail DRAFT in the mailbox of the PM running it
+            3. reply-all to it as a Gmail DRAFT in the mailbox of the PM running it, signed with their Gmail signature
+               (no chain holds the links → nothing drafted; Slack says the thread couldn't be found)
             4. reply in the Slack release thread: "drafted in your Drafts, @PM please check and send"
 ```
 
@@ -117,7 +118,8 @@ node scripts/preview-report-email.js 277397777 277398012
 
 It lists who has connected. For each report it prints:
 - the portal links searched for
-- the chain it would reply in: whose mailbox it's in, and how it was matched
+- the chain it would reply in, and whose mailbox it's in
+- whether the sender's Gmail signature was found
 - the From, To and Cc lines
 - the email text
 
@@ -143,13 +145,15 @@ The draft goes in the copy belonging to **the PM who last wrote in the chain**. 
 hasn't connected, it goes in the copy of a connected colleague who was on the chain, and
 that colleague is tagged instead.
 
-If no chain holds a link (for example, an onboarding email sent without the portal links),
-the service falls back to a chain from the last 6 months with the **client's name in the
-subject**. It only uses that fallback when exactly one chain matches, and the Slack message
-warns that the match was on the name only.
+**The chain is only ever found by a portal link in it.** Nothing else is used to guess it: not
+the client's name, not the subject. If no chain holds a link, nothing is drafted, and the
+release thread says:
 
-If the chain isn't found, the release thread lists any connections that need reconnecting,
-since that may be why.
+```
+⚠️ Report email not drafted — the onboarding email thread for Acme Corp couldn't be found. Please send the report email by hand.
+```
+
+It also lists any connections that need reconnecting, since that may be why.
 
 ## Who it goes to, and from
 
@@ -164,10 +168,14 @@ The draft carries `In-Reply-To` / `References` headers, so it threads in the cli
 
 ## The wording
 
-The wording lives in `config/report-email.js`. It is generic: it has no names and no
-findings, and it links to Plextrac (`REPORT_EMAIL_PLEXTRAC_URL`). The only report-specific
-part is the testing type, taken from the report name ("External Infrastructure" from
-"External Infrastructure | October 2026").
+The wording lives in `config/report-email.js`: the team's standard "your report is ready"
+email ("Hi team, Great news, your report is now ready! …"), ending "Best wishes,". It is the
+same for every report.
+
+Below "Best wishes," comes **the PM's own Gmail signature**: the one set in Gmail (Settings →
+Signature) for the address the reply is from, or their default signature if that address has
+none. It's read with the Gmail access the PM already granted. If no signature is found, the
+email is still drafted without one, and the Slack message says to add it before sending.
 
 ## Once per report
 
@@ -177,7 +185,7 @@ again, or a webhook delivered twice, makes no second draft.
 | Outcome | Slack says | Can be retried |
 |---|---|---|
 | `drafted` | draft waiting in a PM's Drafts, @PM | only with `force` |
-| `no_thread` | no chain found in the connected mailboxes, send by hand | yes |
+| `no_thread` | the thread couldn't be found (no chain holds the portal links), send by hand | yes |
 | `no_client` | chain has no client address, send by hand | yes |
 | `failed` | the error (and who needs to reconnect), send by hand | yes |
 
@@ -200,7 +208,9 @@ Every line starts with `Report email` (or `Gmail`, for connections) and carries 
 [WARN] Gmail connect refused — not the portal user's own mailbox | portal_email="…" | google_account="…"
 [INFO] Report email STARTED | report_id=… | client="Acme Corp" | mode="draft"
 [WARN] Report email: could not search a mailbox | mailbox="alice@cognisys.group" | reason="invalid_grant: …"
-[INFO] Report email DRAFTED | report_id=… | mailbox="ben@cognisys.group" | match="link" | thread_id="…" | to="…" | cc="…"
-[WARN] Report email not drafted — no_thread | report_id=… | tokens=2 | candidates=0 | unsearched="alice@cognisys.group"
+[WARN] Report email: could not read the Gmail signature — drafting without it | report_id=… | mailbox="…" | reason="…"
+[INFO] Report email DRAFTED | report_id=… | mailbox="ben@cognisys.group" | thread_id="…" | to="…" | cc="…" | signature=true
+[WARN] Report email not drafted — no_thread | report_id=… | tokens=2 | unsearched="alice@cognisys.group"
+[INFO] Report email skipped — REPORT_EMAIL_MODE is off | report_id=…
 [ERROR] Report email FAILED | report_id=… | reason="…" | fix="the PM reconnects Gmail in the SFE portal"
 ```

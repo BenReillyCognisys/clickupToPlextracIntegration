@@ -1,8 +1,8 @@
 // Usage: node scripts/preview-report-email.js <plextracReportId> [more ids…]
 //
 // Shows the report email a release of each report would draft (pipeline/report-email.js)
-// — the portal tokens searched for, the email chain found (whose mailbox, and how it was
-// matched), who it would go to, and the email itself — WITHOUT creating anything: no
+// — the portal tokens searched for, the email chain holding them (whose mailbox), the
+// signature, who it would go to, and the email itself — WITHOUT creating anything: no
 // draft, no Slack message, no record. Gmail is only read. Runs whatever
 // REPORT_EMAIL_MODE is set to, so it can check the chain lookup against the real PM
 // mailboxes before draft mode is switched on.
@@ -43,12 +43,13 @@ const list = (addrs) => addrs.map((a) => (a.name ? `${a.name} <${a.email}>` : a.
       if (!p.ok) {
         console.log(p.state === 'no_client'
           ? `Chain:   ${p.mailbox} ${gmail.threadUrl(p.threadId, p.mailbox)} — but no client address on it`
-          : `Chain:   NOT FOUND${p.candidates > 1 ? ` (${p.candidates} chains have the client's name in the subject)` : ''}`);
+          : 'Chain:   NOT FOUND — no thread in the connected mailboxes holds the portal links');
         console.log(`Result:  would not draft (${p.state})\n`);
         continue;
       }
-      console.log(`Chain:   ${p.mailbox} ${gmail.threadUrl(p.threadId, p.mailbox)} (matched on ${p.match === 'link' ? 'a portal link' : 'the client name only'})`);
+      console.log(`Chain:   ${p.mailbox} ${gmail.threadUrl(p.threadId, p.mailbox)}`);
       console.log(`From:    ${p.from ? list([p.from]) : `${p.mailbox} (Gmail's default)`}`);
+      console.log(`Signed:  ${p.signature ? 'with the Gmail signature' : 'NO Gmail signature found for that address'}`);
       console.log(`To:      ${list(p.to)}\nCc:      ${list(p.cc)}\nSubject: ${p.subject}`);
       console.log(`Threads: In-Reply-To ${p.inReplyTo || '(none)'}`);
       console.log(`\n${p.text.replace(/^/gm, '  | ')}\n`);
