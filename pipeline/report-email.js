@@ -333,8 +333,11 @@ function failedText(err, mailbox = null) {
  * Returns the state it left: 'off' | 'already' | 'drafted' | 'no_thread' | 'no_client' | 'failed'.
  */
 async function draftReportEmail({ reportId, clientName, reportName, channel, threadTs, releaserEmail = null, force = false }) {
-  if (mode() === 'off') return 'off';
   const ctx = { report_id: reportId, client: clientName, report: reportName };
+  if (mode() === 'off') {
+    log.info('Report email skipped — REPORT_EMAIL_MODE is off', ctx);
+    return 'off';
+  }
 
   try {
     if (!(await store.claim(reportId, { force }))) {
