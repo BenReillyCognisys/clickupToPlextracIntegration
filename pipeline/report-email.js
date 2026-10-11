@@ -13,6 +13,7 @@
 //          then they can edit it in Drafts or delete it to stop it. Only sent when the PM
 //          has written in the chain themselves; a chain they were only cc'd on is drafted.
 //          Due emails are sent by sendDueEmails(), every minute (startScheduledSends).
+// While no PM has chosen draft or auto send, a release does nothing at all (no Slack notice).
 // REPORT_EMAIL_MODE overrides every PM: unset (or "pm") leaves it to them, "draft" never
 // sends, "off" turns the report email off for everyone; any other value counts as off.
 //
@@ -381,6 +382,15 @@ async function draftReportEmail({ reportId, clientName, reportName, channel, thr
   const ctx = { report_id: reportId, client: clientName, report: reportName };
   if (mode() === 'off') {
     log.info('Report email skipped — REPORT_EMAIL_MODE is off for everyone', ctx);
+    return 'off';
+  }
+  // Until some PM has turned report emails on, releases stay quiet, as before there was a choice.
+  const someoneOn = await connections.anyOptedIn().catch((err) => {
+    log.error("Report email skipped — could not read the PMs' choices", { ...ctx, reason: err.message });
+    return false;
+  });
+  if (!someoneOn) {
+    log.info('Report email skipped — no PM has report emails turned on', ctx);
     return 'off';
   }
 

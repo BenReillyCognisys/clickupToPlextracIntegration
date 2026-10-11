@@ -281,10 +281,11 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
   function stub({
     boxes = { [BEN]: { link: ['b-1'], threads: { 'b-1': BEN_COPY } }, [ALICE]: {} },
     usable = [BEN, ALICE], broken = [], failing = {}, claim = true, draftError = null,
-    signature = '<div>Ben Reilly<br>Cognisys</div>', signatureError = null, pmMode = 'draft',
+    signature = '<div>Ben Reilly<br>Cognisys</div>', signatureError = null, pmMode = 'draft', optedIn = true,
   } = {}) {
     w = { searches: [], drafts: [], finished: [], slack: [], markedBroken: [], signatures: [], modeAsked: [] };
     connections.modeFor = async (mailbox) => { w.modeAsked.push(mailbox); return typeof pmMode === 'function' ? pmMode(mailbox) : pmMode; };
+    connections.anyOptedIn = async () => optedIn;
     gmail.getSignature = async (mailbox, from) => {
       w.signatures.push({ mailbox, from });
       if (signatureError) throw signatureError;
@@ -570,6 +571,12 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
 
   // ── Each PM's own choice (SFE portal → Gmail) ─────────────────────────────
   console.log('\neach PM\'s report email choice:');
+
+  await test('no PM has turned report emails on yet: the release stays quiet', async () => {
+    stub({ optedIn: false });
+    eq(await reportEmail.draftReportEmail(RELEASE), 'off');
+    eq(w.searches.length + w.drafts.length + w.slack.length + w.finished.length, 0);
+  });
 
   await test('the PM whose mailbox it is chose off: nothing drafted, and Slack asks for it by hand', async () => {
     stub({ pmMode: 'off' });
