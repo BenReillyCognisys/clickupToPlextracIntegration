@@ -39,12 +39,12 @@ of the PM whose mailbox the email goes in is the one used:
 
 | Choice | What happens on release |
 |---|---|
-| **Off** (until they choose) | Nothing is made. The release thread asks for the report email to be sent by hand. |
-| **Draft** | The reply is saved in their Drafts; the release thread @s them to check it and press send. |
-| **Auto send** | The reply is drafted, then sent for them after a hold (`REPORT_EMAIL_SEND_DELAY_MINUTES`, 15). The release thread says when. Until then they can edit it in Drafts (the edited version is sent) or delete the draft to stop it. |
+| **Off** | Nothing is made. The release thread asks for the report email to be sent by hand. |
+| **Draft** (a new connection starts here) | The reply is saved in their Drafts; the release thread @s them to check it and press send. |
+| **Auto send** | The reply is drafted, then sent for them after a hold (`REPORT_EMAIL_SEND_DELAY_MINUTES`, 5). The release thread says when. Until then they can edit it in Drafts (the edited version is sent) or delete the draft to stop it. |
 
-Auto send is only used when the PM has written in the onboarding chain themselves. A chain they
-were only cc'd on is drafted instead, never sent as them. Due emails are sent by a check every
+Auto send doesn't depend on who last replied in the chain: it is sent from the mailbox it was
+drafted in, whether or not that PM has written in the chain. Due emails are sent by a check every
 minute (`startScheduledSends`), which also sends any that came due while the service was down.
 If auto send is turned off during the hold, the email is left in Drafts and the thread says so.
 The outcome — sent, not sent because the draft was deleted, or failed (left in Drafts) — is
@@ -108,7 +108,7 @@ GOOGLE_OAUTH_CLIENT_ID=…apps.googleusercontent.com
 GOOGLE_OAUTH_CLIENT_SECRET=…
 REPORT_EMAIL_TOKEN_KEY=<64 hex>   # node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 # REPORT_EMAIL_MODE=off           # optional override: unset/pm (each PM chooses) | draft | off
-# REPORT_EMAIL_SEND_DELAY_MINUTES=15   # auto send hold
+# REPORT_EMAIL_SEND_DELAY_MINUTES=5    # auto send hold
 ```
 
 `SECURE_PORTAL_URL` (already set) is where the browser goes back to after connecting. Restart

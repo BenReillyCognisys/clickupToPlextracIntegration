@@ -66,6 +66,13 @@ require('../lib/deliveryflow-store').findEngagementsByReportIds = async () => ne
 let clickupCalls = 0;
 require('../lib/task-store').findByCuid = async (cuid) => (cuid === 'c-303' ? { clickup_task_id: 'task-303' } : null);
 require('../lib/clickup-api').getTask = async () => { clickupCalls++; return { due_date: String(Date.UTC(2026, 9, 9, 12)) }; };
+// Plextrac clients, for entries queued without a client name.
+const clientLookups = [];
+require('../lib/plextrac-api').getClient = async (id) => {
+  clientLookups.push(id);
+  if (Number(id) === 55) return { name: 'Echo Industries' };
+  throw new Error('Plextrac 404');
+};
 
 const qaQueue = require('../lib/qa-queue-store');
 const router = require('../routes/deliveryflow-qa-queue');
@@ -231,6 +238,25 @@ async function test(description, fn) {
     assert.strictEqual(second.json.entries.find((e) => e.reportId === 101).dueDate, null, 'DeliveryFlow reports are left to DeliveryFlow');
     await new Promise((r) => setTimeout(r, 20));
     assert.strictEqual(clickupCalls, 1);
+  });
+
+  await test('an entry queued without a client name gets it from Plextrac, once', async () => {
+    clientLookups.length = 0;
+    // No client id recorded either: it is read from the report link.
+    await qaQueue.upsert({ reportId: 505, reportName: 'Echo Web', reportUrl: 'https://p/client/55/report/505', stage: 'first' });
+    await qaQueue.upsert({ reportId: 606, clientId: 66, reportName: 'Foxtrot API', stage: 'first' });
+    const res = await request('/api/deliveryflow/qa-queue');
+    const echo = res.json.entries.find((e) => e.reportId === 505);
+    assert.strictEqual(echo.clientName, 'Echo Industries');
+    assert.strictEqual(echo.clientId, 55);
+    assert.strictEqual(res.json.entries.find((e) => e.reportId === 606).clientName, null, 'Plextrac failing leaves it unknown');
+    assert.strictEqual((await qaQueue.get(505)).client_name, 'Echo Industries', 'saved on the entry');
+    assert.deepStrictEqual(clientLookups.filter((id) => Number(id) === 55), [55]);
+    // Saved: not looked up again; and a later status change without a name keeps it.
+    await request('/api/deliveryflow/qa-queue');
+    assert.strictEqual(clientLookups.filter((id) => Number(id) === 55).length, 1);
+    await qaQueue.upsert({ reportId: 505, reportName: 'Echo Web', reportUrl: 'https://p/client/55/report/505', stage: 'second' });
+    assert.strictEqual((await qaQueue.get(505)).client_name, 'Echo Industries');
   });
 
   await test('bad input and a report no longer queued', async () => {

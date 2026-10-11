@@ -597,7 +597,7 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
     eq(f.draft_id, 'r-1');
     eq([f.client_name, f.channel, f.thread_ts], ['Acme Corp', 'C_RELEASE', '111.222']);
     const hold = f.send_at.getTime() - before;
-    assert.ok(hold >= 15 * 60 * 1000 - 50 && hold <= 15 * 60 * 1000 + 1000, `hold ${hold}`);
+    assert.ok(hold >= 5 * 60 * 1000 - 50 && hold <= 5 * 60 * 1000 + 1000, `hold ${hold}`);
     const text = w.slack[0].text;
     assert.ok(text.includes('will be sent automatically at'), text);
     assert.ok(text.includes(`<@U_BEN> it's in ${BEN}'s Drafts until then`), text);
@@ -606,12 +606,12 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
 
   await test('auto send with REPORT_EMAIL_SEND_DELAY_MINUTES', async () => {
     stub({ pmMode: 'send' });
-    process.env.REPORT_EMAIL_SEND_DELAY_MINUTES = '5';
+    process.env.REPORT_EMAIL_SEND_DELAY_MINUTES = '20';
     const before = Date.now();
     await reportEmail.draftReportEmail(RELEASE);
     delete process.env.REPORT_EMAIL_SEND_DELAY_MINUTES;
     const hold = w.finished[0].send_at.getTime() - before;
-    assert.ok(hold >= 5 * 60 * 1000 - 50 && hold <= 5 * 60 * 1000 + 1000, `hold ${hold}`);
+    assert.ok(hold >= 20 * 60 * 1000 - 50 && hold <= 20 * 60 * 1000 + 1000, `hold ${hold}`);
   });
 
   await test('auto send, but REPORT_EMAIL_MODE=draft: only drafted', async () => {
@@ -623,11 +623,11 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
     assert.ok(w.slack[0].text.includes('please check it and press send'));
   });
 
-  await test('auto send, but the PM was only cc\'d on the chain: drafted, never sent as them', async () => {
+  await test('auto send whoever last replied: a PM only cc\'d on the chain still has it sent', async () => {
     stub({ pmMode: 'send', boxes: { [BEN]: {}, [ALICE]: { link: ['a-1'], threads: { 'a-1': ALICE_COPY } } } });
-    eq(await reportEmail.draftReportEmail(RELEASE), 'drafted');
+    eq(await reportEmail.draftReportEmail(RELEASE), 'scheduled');
     eq(w.drafts[0].mailbox, ALICE);
-    eq(w.finished[0].state, 'drafted');
+    eq(w.finished[0].state, 'scheduled');
   });
 
   // ── Sending what's due ───────────────────────────────────────────────────────

@@ -35,6 +35,7 @@ const express = require('express');
 const { requireDeliveryFlowKey } = require('../lib/deliveryflow-key-auth');
 const qaQueue = require('../lib/qa-queue-store');
 const { refreshDueDates } = require('../lib/qa-queue-due');
+const { fillClientNames } = require('../lib/qa-queue-clients');
 const { mayClaim, sameMailbox } = require('../config/qa-queue');
 const store = require('../lib/deliveryflow-store');
 const users = require('../lib/plextrac-users');
@@ -130,6 +131,8 @@ router.get('/', requireDeliveryFlowKey, async (req, res) => {
         return new Map();
       }),
       actorNames(all),
+      // Entries queued without a client name get it from Plextrac (once; it is saved).
+      fillClientNames(all, (reportId, name, clientId) => qaQueue.setClientName(reportId, name, clientId)),
     ]);
     refreshDueDates(all, engagements);
     const viewer = String(req.query.viewer || '').trim().toLowerCase();

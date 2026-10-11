@@ -5,13 +5,13 @@
 // What happens is each PM's own choice, set on their Gmail page in the SFE portal
 // (lib/gmail-connections.js email_mode), for the mailbox the email goes in:
 //   off    nothing is made; the release thread asks for the email to be sent by hand
-//          (the default until the PM chooses)
+//          (connections from before the choice existed, until the PM chooses)
 //   draft  the reply is saved as a Gmail draft, and the release thread @s the PM to
 //          check it and press send
 //   send   the reply is drafted, then sent for them after a hold of
-//          REPORT_EMAIL_SEND_DELAY_MINUTES (15): the release thread says when, and until
-//          then they can edit it in Drafts or delete it to stop it. Only sent when the PM
-//          has written in the chain themselves; a chain they were only cc'd on is drafted.
+//          REPORT_EMAIL_SEND_DELAY_MINUTES (5): the release thread says when, and until
+//          then they can edit it in Drafts or delete it to stop it. Sent whoever last
+//          replied in the chain, from the mailbox it was drafted in.
 //          Due emails are sent by sendDueEmails(), every minute (startScheduledSends).
 // While no PM has chosen draft or auto send, a release does nothing at all (no Slack notice).
 // REPORT_EMAIL_MODE overrides every PM: unset (or "pm") leaves it to them, "draft" never
@@ -89,7 +89,7 @@ function effectiveMode(pmMode) {
   return ['off', 'draft', 'send'].includes(pmMode) ? pmMode : 'off';
 }
 
-const sendDelayMs = () => (Number(process.env.REPORT_EMAIL_SEND_DELAY_MINUTES) || 15) * 60 * 1000;
+const sendDelayMs = () => (Number(process.env.REPORT_EMAIL_SEND_DELAY_MINUTES) || 5) * 60 * 1000;
 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
@@ -423,19 +423,13 @@ async function draftReportEmail({ reportId, clientName, reportName, channel, thr
 
     // The choice of the PM whose mailbox it goes in (SFE portal → Gmail).
     const pmMode = await connections.modeFor(prepared.mailbox);
-    let action = effectiveMode(pmMode);
+    const action = effectiveMode(pmMode);
     if (action === 'off') {
       log.info('Report email not made — the PM has report emails turned off', { ...ctx, mailbox: prepared.mailbox, pm_mode: pmMode, override: mode() });
       await store.finish(reportId, { state: 'pm_off', mailbox: prepared.mailbox, thread_id: prepared.threadId });
       await say(channel, threadTs, pmOffText({ prepared, clientName }), reportId);
       return 'pm_off';
     }
-    // Only ever sent from a chain the PM has written in themselves.
-    if (action === 'send' && !prepared.from) {
-      log.info('Report email: auto send not used — the PM never wrote in this chain, so it is drafted', { ...ctx, mailbox: prepared.mailbox });
-      action = 'draft';
-    }
-
     const draft = await gmail.createDraft(prepared.mailbox, {
       raw: message.buildRawMessage(prepared), threadId: prepared.threadId,
     });

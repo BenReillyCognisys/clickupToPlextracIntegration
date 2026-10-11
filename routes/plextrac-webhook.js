@@ -13,6 +13,7 @@ const statusGuard = require('../pipeline/status-guard');
 const { withTaskLock } = require('../lib/task-lock');
 const { crossOffReport } = require('../pipeline/reports-due');
 const qaQueue = require('../lib/qa-queue-store');
+const { clientNameFor } = require('../lib/qa-queue-clients');
 const { requestQaFeedback } = require('../pipeline/qa-feedback');
 const kpiStore = require('../lib/qa-kpi-store');
 const submissionStore = require('../lib/qa-submission-store');
@@ -167,8 +168,12 @@ async function recordSubmission(reportStatus, actorCuid, ctx) {
 // Maintains the QA queue from a report's current status: add/move it for the two QA
 // rounds and the approved (ready-for-release) stage, remove it on release, and ignore every other status. Best-effort — any
 // failure is logged and swallowed so it never disrupts the rest of the webhook.
-async function updateQaQueue(reportStatus, { reportId, cuid, clientId, clientName, reportName, actorCuid }) {
+async function updateQaQueue(reportStatus, { reportId, cuid, clientId, clientName: knownName, reportName, actorCuid }) {
   const reportUrl = `${PLEXTRAC_BASE}/client/${clientId}/report/${reportId}`;
+  // Queued without a client name (e.g. a DeliveryFlow engagement recorded without one):
+  // read it from Plextrac, so the queue never shows an unknown client.
+  const queues = [QA_FIRST_STATUS, QA_SECOND_STATUS, QA_APPROVED_STATUS].includes(reportStatus);
+  const clientName = knownName || (queues ? await clientNameFor(clientId) : null);
   // actorCuid: who moved the report into this round (the author for the first round,
   // the first QA for the second), shown on DeliveryFlow's QA queue page.
   const base = { reportId, cuid, clientId, clientName, reportName, reportUrl, actorCuid };
