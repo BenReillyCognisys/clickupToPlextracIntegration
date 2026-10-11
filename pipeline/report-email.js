@@ -62,7 +62,7 @@ const approvedMessages = require('../lib/approved-message-store');
 const fields = require('./qa-review/report-fields');
 const { READY_FOR_RELEASE_CHANNEL } = require('./status-guard');
 const message = require('../lib/email-message');
-const { inlineImages } = require('../lib/inline-images');
+const { inlineImages, fetchImage } = require('../lib/inline-images');
 const EMAIL = require('../config/report-email');
 const log = require('../lib/logger');
 
@@ -263,8 +263,12 @@ async function prepareReportEmail({ reportId }) {
   }
 
   const signatureHtml = await signatureFor(mailbox, from?.email, reportId);
-  // The signature's images go in the email itself, so they show wherever it's read.
-  const signature = await inlineImages(signatureHtml);
+  // The signature's images go in the email itself, so they show wherever it's read. A
+  // signature copied from an email links its images inside the PM's own mailbox
+  // (mail.google.com/…view=fimg), which only they can open — those are read through the API.
+  const signature = await inlineImages(signatureHtml, {
+    fetch: (src) => (gmail.parseMailImageUrl(src) ? gmail.getMailImage(mailbox, src) : fetchImage(src)),
+  });
   for (const f of signature.failed) {
     log.warn('Report email: a signature image couldn\'t be embedded — left as a link', { report_id: reportId, mailbox, src: f.src, reason: f.reason });
   }

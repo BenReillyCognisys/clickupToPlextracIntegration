@@ -10,6 +10,11 @@
 // not. "Forward" is judged from the QA queue entry as it was before this change (the
 // round it was in), so the webhook reads it before updating the queue.
 //
+// Once per round: a report can go through a round of QA more than once (sent back and
+// resubmitted). Only the first time it leaves each round asks for feedback — recorded
+// for good in lib/qa-feedback-store.js — and the portal also never makes a second form
+// for the same report and round.
+//
 // The portal makes (or returns) the reviewer's form and its link; the link goes to the
 // reviewer alone by Slack DM, and DeliveryFlow shows it to them too (their pending
 // forms, routes/deliveryflow-pt-management.js). The answers are CONFIDENTIAL to PT
@@ -22,6 +27,7 @@
 const portal = require('../lib/secure-portal-api');
 const users = require('../lib/plextrac-users');
 const submissionStore = require('../lib/qa-submission-store');
+const requests = require('../lib/qa-feedback-store');
 const slack = require('../lib/slack');
 const people = require('../lib/slack-people');
 const log = require('../lib/logger');
@@ -86,10 +92,26 @@ async function requestQaFeedback({
       ? await personFor(prior.stage_actor_cuid, map)
       : null;
 
-    const res = await portal.createQaFeedback({
-      round, reportId, reportCuid, clientName, reportName, reportUrl,
-      engagementId: engagementId || null, reviewer, author, firstReviewer,
-    });
+    // Only the first time the report leaves this round asks: a report sent back and
+    // resubmitted, then passed again, gets no second form.
+    if (!(await requests.claim(reportId, round, reviewer.email))) {
+      log.info('QA feedback: not asked — feedback was already asked for this round of this report', {
+        report_id: reportId, round, reviewer: reviewer.email,
+      });
+      return null;
+    }
+
+    let res;
+    try {
+      res = await portal.createQaFeedback({
+        round, reportId, reportCuid, clientName, reportName, reportUrl,
+        engagementId: engagementId || null, reviewer, author, firstReviewer,
+      });
+    } catch (err) {
+      // Nothing was made, so the round can still be asked about next time.
+      await requests.release(reportId, round).catch(() => {});
+      throw err;
+    }
     log.info('QA feedback form ready', { report_id: reportId, round, reviewer: reviewer.email, created: res.created });
 
     if (res.created) {

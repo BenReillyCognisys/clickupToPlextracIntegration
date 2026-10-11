@@ -510,6 +510,53 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
     assert.ok(w.slack[0].text.includes('1 signature image(s) couldn\'t be loaded (HTTP 403) — check the signature before sending'), w.slack[0].text);
   });
 
+  // A signature copied from an email links its images inside the PM's own mailbox.
+  const MAIL_IMG = (n) => 'https://mail.google.com/mail/u/3?ui=2&amp;ik=7da89e27cb&amp;attid=0.' + n
+    + '&amp;permmsgid=msg-f:1836624024691098914&amp;th=197cffd1d1a94522&amp;view=fimg&amp;fur=ip'
+    + '&amp;sz=s0-l75-ft&amp;attbid=ANGjdJ8&amp;disp=emb&amp;realattid=ii_197cffc888290' + n + '&amp;zw';
+
+  await test('Gmail image links (signature copied from an email) are read from the mailbox through the API', async () => {
+    stub({ signature: `<div>Ben<img src="${MAIL_IMG(1)}" alt="Logo"><img src="${MAIL_IMG(2)}"></div>` });
+    const asked = [];
+    const realGet = axios.get;
+    axios.get = async () => { throw new Error('a Gmail link must not be fetched over the web'); };
+    gmail.getMailImage = async (mailbox, src) => { asked.push({ mailbox, src }); return { data: PNG, contentType: 'image/png' }; };
+    try {
+      eq(await reportEmail.draftReportEmail(RELEASE), 'drafted');
+    } finally {
+      axios.get = realGet;
+    }
+    eq(asked.map((a) => a.mailbox), [BEN, BEN]);
+    assert.ok(asked[0].src.includes('realattid=ii_197cffc8882901'), 'the entity-decoded link');
+    const d = decodeRaw(w.drafts[0].raw);
+    eq(d.images.length, 2);
+    assert.ok(!d.html.includes('mail.google.com'), 'no mailbox link left in the email');
+    assert.ok(!w.slack[0].text.includes('couldn\'t be loaded'), w.slack[0].text);
+  });
+
+  await test('a Gmail image link whose email is gone stays a link, with the reason', async () => {
+    stub({ signature: `<div>Ben<img src="${MAIL_IMG(1)}"></div>` });
+    gmail.getMailImage = async () => { throw new Error('the email it was copied from is no longer in the mailbox'); };
+    eq(await reportEmail.draftReportEmail(RELEASE), 'drafted');
+    assert.ok(w.slack[0].text.includes('the email it was copied from is no longer in the mailbox'), w.slack[0].text);
+  });
+
+  await test('parseMailImageUrl and findImagePart', () => {
+    const src = MAIL_IMG(3).replace(/&amp;/g, '&');
+    eq(gmail.parseMailImageUrl(src), { messageId: '197cffd1d1a94522', realAttId: 'ii_197cffc8882903', partId: '0.3' });
+    eq(gmail.parseMailImageUrl('https://ci3.googleusercontent.com/mail-sig/x'), null);
+    eq(gmail.parseMailImageUrl('not a url'), null);
+    const payload = { mimeType: 'multipart/related', parts: [
+      { partId: '0', mimeType: 'text/html', headers: [] },
+      { partId: '0.1', mimeType: 'image/png', headers: [{ name: 'X-Attachment-Id', value: 'ii_a' }], body: { attachmentId: 'att-a' } },
+      { partId: '0.3', mimeType: 'image/jpeg', headers: [{ name: 'Content-ID', value: '<ii_b>' }], body: { data: 'AAAA' } },
+    ] };
+    eq(gmail.findImagePart(payload, { realAttId: 'ii_a', partId: null }).body.attachmentId, 'att-a');
+    eq(gmail.findImagePart(payload, { realAttId: 'ii_b', partId: null }).partId, '0.3');
+    eq(gmail.findImagePart(payload, { realAttId: 'ii_missing', partId: '0.3' }).partId, '0.3', 'falls back to the part number');
+    eq(gmail.findImagePart(payload, { realAttId: null, partId: '0' }), null, 'never a non-image part');
+  });
+
   await test('no chain at all: nothing drafted, and connections needing reconnecting are named', async () => {
     stub({ boxes: { [BEN]: {} }, broken: ['carl@cognisys.group'], failing: { [ALICE]: new Error('invalid_grant') } });
     eq(await reportEmail.draftReportEmail(RELEASE), 'no_thread');

@@ -39,6 +39,17 @@ slack.postMessage = async (channel, text) => { posts.push({ channel, text }); re
 
 require('../lib/qa-submission-store').actorFor = async () => 'cuid-author';
 
+// Which report rounds have been asked already (lib/qa-feedback-store.js), in memory.
+const asked = new Set();
+const requestsStore = require('../lib/qa-feedback-store');
+requestsStore.claim = async (reportId, round) => {
+  const k = `${reportId}|${round}`;
+  if (asked.has(k)) return false;
+  asked.add(k);
+  return true;
+};
+requestsStore.release = async (reportId, round) => { asked.delete(`${reportId}|${round}`); };
+
 const qaKpi = require('../lib/qa-kpi');
 qaKpi.buildKpiEntries = async (window) => [{ cuid: 'cuid-qa2', name: 'Soham Bakore', count: 7, window: window.label }];
 qaKpi.buildUserPeriods = async (cuid) => [{ label: 'Last 30 days', stats: { count: 3 }, late: { count: 1 }, cuid }];
@@ -69,7 +80,7 @@ async function test(description, fn) {
   try { await fn(); console.log(`  ✓ ${description}`); passed++; }
   catch (err) { console.log(`  ✗ ${description}\n    ${err.stack}`); failed++; }
 }
-const reset = () => { created.length = 0; posts.length = 0; portalCreated = true; };
+const reset = () => { created.length = 0; posts.length = 0; portalCreated = true; asked.clear(); };
 
 (async () => {
   console.log('\nQA feedback requests:');
@@ -135,12 +146,28 @@ const reset = () => { created.length = 0; posts.length = 0; portalCreated = true
     assert.strictEqual(posts.length, 0);
   });
 
-  await test('a portal failure is swallowed', async () => {
+  await test('a portal failure is swallowed, and the round can still be asked next time', async () => {
     reset();
     const original = portal.createQaFeedback;
     portal.createQaFeedback = async () => { throw new Error('portal down'); };
     assert.strictEqual(await requestQaFeedback({ ...REPORT, round: 'first', actorCuid: 'cuid-qa1', prior: { stage: 'first' } }), null);
     portal.createQaFeedback = original;
+    const retry = await requestQaFeedback({ ...REPORT, round: 'first', actorCuid: 'cuid-qa1', prior: { stage: 'first' } });
+    assert.strictEqual(retry.created, true);
+  });
+
+  await test('a report passing a round again is never asked twice, whoever does the QA', async () => {
+    reset();
+    const first = await requestQaFeedback({ ...REPORT, round: 'second', actorCuid: 'cuid-qa2', prior: { stage: 'second' } });
+    assert.strictEqual(first.created, true);
+    // Sent back, resubmitted, and approved again — by the same or another reviewer.
+    assert.strictEqual(await requestQaFeedback({ ...REPORT, round: 'second', actorCuid: 'cuid-qa2', prior: { stage: 'second' } }), null);
+    assert.strictEqual(await requestQaFeedback({ ...REPORT, round: 'second', actorCuid: 'cuid-qa1', prior: { stage: 'second' } }), null);
+    assert.strictEqual(created.length, 1, 'the portal was asked once');
+    assert.strictEqual(posts.length, 1, 'one DM');
+    // The other round is separate: the first round can still be asked once.
+    assert.strictEqual((await requestQaFeedback({ ...REPORT, round: 'first', actorCuid: 'cuid-qa1', prior: { stage: 'first' } })).created, true);
+    assert.strictEqual(await requestQaFeedback({ ...REPORT, round: 'first', actorCuid: 'cuid-qa1', prior: { stage: 'first' } }), null);
   });
 
   console.log('\nPT Management API:');
