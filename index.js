@@ -405,7 +405,7 @@ app.listen(PORT, async () => {
     const gmailConnectable = require('./lib/gmail-oauth').isConfigured();
     require('./lib/gmail-connections').mailboxes()
       .then(({ usable, broken }) => log.info('Report email on release', {
-        mode: reportEmailMode === 'pm' ? 'each PM's choice' : `${reportEmailMode} for everyone`, switch: 'REPORT_EMAIL_MODE',
+        mode: reportEmailMode === 'pm' ? "each PM's choice" : `${reportEmailMode} for everyone`, switch: 'REPORT_EMAIL_MODE',
         connected: usable.join(', ') || '(none)', needs_reconnecting: broken.join(', ') || '(none)',
       }))
       .catch((err) => log.error('Report email: could not read the Gmail connections', { reason: err.message }));
