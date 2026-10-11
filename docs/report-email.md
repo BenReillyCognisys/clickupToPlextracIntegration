@@ -31,8 +31,27 @@ The Slack reply looks like this:
    Open the email chain
 ```
 
-**Draft mode is the only mode right now.** The service never sends a client email itself.
-The PM opens their Drafts, checks the email, and presses send.
+## Each PM chooses: off, draft or auto send
+
+Each PM picks what happens in their own mailbox, on the **Gmail** page in the SFE portal
+(saved with their connection in break.services, `gmail_connections.email_mode`). The choice
+of the PM whose mailbox the email goes in is the one used:
+
+| Choice | What happens on release |
+|---|---|
+| **Off** (until they choose) | Nothing is made. The release thread asks for the report email to be sent by hand. |
+| **Draft** | The reply is saved in their Drafts; the release thread @s them to check it and press send. |
+| **Auto send** | The reply is drafted, then sent for them after a hold (`REPORT_EMAIL_SEND_DELAY_MINUTES`, 15). The release thread says when. Until then they can edit it in Drafts (the edited version is sent) or delete the draft to stop it. |
+
+Auto send is only used when the PM has written in the onboarding chain themselves. A chain they
+were only cc'd on is drafted instead, never sent as them. Due emails are sent by a check every
+minute (`startScheduledSends`), which also sends any that came due while the service was down.
+If auto send is turned off during the hold, the email is left in Drafts and the thread says so.
+The outcome — sent, not sent because the draft was deleted, or failed (left in Drafts) — is
+posted in the release thread.
+
+`REPORT_EMAIL_MODE` in `.env` overrides every PM: unset (or `pm`) leaves it to them, `draft`
+never auto-sends, `off` turns the report email off for everyone.
 
 ## Access: each PM connects their own Gmail
 
@@ -88,14 +107,15 @@ and only those. Keep `REPORT_EMAIL_TOKEN_KEY` out of the database's reach (it li
 GOOGLE_OAUTH_CLIENT_ID=…apps.googleusercontent.com
 GOOGLE_OAUTH_CLIENT_SECRET=…
 REPORT_EMAIL_TOKEN_KEY=<64 hex>   # node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-REPORT_EMAIL_MODE=draft           # off (default) | draft
+# REPORT_EMAIL_MODE=off           # optional override: unset/pm (each PM chooses) | draft | off
+# REPORT_EMAIL_SEND_DELAY_MINUTES=15   # auto send hold
 ```
 
 `SECURE_PORTAL_URL` (already set) is where the browser goes back to after connecting. Restart
 the app (`pm2 restart <app>`). The startup log says who has connected:
 
 ```
-[INFO] Report email on release | mode="draft" | switch="REPORT_EMAIL_MODE" | connected="ben@cognisys.group, alice@cognisys.group" | needs_reconnecting="(none)"
+[INFO] Report email on release | mode="each PM's choice" | switch="REPORT_EMAIL_MODE" | connected="ben@cognisys.group, alice@cognisys.group" | needs_reconnecting="(none)"
 ```
 
 ### 3. Deploy order
@@ -218,6 +238,11 @@ Every line starts with `Report email` (or `Gmail`, for connections) and carries 
 [WARN] Report email: could not read the Gmail signature — drafting without it | report_id=… | mailbox="…" | reason="…"
 [INFO] Report email DRAFTED | report_id=… | mailbox="ben@cognisys.group" | thread_id="…" | to="…" | cc="…" | signature=true
 [WARN] Report email not drafted — no_thread | report_id=… | tokens=2 | unsearched="alice@cognisys.group"
-[INFO] Report email skipped — REPORT_EMAIL_MODE is off | report_id=…
+[INFO] Report email skipped — REPORT_EMAIL_MODE is off for everyone | report_id=…
+[INFO] Report email not made — the PM has report emails turned off | report_id=… | mailbox="…" | pm_mode="off"
+[INFO] Report email DRAFTED, to be sent automatically | report_id=… | mailbox="…" | send_at="…"
+[INFO] Report email SENT | report_id=… | mailbox="…" | message_id="…"
+[INFO] Report email not sent — the draft was deleted during the hold | report_id=… | mailbox="…"
+[ERROR] Report email send FAILED — left in Drafts | report_id=… | mailbox="…" | reason="…"
 [ERROR] Report email FAILED | report_id=… | reason="…" | fix="the PM reconnects Gmail in the SFE portal"
 ```

@@ -2,11 +2,19 @@
 // their report is ready in Plextrac is drafted in the client's existing onboarding email
 // chain — in the mailbox of the PM who sent it.
 //
-// REPORT_EMAIL_MODE decides what happens:
-//   off   (default) nothing
-//   draft the reply is saved as a Gmail draft in that PM's mailbox, and the release
-//         thread in Slack says so, @-ing that PM to check it and press send
-// Nothing is ever sent to a client from here.
+// What happens is each PM's own choice, set on their Gmail page in the SFE portal
+// (lib/gmail-connections.js email_mode), for the mailbox the email goes in:
+//   off    nothing is made; the release thread asks for the email to be sent by hand
+//          (the default until the PM chooses)
+//   draft  the reply is saved as a Gmail draft, and the release thread @s the PM to
+//          check it and press send
+//   send   the reply is drafted, then sent for them after a hold of
+//          REPORT_EMAIL_SEND_DELAY_MINUTES (15): the release thread says when, and until
+//          then they can edit it in Drafts or delete it to stop it. Only sent when the PM
+//          has written in the chain themselves; a chain they were only cc'd on is drafted.
+//          Due emails are sent by sendDueEmails(), every minute (startScheduledSends).
+// REPORT_EMAIL_MODE overrides every PM: unset (or "pm") leaves it to them, "draft" never
+// sends, "off" turns the report email off for everyone; any other value counts as off.
 //
 // Finding the chain. PMs send onboarding emails from their own inboxes, so the mailboxes
 // of the PMs who have connected their Gmail in the SFE portal (lib/gmail-connections.js)
@@ -63,13 +71,24 @@ const LINK_FIELDS = [
   process.env.CLICKUP_TEST_FILES_LINK_FIELD_NAME || 'testfilesstorage',
 ].map((n) => n.trim().toLowerCase());
 
-const MODES = ['off', 'draft'];
+const MODES = ['off', 'draft', 'pm'];
 
-/** REPORT_EMAIL_MODE, read on every release so a change needs only a restart. */
+/** REPORT_EMAIL_MODE — the override over every PM's choice: 'pm' (unset), 'draft' or 'off'. */
 function mode() {
-  const m = String(process.env.REPORT_EMAIL_MODE || 'off').trim().toLowerCase();
-  return MODES.includes(m) ? m : 'off';
+  const raw = String(process.env.REPORT_EMAIL_MODE ?? '').trim().toLowerCase();
+  if (!raw) return 'pm';
+  return MODES.includes(raw) ? raw : 'off';
 }
+
+/** What happens in a mailbox whose owner chose `pmMode`, after REPORT_EMAIL_MODE: off | draft | send. */
+function effectiveMode(pmMode) {
+  const global = mode();
+  if (global === 'off') return 'off';
+  if (global === 'draft' && pmMode === 'send') return 'draft';
+  return ['off', 'draft', 'send'].includes(pmMode) ? pmMode : 'off';
+}
+
+const sendDelayMs = () => (Number(process.env.REPORT_EMAIL_SEND_DELAY_MINUTES) || 15) * 60 * 1000;
 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
@@ -300,6 +319,37 @@ function draftedText({ prepared, clientName, mention }) {
   return lines.join('\n');
 }
 
+// "14:32" (or "14:32 on Mon 13 Oct" when not today), UK time.
+function sendTimeLabel(at, now = new Date()) {
+  const opts = { timeZone: 'Europe/London' };
+  const time = at.toLocaleTimeString('en-GB', { ...opts, hour: '2-digit', minute: '2-digit', hour12: false });
+  const day = (d) => d.toLocaleDateString('en-GB', { ...opts, weekday: 'short', day: 'numeric', month: 'short' });
+  return day(at) === day(now) ? time : `${time} on ${day(at)}`;
+}
+
+function scheduledText({ prepared, clientName, mention, sendAt }) {
+  const from = prepared.from?.email || prepared.mailbox;
+  const lines = [
+    `:email: Report email for ${esc(clientName)} will be sent automatically at ${sendTimeLabel(sendAt)}, from ${esc(from)}, `
+      + `as a reply in "${esc(prepared.subject)}". ${mention ? `<@${mention}> it` : 'It'}'s in ${esc(prepared.mailbox)}'s Drafts until then: `
+      + 'edit it there if you need to, or delete the draft to stop it.',
+    `To: ${esc(emails(prepared.to))}${prepared.cc.length ? ` · Cc: ${esc(emails(prepared.cc))}` : ''}`,
+    `<${gmail.threadUrl(prepared.threadId, prepared.mailbox)}|Open the email chain>`,
+  ];
+  if (!prepared.signature) {
+    lines.push(`:warning: No Gmail signature found for ${esc(from)} — add it to the draft before it sends.`);
+  } else if (prepared.signatureImagesFailed?.length) {
+    lines.push(`:warning: ${prepared.signatureImagesFailed.length} signature image(s) couldn't be loaded `
+      + `(${esc(prepared.signatureImagesFailed.map((f) => f.reason).join('; '))}) — check the draft before it sends.`);
+  }
+  return lines.join('\n');
+}
+
+function pmOffText({ prepared, clientName }) {
+  return `:email: Report email for ${esc(clientName)} not made — ${esc(prepared.mailbox)} has report emails turned off `
+    + '(SFE portal → Gmail). Please send the report email by hand.';
+}
+
 function notMadeText({ prepared, clientName }) {
   if (prepared.state === 'no_client') {
     return `:warning: Report email not drafted — the email chain for ${esc(clientName)} in ${esc(prepared.mailbox)} `
@@ -325,12 +375,12 @@ function failedText(err, mailbox = null) {
 /**
  * Makes the report email for a released report. Called by the release
  * (pipeline/qa-released.js) with its Slack thread; never throws.
- * Returns the state it left: 'off' | 'already' | 'drafted' | 'no_thread' | 'no_client' | 'failed'.
+ * Returns the state it left: 'off' | 'already' | 'pm_off' | 'drafted' | 'scheduled' | 'no_thread' | 'no_client' | 'failed'.
  */
 async function draftReportEmail({ reportId, clientName, reportName, channel, threadTs, releaserEmail = null, force = false }) {
   const ctx = { report_id: reportId, client: clientName, report: reportName };
   if (mode() === 'off') {
-    log.info('Report email skipped — REPORT_EMAIL_MODE is off', ctx);
+    log.info('Report email skipped — REPORT_EMAIL_MODE is off for everyone', ctx);
     return 'off';
   }
 
@@ -361,21 +411,44 @@ async function draftReportEmail({ reportId, clientName, reportName, channel, thr
       return prepared.state;
     }
 
+    // The choice of the PM whose mailbox it goes in (SFE portal → Gmail).
+    const pmMode = await connections.modeFor(prepared.mailbox);
+    let action = effectiveMode(pmMode);
+    if (action === 'off') {
+      log.info('Report email not made — the PM has report emails turned off', { ...ctx, mailbox: prepared.mailbox, pm_mode: pmMode, override: mode() });
+      await store.finish(reportId, { state: 'pm_off', mailbox: prepared.mailbox, thread_id: prepared.threadId });
+      await say(channel, threadTs, pmOffText({ prepared, clientName }), reportId);
+      return 'pm_off';
+    }
+    // Only ever sent from a chain the PM has written in themselves.
+    if (action === 'send' && !prepared.from) {
+      log.info('Report email: auto send not used — the PM never wrote in this chain, so it is drafted', { ...ctx, mailbox: prepared.mailbox });
+      action = 'draft';
+    }
+
     const draft = await gmail.createDraft(prepared.mailbox, {
       raw: message.buildRawMessage(prepared), threadId: prepared.threadId,
     });
+    const sendAt = action === 'send' ? new Date(Date.now() + sendDelayMs()) : null;
     await store.finish(reportId, {
-      state: 'drafted', mailbox: prepared.mailbox, from: prepared.from?.email || null,
+      state: sendAt ? 'scheduled' : 'drafted', mailbox: prepared.mailbox, from: prepared.from?.email || null,
       thread_id: draft.threadId, draft_id: draft.draftId, message_id: draft.messageId, subject: prepared.subject,
       to: prepared.to.map((a) => a.email), cc: prepared.cc.map((a) => a.email), signature: prepared.signature,
+      // What the scheduled send needs to report back in the release thread.
+      ...(sendAt ? { send_at: sendAt, client_name: clientName, channel: channel || null, thread_ts: threadTs || null } : {}),
     });
-    log.info('Report email DRAFTED', {
+    log.info(sendAt ? 'Report email DRAFTED, to be sent automatically' : 'Report email DRAFTED', {
       ...ctx, mailbox: prepared.mailbox, thread_id: draft.threadId,
       to: emails(prepared.to), cc: emails(prepared.cc), signature: prepared.signature,
+      ...(sendAt ? { send_at: sendAt.toISOString() } : {}),
     });
 
     // The PM whose Drafts it is in sends it; whoever released the report if Slack can't find them.
     const mention = (await people.slackIdForEmail(prepared.mailbox)) || (await people.slackIdForEmail(releaserEmail));
+    if (sendAt) {
+      await say(channel, threadTs, scheduledText({ prepared, clientName, mention, sendAt }), reportId);
+      return 'scheduled';
+    }
     await say(channel, threadTs, draftedText({ prepared, clientName, mention }), reportId);
     return 'drafted';
   } catch (err) {
@@ -390,6 +463,72 @@ async function draftReportEmail({ reportId, clientName, reportName, channel, thr
     await say(channel, threadTs, failedText(err, mailbox), reportId);
     return 'failed';
   }
+}
+
+// ── Auto send ─────────────────────────────────────────────────────────────────
+
+/**
+ * Sends one scheduled email whose hold is over (taken by store.takeDue). Sent as the draft
+ * is now, with any edits the PM made. Not sent when the PM deleted the draft, or no longer
+ * has auto send on — then it stays in their Drafts for them. Never throws; the outcome
+ * goes to the release thread. Returns 'sent' | 'cancelled' | 'drafted' | 'failed'.
+ */
+async function sendScheduled(doc) {
+  const reportId = doc.report_id;
+  const ctx = { report_id: reportId, mailbox: doc.mailbox };
+  const client = esc(doc.client_name || 'this client');
+  const tell = (text) => say(doc.channel, doc.thread_ts, text, reportId);
+
+  const pmMode = await connections.modeFor(doc.mailbox).catch(() => 'off');
+  if (effectiveMode(pmMode) !== 'send') {
+    log.info('Report email not sent automatically — auto send is no longer on; left in Drafts', { ...ctx, pm_mode: pmMode, override: mode() });
+    await store.finish(reportId, { state: 'drafted', send_skipped: 'auto send turned off' }).catch(() => {});
+    await tell(`:email: Report email for ${client} not sent automatically — auto send was turned off. `
+      + `It's in ${esc(doc.mailbox)}'s Drafts: please check it and press send.`);
+    return 'drafted';
+  }
+
+  try {
+    const sent = await gmail.sendDraft(doc.mailbox, doc.draft_id);
+    await store.finish(reportId, { state: 'sent', sent_at: new Date(), sent_message_id: sent.messageId });
+    log.info('Report email SENT', { ...ctx, message_id: sent.messageId });
+    await tell(`:white_check_mark: Report email for ${client} sent from ${esc(doc.from || doc.mailbox)}.`);
+    return 'sent';
+  } catch (err) {
+    if (gmail.isMissingDraft(err)) {
+      log.info('Report email not sent — the draft was deleted during the hold', ctx);
+      await store.finish(reportId, { state: 'cancelled' }).catch(() => {});
+      await tell(`:no_entry_sign: Report email for ${client} not sent — the draft was deleted from ${esc(doc.mailbox)}'s Drafts.`);
+      return 'cancelled';
+    }
+    if (gmail.isAccessError(err)) await noteBroken(doc.mailbox, err);
+    log.error('Report email send FAILED — left in Drafts', { ...ctx, reason: err.message });
+    await store.finish(reportId, { state: 'failed', reason: err.message }).catch(() => {});
+    const fix = gmail.isAccessError(err) ? ` ${esc(doc.mailbox)}'s Gmail connection needs reconnecting in the SFE portal.` : '';
+    await tell(`:warning: Report email for ${client} couldn't be sent automatically — ${esc(err.message)}.${fix} `
+      + `It's still in ${esc(doc.mailbox)}'s Drafts: please send it by hand.`);
+    return 'failed';
+  }
+}
+
+/** Sends every scheduled email that is due. Resolves to how many were handled. */
+async function sendDueEmails(now = new Date()) {
+  let handled = 0;
+  for (let doc = await store.takeDue(now); doc; doc = await store.takeDue(now)) {
+    await sendScheduled(doc);
+    handled += 1;
+  }
+  return handled;
+}
+
+let sendTimer = null;
+/** Checks for due emails now and every minute (index.js, on start). */
+function startScheduledSends() {
+  if (sendTimer) return;
+  const tick = () => sendDueEmails().catch((err) => log.error('Report email: scheduled sends failed', { reason: err.message }));
+  sendTimer = setInterval(tick, 60 * 1000);
+  sendTimer.unref?.();
+  tick();
 }
 
 /**
@@ -433,7 +572,8 @@ async function rerunReportEmail({ reportId, force = false }) {
 }
 
 module.exports = {
-  draftReportEmail, rerunReportEmail, prepareReportEmail, reportContext, mode,
+  draftReportEmail, rerunReportEmail, prepareReportEmail, reportContext, mode, effectiveMode,
+  sendDueEmails, sendScheduled, startScheduledSends,
   // for tests
   tokensIn, linkQuery, findThread, portalTokens, groupChains, pickCopy,
 };

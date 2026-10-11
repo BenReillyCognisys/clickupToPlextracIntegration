@@ -281,9 +281,10 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
   function stub({
     boxes = { [BEN]: { link: ['b-1'], threads: { 'b-1': BEN_COPY } }, [ALICE]: {} },
     usable = [BEN, ALICE], broken = [], failing = {}, claim = true, draftError = null,
-    signature = '<div>Ben Reilly<br>Cognisys</div>', signatureError = null,
+    signature = '<div>Ben Reilly<br>Cognisys</div>', signatureError = null, pmMode = 'draft',
   } = {}) {
-    w = { searches: [], drafts: [], finished: [], slack: [], markedBroken: [], signatures: [] };
+    w = { searches: [], drafts: [], finished: [], slack: [], markedBroken: [], signatures: [], modeAsked: [] };
+    connections.modeFor = async (mailbox) => { w.modeAsked.push(mailbox); return typeof pmMode === 'function' ? pmMode(mailbox) : pmMode; };
     gmail.getSignature = async (mailbox, from) => {
       w.signatures.push({ mailbox, from });
       if (signatureError) throw signatureError;
@@ -318,22 +319,32 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
     channel: 'C_RELEASE', threadTs: '111.222', releaserEmail: 'carol@cognisys.co.uk',
   };
 
-  await test('mode off (the default): does nothing at all', async () => {
-    stub();
-    delete process.env.REPORT_EMAIL_MODE;
+  await test('REPORT_EMAIL_MODE=off: does nothing at all, for every PM', async () => {
+    stub({ pmMode: 'send' });
+    process.env.REPORT_EMAIL_MODE = 'off';
     eq(await reportEmail.draftReportEmail(RELEASE), 'off');
     eq(w.searches.length + w.drafts.length + w.slack.length, 0);
   });
 
-  process.env.REPORT_EMAIL_MODE = 'draft';
-
-  await test('an unknown mode is treated as off', async () => {
-    stub();
-    process.env.REPORT_EMAIL_MODE = 'send';
+  await test('an unknown REPORT_EMAIL_MODE is treated as off', async () => {
+    stub({ pmMode: 'draft' });
+    process.env.REPORT_EMAIL_MODE = 'sometimes';
     eq(await reportEmail.draftReportEmail(RELEASE), 'off');
     eq(w.drafts.length, 0);
-    process.env.REPORT_EMAIL_MODE = 'draft';
   });
+
+  await test('REPORT_EMAIL_MODE unset (or "pm") leaves it to each PM', () => {
+    delete process.env.REPORT_EMAIL_MODE;
+    eq(reportEmail.mode(), 'pm');
+    eq(['off', 'draft', 'send'].map(reportEmail.effectiveMode), ['off', 'draft', 'send']);
+    eq(reportEmail.effectiveMode(undefined), 'off', 'a PM who never chose is off');
+    process.env.REPORT_EMAIL_MODE = 'draft';
+    eq(reportEmail.effectiveMode('send'), 'draft', '"draft" never sends');
+    process.env.REPORT_EMAIL_MODE = 'PM';
+    eq(reportEmail.effectiveMode('send'), 'send');
+  });
+
+  delete process.env.REPORT_EMAIL_MODE;
 
   await test('drafts a reply-all in the sending PM\'s mailbox, from their address, and @s them in Slack', async () => {
     stub();
@@ -555,6 +566,126 @@ const OPTS = { exclude: [BEN], internalDomains: ['cognisys.group', 'cognisys.co.
     eq(await reportEmail.draftReportEmail(RELEASE), 'failed');
     eq(w.finished[0], { state: 'failed', reason: 'Gmail 500' });
     assert.ok(w.slack[0].text.includes('Gmail 500'));
+  });
+
+  // ── Each PM's own choice (SFE portal → Gmail) ─────────────────────────────
+  console.log('\neach PM\'s report email choice:');
+
+  await test('the PM whose mailbox it is chose off: nothing drafted, and Slack asks for it by hand', async () => {
+    stub({ pmMode: 'off' });
+    eq(await reportEmail.draftReportEmail(RELEASE), 'pm_off');
+    eq(w.modeAsked, [BEN]);
+    eq(w.drafts.length, 0);
+    eq(w.finished[0].state, 'pm_off');
+    eq(w.slack[0].text, `:email: Report email for Acme Corp not made — ${BEN} has report emails turned off (SFE portal → Gmail). Please send the report email by hand.`);
+  });
+
+  await test('auto send: drafted now, scheduled after the hold, and Slack says when and how to stop it', async () => {
+    stub({ pmMode: 'send' });
+    const before = Date.now();
+    eq(await reportEmail.draftReportEmail(RELEASE), 'scheduled');
+    eq(w.drafts.length, 1);
+    const f = w.finished[0];
+    eq(f.state, 'scheduled');
+    eq(f.draft_id, 'r-1');
+    eq([f.client_name, f.channel, f.thread_ts], ['Acme Corp', 'C_RELEASE', '111.222']);
+    const hold = f.send_at.getTime() - before;
+    assert.ok(hold >= 15 * 60 * 1000 - 50 && hold <= 15 * 60 * 1000 + 1000, `hold ${hold}`);
+    const text = w.slack[0].text;
+    assert.ok(text.includes('will be sent automatically at'), text);
+    assert.ok(text.includes(`<@U_BEN> it's in ${BEN}'s Drafts until then`), text);
+    assert.ok(text.includes('delete the draft to stop it'), text);
+  });
+
+  await test('auto send with REPORT_EMAIL_SEND_DELAY_MINUTES', async () => {
+    stub({ pmMode: 'send' });
+    process.env.REPORT_EMAIL_SEND_DELAY_MINUTES = '5';
+    const before = Date.now();
+    await reportEmail.draftReportEmail(RELEASE);
+    delete process.env.REPORT_EMAIL_SEND_DELAY_MINUTES;
+    const hold = w.finished[0].send_at.getTime() - before;
+    assert.ok(hold >= 5 * 60 * 1000 - 50 && hold <= 5 * 60 * 1000 + 1000, `hold ${hold}`);
+  });
+
+  await test('auto send, but REPORT_EMAIL_MODE=draft: only drafted', async () => {
+    stub({ pmMode: 'send' });
+    process.env.REPORT_EMAIL_MODE = 'draft';
+    eq(await reportEmail.draftReportEmail(RELEASE), 'drafted');
+    delete process.env.REPORT_EMAIL_MODE;
+    eq(w.finished[0].state, 'drafted');
+    assert.ok(w.slack[0].text.includes('please check it and press send'));
+  });
+
+  await test('auto send, but the PM was only cc\'d on the chain: drafted, never sent as them', async () => {
+    stub({ pmMode: 'send', boxes: { [BEN]: {}, [ALICE]: { link: ['a-1'], threads: { 'a-1': ALICE_COPY } } } });
+    eq(await reportEmail.draftReportEmail(RELEASE), 'drafted');
+    eq(w.drafts[0].mailbox, ALICE);
+    eq(w.finished[0].state, 'drafted');
+  });
+
+  // ── Sending what's due ───────────────────────────────────────────────────────
+  console.log('\nscheduled sends:');
+
+  const DUE = {
+    report_id: 277397777, state: 'sending', mailbox: BEN, from: BEN, draft_id: 'r-1',
+    client_name: 'Acme Corp', channel: 'C_RELEASE', thread_ts: '111.222',
+  };
+  function stubSend({ pmMode = 'send', sendError = null } = {}) {
+    stub({ pmMode });
+    w.sent = [];
+    gmail.sendDraft = async (mailbox, draftId) => {
+      if (sendError) throw sendError;
+      w.sent.push({ mailbox, draftId });
+      return { messageId: 'sent-1', threadId: 'b-1' };
+    };
+  }
+
+  await test('sends the draft as it is now, and says so in the release thread', async () => {
+    stubSend();
+    eq(await reportEmail.sendScheduled(DUE), 'sent');
+    eq(w.sent, [{ mailbox: BEN, draftId: 'r-1' }]);
+    eq(w.finished[0].state, 'sent');
+    eq(w.finished[0].sent_message_id, 'sent-1');
+    eq(w.slack, [{ channel: 'C_RELEASE', ts: '111.222', text: `:white_check_mark: Report email for Acme Corp sent from ${BEN}.` }]);
+  });
+
+  await test('the PM deleted the draft during the hold: not sent', async () => {
+    stubSend({ sendError: Object.assign(new Error('Requested entity was not found.'), { code: 404 }) });
+    eq(await reportEmail.sendScheduled(DUE), 'cancelled');
+    eq(w.finished[0].state, 'cancelled');
+    assert.ok(w.slack[0].text.includes('not sent — the draft was deleted'));
+  });
+
+  await test('auto send turned off during the hold: not sent, left in Drafts', async () => {
+    stubSend({ pmMode: 'draft' });
+    eq(await reportEmail.sendScheduled(DUE), 'drafted');
+    eq(w.sent, []);
+    eq(w.finished[0].state, 'drafted');
+    assert.ok(w.slack[0].text.includes('auto send was turned off'));
+  });
+
+  await test('REPORT_EMAIL_MODE=off during the hold: not sent', async () => {
+    stubSend();
+    process.env.REPORT_EMAIL_MODE = 'off';
+    eq(await reportEmail.sendScheduled(DUE), 'drafted');
+    delete process.env.REPORT_EMAIL_MODE;
+    eq(w.sent, []);
+  });
+
+  await test('a revoked connection: not sent, marked to reconnect, left in Drafts', async () => {
+    stubSend({ sendError: new Error('invalid_grant: Token has been expired or revoked.') });
+    eq(await reportEmail.sendScheduled(DUE), 'failed');
+    eq(w.markedBroken.map((b) => b.mailbox), [BEN]);
+    assert.ok(w.slack[0].text.includes('needs reconnecting'));
+    assert.ok(w.slack[0].text.includes('still in'));
+  });
+
+  await test('sendDueEmails sends each due email once', async () => {
+    stubSend();
+    const queue = [{ ...DUE, report_id: 1 }, { ...DUE, report_id: 2 }];
+    store.takeDue = async () => queue.shift() || null;
+    eq(await reportEmail.sendDueEmails(), 2);
+    eq(w.sent.length, 2);
   });
 
   console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`);

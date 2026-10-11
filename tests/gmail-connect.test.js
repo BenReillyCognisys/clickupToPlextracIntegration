@@ -63,7 +63,8 @@ connections.createState = async (s) => { g.states.push(s); };
 connections.takeState = async (state) => (state && g.state && state === g.state.state ? g.state.pending : null);
 connections.save = async (c) => { g.saved.push(c); };
 connections.forPortalUser = async (id) => (id === 'u-ben'
-  ? { email: 'ben@cognisys.group', status: 'ok', connected_at: new Date('2026-10-09T10:00:00Z') } : null);
+  ? { email: 'ben@cognisys.group', status: 'ok', connected_at: new Date('2026-10-09T10:00:00Z'), email_mode: g.mode } : null);
+connections.setMode = async (id, mode) => { g.setMode = { id, mode }; return id === 'u-ben' ? 'ben@cognisys.group' : null; };
 connections.remove = async (id) => { g.removed = id; return id === 'u-ben' ? { email: 'ben@cognisys.group', refreshToken: 'refresh-1' } : null; };
 
 const PENDING = { codeVerifier: 'verifier-1', portalUserId: 'u-ben', portalUsername: 'ben@cognisys.group', portalEmail: 'ben@cognisys.group' };
@@ -188,7 +189,19 @@ const withState = (pending = PENDING) => ({ state: 'state-1', pending });
     reset();
     const ben = await oauth.status('u-ben');
     eq([ben.configured, ben.connected, ben.email, ben.status], [true, true, 'ben@cognisys.group', 'ok']);
+    eq(ben.emailMode, 'off', 'off until the PM chooses');
+    g.mode = 'send';
+    eq((await oauth.status('u-ben')).emailMode, 'send');
+    g.mode = undefined;
     eq((await oauth.status('u-other')).connected, false);
+  });
+
+  await test('the PM sets their report email mode; refused before connecting or for a bad mode', async () => {
+    reset();
+    eq(await oauth.setEmailMode('u-ben', 'send'), { emailMode: 'send', email: 'ben@cognisys.group' });
+    eq(g.setMode, { id: 'u-ben', mode: 'send' });
+    await assert.rejects(oauth.setEmailMode('u-other', 'draft'), (err) => err.status === 409);
+    await assert.rejects(oauth.setEmailMode('u-ben', 'always'), (err) => err.status === 400);
   });
 
   await test('disconnect removes the connection and revokes it at Google', async () => {
@@ -230,6 +243,17 @@ const withState = (pending = PENDING) => ({ state: 'state-1', pending });
     const body = await res.json();
     eq(res.status, 200);
     assert.ok(body.url.startsWith('https://accounts.google.com/'));
+  });
+
+  await test('PUT /connection/mode with the key', async () => {
+    reset();
+    const put = (body, headers = key) => fetch(`${base}/api/report-email/connection/mode`, { method: 'PUT', headers, body: JSON.stringify(body) });
+    eq((await put({ portalUserId: 'u-ben', mode: 'draft' }, { 'Content-Type': 'application/json' })).status, 401);
+    const res = await put({ portalUserId: 'u-ben', mode: 'draft' });
+    eq(res.status, 200);
+    eq(await res.json(), { ok: true, emailMode: 'draft', email: 'ben@cognisys.group' });
+    eq((await put({ portalUserId: 'u-ben', mode: 'sometimes' })).status, 400);
+    eq((await put({ portalUserId: 'u-nobody', mode: 'send' })).status, 409);
   });
 
   await test('the callback sends the browser back to the portal, never caching', async () => {

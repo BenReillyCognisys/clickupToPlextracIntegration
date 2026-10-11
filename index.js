@@ -392,15 +392,20 @@ app.listen(PORT, async () => {
     CLIENT_DOCUMENTS.map((doc) => [doc.key, `${isDocumentEnabled(doc) ? 'on' : 'OFF'} (${doc.enabledBy})`]),
   ));
 
-  // The report email on release (pipeline/report-email.js): off, or drafted in the
-  // mailbox of the PM who sent the client's onboarding email.
+  // The report email on release (pipeline/report-email.js): in the mailbox of the PM who
+  // sent the client's onboarding email, off, drafted or auto-sent as that PM chose in the
+  // SFE portal — unless REPORT_EMAIL_MODE overrides them all ("off" or "draft").
   // Which PMs have connected their Gmail is in the database, so it's logged once that answers.
+  // Auto-sent emails wait in Drafts for their hold; this checks every minute for due ones
+  // (and sends any that came due while the service was down).
   {
-    const reportEmailMode = require('./pipeline/report-email').mode();
+    const reportEmail = require('./pipeline/report-email');
+    const reportEmailMode = reportEmail.mode();
+    reportEmail.startScheduledSends();
     const gmailConnectable = require('./lib/gmail-oauth').isConfigured();
     require('./lib/gmail-connections').mailboxes()
       .then(({ usable, broken }) => log.info('Report email on release', {
-        mode: reportEmailMode, switch: 'REPORT_EMAIL_MODE',
+        mode: reportEmailMode === 'pm' ? 'each PM's choice' : `${reportEmailMode} for everyone`, switch: 'REPORT_EMAIL_MODE',
         connected: usable.join(', ') || '(none)', needs_reconnecting: broken.join(', ') || '(none)',
       }))
       .catch((err) => log.error('Report email: could not read the Gmail connections', { reason: err.message }));

@@ -7,6 +7,8 @@
  *   POST   /api/report-email/connect                     { portalUserId, portalUsername, portalEmail }
  *                                                        → { url }: Google's consent screen
  *   DELETE /api/report-email/connection?portalUserId=…   disconnect (and revoke at Google)
+ *   PUT    /api/report-email/connection/mode             { portalUserId, mode: off | draft | send }
+ *                                                        the PM's own report email choice
  *
  * Browser, from Google's consent screen (no key — the single-use state is the check):
  *   GET    /report-email/oauth/callback                  → back to the portal's Gmail page
@@ -69,6 +71,14 @@ portal.delete('/connection', async (req, res) => {
     res.json({ ok: true, ...(await oauth.disconnect(userId(req.query.portalUserId))) });
   } catch (err) {
     fail(res, err, 'disconnect');
+  }
+});
+
+portal.put('/connection/mode', async (req, res) => {
+  try {
+    res.json({ ok: true, ...(await oauth.setEmailMode(userId(req.body?.portalUserId), text(req.body?.mode))) });
+  } catch (err) {
+    fail(res, err, 'set mode');
   }
 });
 
