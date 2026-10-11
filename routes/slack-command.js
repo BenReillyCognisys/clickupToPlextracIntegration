@@ -78,7 +78,9 @@ function queueLine(e) {
   const name = slackEscape(e.report_name || `Report ${e.report_id}`);
   const label = e.report_url ? `<${e.report_url}|${name}>` : name;
   const head = e.client_name ? `• ${slackEscape(e.client_name)} - ${label}` : `• ${label}`;
-  return `${head} _(pushed ${formatDateTime(e.entered_at)})_`;
+  // Claimed in DeliveryFlow's QA queue for the round it is in (lib/qa-queue-store.js).
+  const claimed = e.claimed_by?.name ? ` — claimed by ${slackEscape(e.claimed_by.name)}` : '';
+  return `${head} _(pushed ${formatDateTime(e.entered_at)})_${claimed}`;
 }
 
 // Builds the full queue message from the stored entries, grouped into the two QA

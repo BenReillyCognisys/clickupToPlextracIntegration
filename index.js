@@ -140,6 +140,30 @@ app.use('/clickup', apiLimiter, require('./routes/clickup-actions'));
 // (X-API-Key: AVAILABILITY_API_KEY). It sits ahead of the logger so reading the log
 // doesn't add to it. One rate limiter covers both routers below.
 const { logDeliveryFlowRequests, listRequests } = require('./lib/deliveryflow-request-log');
+
+// DeliveryFlow's PT QA queue page (routes/deliveryflow-qa-queue.js): the reports in
+// first- and second-round QA, and claiming one for a round (X-API-Key: the DeliveryFlow
+// key). Ahead of the request log, since the page refreshes the list often; claims and
+// releases are logged by the route. Its own limiter: every viewer's refresh arrives
+// from DeliveryFlow's servers, so the 60/min shared one would soon be used up.
+const qaQueueLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: Number(process.env.QA_QUEUE_RATE_LIMIT) || 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/deliveryflow/qa-queue', qaQueueLimiter, require('./routes/deliveryflow-qa-queue'));
+
+// Consultant KPIs and Pentest QA feedback for DeliveryFlow (routes/deliveryflow-pt-management.js):
+//   /api/deliveryflow/pt-management/*  — PT Management only (DeliveryFlow enforces who):
+//                                       QA leaderboard, a consultant's stats, QA feedback results
+//   /api/deliveryflow/qa-feedback/pending — a QA reviewer's own forms still to fill in
+// Ahead of the request log: the feedback answers that pass through are confidential and
+// must not be logged.
+const ptManagement = require('./routes/deliveryflow-pt-management');
+app.use('/api/deliveryflow/pt-management', qaQueueLimiter, ptManagement.management);
+app.use('/api/deliveryflow/qa-feedback', qaQueueLimiter, ptManagement.reviewer);
+
 app.get('/api/deliveryflow/requests', apiLimiter, requireApiKey, listRequests);
 app.use('/api/deliveryflow', logDeliveryFlowRequests, apiLimiter);
 app.use('/api/deliveryflow', require('./routes/deliveryflow'));

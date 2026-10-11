@@ -25,6 +25,7 @@ const slack = require('../../lib/slack');
 const { runChecks } = require('./checks');
 const fields = require('./report-fields');
 const { resolveActorMention, emptyFieldsLines } = require('./empty-fields');
+const qaQueue = require('../../lib/qa-queue-store');
 
 const MAX_FINDINGS = Number(process.env.QA_MAX_FINDINGS || 200);
 // #pt-first-round-qa channel id (override via env).
@@ -86,6 +87,11 @@ async function runQaReview(mapping, { actorCuid } = {}) {
   const reportUrl = `${base}/client/${clientId}/report/${reportId}`;
   const reportName = report?.name || mapping.task_name || `Report ${reportId}`;
   const threadTs = await postFirstRoundParent({ clientName, clientUrl, reportName, reportUrl });
+  // Claims made in DeliveryFlow's QA queue are noted in this thread.
+  if (threadTs) {
+    qaQueue.setThread({ reportId, stage: 'first', channel: FIRST_ROUND_QA_CHANNEL, ts: threadTs }).catch((err) =>
+      log.warn('Could not record the first-round QA thread on the queue', { reason: err.message, report_id: reportId }));
+  }
 
   try {
     // ── Report custom fields ──────────────────────────────────────────────────

@@ -13,6 +13,7 @@ const users = require('../lib/plextrac-users');
 const api = require('../lib/plextrac-api');
 const fields = require('./qa-review/report-fields');
 const { postEmptyFieldsNotice } = require('./qa-review/empty-fields');
+const qaQueue = require('../lib/qa-queue-store');
 const log = require('../lib/logger');
 
 // #pt-second-round-qa channel id (override via env).
@@ -85,6 +86,11 @@ async function postSecondRoundQa({ clientId, clientName, clientUrl, reportName, 
   try {
     threadTs = await slack.postMessage(SECOND_ROUND_QA_CHANNEL, text);
     log.info('Second-round QA message posted', { report_id: reportId, first_qa: firstQaName });
+    // Claims made in DeliveryFlow's QA queue are noted in this thread.
+    if (threadTs) {
+      qaQueue.setThread({ reportId, stage: 'second', channel: SECOND_ROUND_QA_CHANNEL, ts: threadTs }).catch((err) =>
+        log.warn('Could not record the second-round QA thread on the queue', { reason: err.message, report_id: reportId }));
+    }
   } catch (err) {
     log.error('Failed to post second-round QA message to Slack', { reason: err.message, report_id: reportId });
   }

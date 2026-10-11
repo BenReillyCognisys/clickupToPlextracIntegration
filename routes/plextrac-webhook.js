@@ -13,6 +13,7 @@ const statusGuard = require('../pipeline/status-guard');
 const { withTaskLock } = require('../lib/task-lock');
 const { crossOffReport } = require('../pipeline/reports-due');
 const qaQueue = require('../lib/qa-queue-store');
+const { requestQaFeedback } = require('../pipeline/qa-feedback');
 const kpiStore = require('../lib/qa-kpi-store');
 const submissionStore = require('../lib/qa-submission-store');
 const { hoursLate, trackingStartMs } = require('../lib/report-lateness');
@@ -166,9 +167,11 @@ async function recordSubmission(reportStatus, actorCuid, ctx) {
 // Maintains the QA queue from a report's current status: add/move it for the two QA
 // rounds and the approved (ready-for-release) stage, remove it on release, and ignore every other status. Best-effort — any
 // failure is logged and swallowed so it never disrupts the rest of the webhook.
-async function updateQaQueue(reportStatus, { reportId, cuid, clientId, clientName, reportName }) {
+async function updateQaQueue(reportStatus, { reportId, cuid, clientId, clientName, reportName, actorCuid }) {
   const reportUrl = `${PLEXTRAC_BASE}/client/${clientId}/report/${reportId}`;
-  const base = { reportId, cuid, clientId, clientName, reportName, reportUrl };
+  // actorCuid: who moved the report into this round (the author for the first round,
+  // the first QA for the second), shown on DeliveryFlow's QA queue page.
+  const base = { reportId, cuid, clientId, clientName, reportName, reportUrl, actorCuid };
   try {
     if (reportStatus === QA_FIRST_STATUS) {
       await qaQueue.upsert({ ...base, stage: 'first' });
@@ -413,6 +416,13 @@ async function processStatusChange({ payload, targetCuid, text, actorCuid }) {
   });
   if (!guard.proceed) return;
 
+  // The queue entry as it was before this change: which round the report is leaving
+  // and who moved it there — what the QA feedback request below needs.
+  const priorQueueEntry = await qaQueue.get(mapping.plextrac_report_id).catch((err) => {
+    log.warn('Could not read the QA queue entry before updating it', { reason: err.message, report_id: mapping.plextrac_report_id });
+    return null;
+  });
+
   // Keep the QA queue (the /reportqueue Slack commands) in step with the report's
   // status. Runs for mapped and pre-integration reports alike, before the mapped-only
   // ClickUp sync below, so both show up in the queue.
@@ -422,6 +432,7 @@ async function processStatusChange({ payload, targetCuid, text, actorCuid }) {
     clientId:   mapping.plextrac_client_id,
     clientName: mapping.client_name,
     reportName: report?.name || mapping.task_name,
+    actorCuid,
   });
 
   // Credit the consultant who made this status change on the QA leaderboard
@@ -478,6 +489,26 @@ async function processStatusChange({ payload, targetCuid, text, actorCuid }) {
         reason: err.message, cuid: targetCuid, report_id: mapping.plextrac_report_id,
       });
     });
+  }
+
+  // A QA round finished with the report moving forward: whoever moved it did that
+  // round's QA, and gets a private link to rate the report (pipeline/qa-feedback.js).
+  // In Review → the first round is done; Approved → the second. Fire-and-forget,
+  // self-logging; nothing is posted to a channel.
+  const feedbackRound = reportStatus === QA_SECOND_STATUS ? 'first'
+    : reportStatus === QA_APPROVED_STATUS ? 'second' : null;
+  if (feedbackRound) {
+    requestQaFeedback({
+      round:        feedbackRound,
+      actorCuid,
+      prior:        priorQueueEntry,
+      reportId:     mapping.plextrac_report_id,
+      reportCuid:   targetCuid,
+      clientName:   mapping.client_name,
+      reportName:   report?.name || mapping.task_name,
+      reportUrl:    `${PLEXTRAC_BASE}/client/${mapping.plextrac_client_id}/report/${mapping.plextrac_report_id}`,
+      engagementId: engagement?.engagement_id || null,
+    }).catch(() => {});
   }
 
   // When the report reaches Approved, the third round of QA is done: announce it in the
