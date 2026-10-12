@@ -97,7 +97,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
   });
 
   await test('only allow-listed report and client keys pass through', () => {
-    eq(Object.keys(ctx().REPORT_INFO).sort(), ['custom_field', 'end_date', 'exec_summary', 'export_datetime_us', 'name', 'start_date', 'tags']);
+    eq(Object.keys(ctx().REPORT_INFO).sort(), ['custom_field', 'end_date', 'exec_summary', 'export_datetime_us', 'name', 'start_date', 'start_date_us', 'tags']);
     eq(Object.keys(ctx().CLIENT_INFO).sort(), ['name', 'tags']);
   });
 
@@ -112,6 +112,14 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
 
   await test('issue date in the month-first shape the templates parse (UK time)', () => {
     eq(ctx().REPORT_INFO.export_datetime_us, '09-26-2026 14:30');
+  });
+
+  await test('start date in the same shape, UK time; left out when blank or unreadable', () => {
+    eq(ctx().REPORT_INFO.start_date_us, '09-01-2026 01:00');
+    eq(data.startDateUs('2026-08-31T23:00:00.000Z'), '09-01-2026 00:00');
+    eq(data.startDateUs(String(Date.parse('2026-07-14T09:00:00Z'))), '07-14-2026 10:00');
+    for (const blank of [null, undefined, '', '  ', 'not a date']) eq(data.startDateUs(blank), undefined);
+    eq('start_date_us' in data.templateContext({ ...facts(), report: { ...fx.report, start_date: null } }).REPORT_INFO, false);
   });
 
   await test('characters no font can draw are removed; Windows-1252 punctuation read as Latin-1 is repaired', () => {

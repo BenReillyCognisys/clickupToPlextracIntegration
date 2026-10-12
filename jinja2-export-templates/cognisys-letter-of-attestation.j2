@@ -6,7 +6,8 @@
     with its five placeholders filled from the PlexTrac report:
 
       (CLIENT NAME)            the PlexTrac client's name
-      (MONTH YEAR)             the month and year the letter is exported, e.g. "September 2026"
+      (MONTH YEAR)             the month and year of the report's start date, e.g. "September 2026";
+                               the month it is exported when the report has no start date
       (LINKS and APP NAMES)    the Scope narrative's in-scope table, printed as PlexTrac
                                holds it (its own table, header row and colours)
       (TOTAL ISSUE COUNT)      number of findings, e.g. "9 issues"
@@ -95,19 +96,27 @@
 {%- set client_name = ss.value|string|trim|e if ss.value|string|trim else missing("(CLIENT NAME)") -%}
 
 {#- ============================ (MONTH YEAR) ===============================
-    The month the letter is issued in - the export date, "September 2026".
-    Read from REPORT_INFO.export_datetime_us, "MM-DD-YYYY HH:MM" (month first,
-    as PlexTrac supplies it; the service sets it to the release time in UK time).
+    The month of the report's start date, "September 2026" - the month the
+    engagement ran. Read from REPORT_INFO.start_date_us, "MM-DD-YYYY HH:MM",
+    which the service sets from the report's start_date in UK time.
+    A report with no start date (or one that won't read) falls back to the
+    month the letter is issued in: REPORT_INFO.export_datetime_us, the same
+    shape (month first, as PlexTrac supplies it; the service sets it to the
+    release time in UK time).
 =========================================================================== -#}
 {%- set MONTHS = ["January", "February", "March", "April", "May", "June", "July",
                   "August", "September", "October", "November", "December"] -%}
-{%- set ss.issued = (REPORT_INFO.export_datetime_us if REPORT_INFO.export_datetime_us
-                     else (REPORT_INFO.export_date if REPORT_INFO.export_date else ""))|string|trim -%}
-{%- set _issued = ss.issued.split(" ")[0].split("-") -%}
-{%- if _issued|length == 3 and _issued[0]|int(0) >= 1 and _issued[0]|int(0) <= 12 and _issued[2]|replace(",", "")|int(0) > 1900 -%}
+{%- set ss.issued = "" -%}
+{%- set month_year = missing("(MONTH YEAR)") -%}
+{%- for _src in [REPORT_INFO.start_date_us, REPORT_INFO.export_datetime_us, REPORT_INFO.export_date] if _src -%}
+  {%- set _issued = (_src|string|trim).split(" ")[0].split("-") -%}
+  {%- if not ss.issued and _issued|length == 3 and _issued[0]|int(0) >= 1 and _issued[0]|int(0) <= 12 and _issued[2]|replace(",", "")|int(0) > 1900 -%}
+    {%- set ss.issued = _src|string|trim -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- if ss.issued -%}
+  {%- set _issued = ss.issued.split(" ")[0].split("-") -%}
   {%- set month_year = MONTHS[_issued[0]|int - 1] ~ " " ~ _issued[2]|replace(",", "") -%}
-{%- else -%}
-  {%- set month_year = missing("(MONTH YEAR)") -%}
 {%- endif -%}
 
 {#- ============================== FINDINGS =================================

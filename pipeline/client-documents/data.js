@@ -52,6 +52,16 @@ function exportDatetimeUs(date, tz = TZ) {
   return `${v('month')}-${v('day')}-${v('year')} ${v('hour')}:${v('minute')}`;
 }
 
+// The report's start date in the same shape, for the letter's "(MONTH YEAR)" - or
+// undefined when Plextrac has none or it won't parse, and the letter falls back to the
+// issue date. Read in UK time: a date-only ClickUp start is UK midnight, which in BST is
+// 23:00 the day before in UTC (1 September is 2026-08-31T23:00Z).
+function startDateUs(value, tz = TZ) {
+  if (value === null || value === undefined || String(value).trim() === '') return undefined;
+  const date = new Date(/^\d+$/.test(String(value).trim()) ? Number(value) : value);
+  return Number.isNaN(date.getTime()) ? undefined : exportDatetimeUs(date, tz);
+}
+
 // listReportFindings answers with an array or { data: [...] } depending on version,
 // and each finding is either an object or — what this instance returns — a list row:
 //   { id, doc_id, data: [flaw_id, severity, title, status, ...] }
@@ -160,6 +170,8 @@ function reduceFullFinding(f) {
 function templateContext({ report, clientRecord, findings, exportedAt, detail = 'summary' }) {
   const REPORT_INFO = pick(report, REPORT_KEYS);
   REPORT_INFO.export_datetime_us = exportDatetimeUs(exportedAt);
+  const startUs = startDateUs(report?.start_date);
+  if (startUs) REPORT_INFO.start_date_us = startUs;
   const included = bySeverity(findings);
 
   return printable({
@@ -176,6 +188,7 @@ module.exports = {
   FINDING_KEYS,
   FULL_FINDING_KEYS,
   exportDatetimeUs,
+  startDateUs,
   normaliseFindings,
   bySeverity,
   findingSummary,
