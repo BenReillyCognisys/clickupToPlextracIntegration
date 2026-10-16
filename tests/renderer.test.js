@@ -50,8 +50,8 @@ const SCOPE = '<h5 style="margin-left:0px;">In-Scope URLs</h5><figure class="tab
   + '<p>&nbsp;</p><p style="margin-left:0px;">The following activities were out of scope for this engagement:</p>'
   + '<ul><li>Denial of service testing.</li></ul>';
 
-function letterContext({ scope = SCOPE, severities = ['Critical', 'High', 'Medium', 'Informational'], client = 'Northgate Financial Services Ltd' } = {}) {
-  const rows = severities.map((sev, i) => ({ id: `f${i}`, doc_id: [1, i], data: [i, sev, `Finding ${i}`, 'Open'] }));
+function letterContext({ scope = SCOPE, severities = ['Critical', 'High', 'Medium', 'Informational'], statuses = [], client = 'Northgate Financial Services Ltd' } = {}) {
+  const rows = severities.map((sev, i) => ({ id: `f${i}`, doc_id: [1, i], data: [i, sev, `Finding ${i}`, statuses[i] ?? 'Open'] }));
   return data.templateContext({
     report: { name: 'Web App Test', exec_summary: { custom_fields: [{ label: 'Scope', text: scope }] } },
     clientRecord: { name: client },
@@ -217,6 +217,20 @@ const tableRows = (html) => [...scopeHtml(html).matchAll(/<tr>([\s\S]*?)<\/tr>/g
     assert.ok(two.includes('identified a total of 3 issues, which consists of 1 Medium and 2 Low.'));
     const one = await letterHtml({ severities: ['High'] });
     assert.ok(one.includes('identified a total of 1 issue, which consists of 1 High.'));
+  });
+
+  await test('only open findings are counted — Closed ones are left out, In Process and no status still count', async () => {
+    const html = await letterHtml({
+      severities: ['Critical', 'High', 'High', 'Medium', 'Low', 'Low'],
+      statuses: ['Closed', ' closed ', 'Open', 'In Process', '', 'CLOSED'],
+    });
+    assert.ok(html.includes('identified a total of 3 issues, which consists of 1 High, 1 Medium and 1 Low.'), html);
+  });
+
+  await test('every finding Closed leaves the red count placeholders, never "0 issues"', async () => {
+    const html = await letterHtml({ severities: ['High', 'Low'], statuses: ['Closed', 'Closed'] });
+    assert.ok(html.includes('(TOTAL ISSUE COUNT)') && html.includes('(INSERT ISSUE COUNT HERE)'));
+    assert.ok(!html.includes('0 issues'));
   });
 
   await test('a client name with & and apostrophes is escaped, not broken', async () => {

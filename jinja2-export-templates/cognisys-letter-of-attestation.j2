@@ -9,7 +9,8 @@
       (MONTH YEAR)             the month and year the letter is exported, e.g. "September 2026"
       (LINKS and APP NAMES)    the Scope narrative's in-scope table, printed as PlexTrac
                                holds it (its own table, header row and colours)
-      (TOTAL ISSUE COUNT)      number of findings, e.g. "9 issues"
+      (TOTAL ISSUE COUNT)      number of open findings, e.g. "9 issues" - findings
+                               Closed in PlexTrac are not counted (EXCLUDE_STATUSES)
       (INSERT ISSUE COUNT HERE) per-severity breakdown, e.g. "1 Critical, 2 High and 6 Low";
                                severities with no findings are left out
 
@@ -36,6 +37,7 @@
 {%- set COUNT_SEVERITIES    = ["Critical", "High", "Medium", "Low", "Informational"] -%}   {#- severities counted, in print order -#}
 {%- set NUMBERS_AS_WORDS    = false -%}             {#- true = "nine issues" rather than "9 issues" -#}
 {%- set EXCLUDE_FINDING_TITLES = [] -%}             {#- finding titles left out of the counts -#}
+{%- set EXCLUDE_STATUSES    = ["Closed"] -%}        {#- PlexTrac finding statuses left out of the counts (any case): the letter reports open issues only. "In Process" and a finding with no status still count. Set [] to count every finding. -#}
 {%- set DEBUG_CONTEXT       = false -%}             {#- true = dump the render context on a page before the letter -#}
 
 {#- ===================== CONTEXT GUARDS ===================================
@@ -114,7 +116,14 @@
     Flattened exactly as in cognisys-full-report.j2: a list of groups, a flat
     list, or a dict keyed by id. `is mapping` guards every attribute read -
     iterating a dict yields its string keys, and "key".title is truthy.
+    A finding whose status is in EXCLUDE_STATUSES is left out here, so it is
+    in neither count.
 =========================================================================== -#}
+{%- set _excluded_statuses = EXCLUDE_STATUSES|map("lower")|list -%}
+{%- macro _counted(f) -%}
+  {{- "1" if f.title not in EXCLUDE_FINDING_TITLES
+          and (f.status|default("", true)|string|trim|lower) not in _excluded_statuses else "" -}}
+{%- endmacro -%}
 {%- set report_findings = [] -%}
 {%- set _entries = FINDINGS.values()|list if FINDINGS is mapping
              else (FINDINGS|list if FINDINGS and FINDINGS is not string else []) -%}
@@ -127,12 +136,12 @@
   {%- endif -%}
   {%- if _grp -%}
     {%- for f in (_grp.values()|list if _grp is mapping else _grp) -%}
-      {%- if f is mapping and f.title not in EXCLUDE_FINDING_TITLES -%}
+      {%- if f is mapping and _counted(f) -%}
         {%- set _ = report_findings.append(f) -%}
       {%- endif -%}
     {%- endfor -%}
   {%- elif _entry is mapping and (_entry.title or _entry.severity or _entry.description) -%}
-    {%- if _entry.title not in EXCLUDE_FINDING_TITLES -%}
+    {%- if _counted(_entry) -%}
       {%- set _ = report_findings.append(_entry) -%}
     {%- endif -%}
   {%- endif -%}
@@ -441,7 +450,8 @@ custom fields:
 <p class="sp-10"></p>
 {#- No findings is left as the red placeholders rather than "no issues": an
     empty list is also what a context that failed to come through looks like,
-    and a letter must not attest to a clean result by accident. -#}
+    and a letter must not attest to a clean result by accident. The same goes
+    for a report whose findings are all Closed: someone writes that letter by hand. -#}
 {%- if nn.total %}
 <p>During the assessment, Cognisys Group identified a total of {{ total_issues }}, which consists of {{ issue_breakdown }}.</p>
 {%- else %}

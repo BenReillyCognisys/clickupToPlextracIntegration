@@ -136,7 +136,7 @@ The templates get the variables Plextrac's own export gives them: `REPORT_INFO`,
 (`pipeline/client-documents/data.js`):
 
 - **`REPORT_INFO` and `CLIENT_INFO`:** only the allow-listed keys (`REPORT_KEYS`, `CLIENT_KEYS`). `REPORT_INFO.export_datetime_us` carries the release time.
-- **`FINDINGS`:** each finding's **title and severity only** (`FINDING_KEYS`), enough to count them. `FINDING_SUMMARY` holds the counts per severity.
+- **`FINDINGS`:** each finding's **title, severity and status only** (`FINDING_KEYS`), enough to count them. `FINDING_SUMMARY` holds the counts per severity (every finding, whatever its status). The letter of attestation counts **open findings only**: its template leaves out any finding whose status is in `EXCLUDE_STATUSES` (`["Closed"]`), so "In Process" and a finding with no status still count.
 
 Because this is done in code rather than left to the template, no template edit can
 leak a finding write-up into a client document. That includes `DEBUG_CONTEXT`, which
@@ -144,8 +144,8 @@ dumps the whole context into the PDF. A template that needs another field must b
 given it there, deliberately.
 
 Plextrac's findings list returns each finding as a positional row (`data: [id,
-severity, title, status, ...]`). `normaliseFindings` turns these into `{ severity,
-title }` so the templates can read them.
+severity, title, status, ...]`). `normaliseFindings` turns these into `{ flaw_id,
+severity, title, status }` so the templates can read them.
 
 ## How the wrong-folder and double-filing problems are prevented
 

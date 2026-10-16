@@ -90,8 +90,10 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
 
   const ctx = () => data.templateContext(facts());
 
-  await test('findings carry only title and severity — no write-up text anywhere in the context', () => {
+  await test('findings carry only title, severity and status — no write-up text anywhere in the context', () => {
     eq(ctx().FINDINGS[0], { title: 'SQL Injection in login', severity: 'High' });
+    eq(data.templateContext({ ...facts(), findings: [{ ...fx.findings[0], status: 'Closed' }] }).FINDINGS[0],
+      { title: 'SQL Injection in login', severity: 'High', status: 'Closed' });
     eq(ctx().FINDINGS.length, 4);
     eq(JSON.stringify(ctx()).includes(fx.SECRET), false);
   });

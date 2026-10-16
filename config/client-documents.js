@@ -15,7 +15,7 @@
 //               no; switched off, the document isn't made at all on release.
 //   findings    'full' = the template gets every finding's write-up, CVSS score,
 //               affected assets and screenshots (pipeline/client-documents/data.js).
-//               Anything else gets each finding's title and severity only.
+//               Anything else gets each finding's title, severity and status only.
 //   pdfOptions  WeasyPrint write_pdf options for this document (renderer/render.py
 //               accepts dpi, optimize_images and jpeg_quality).
 module.exports = [
@@ -42,8 +42,8 @@ module.exports = [
     enabledBy: 'CLIENT_DOCS_EXEC_SUMMARY_ENABLED',
   },
   {
-    // Client name, the month issued, the hosts in the Scope narrative and the finding
-    // counts, all filled by the template.
+    // Client name, the month issued, the hosts in the Scope narrative and the counts
+    // of the findings still open (Closed ones are left out), all filled by the template.
     key: 'letter-of-attestation',
     name: 'Letter of Attestation',
     template: 'cognisys-letter-of-attestation.j2',

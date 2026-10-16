@@ -4,8 +4,8 @@
 // CLIENT_KEYS are passed through, and what each finding carries depends on the
 // document (its `findings` setting in config/client-documents.js):
 //
-//   summary (default)  FINDING_KEYS - title and severity, enough for the letter of
-//                      attestation to count them. The executive summary and the letter
+//   summary (default)  FINDING_KEYS - title, severity and status, enough for the letter
+//                      of attestation to count the open ones. The executive summary and the letter
 //                      are client-facing summaries, so the finding write-ups never
 //                      reach their renderer at all.
 //   full               FULL_FINDING_KEYS - the write-up as well (description, technical
@@ -28,7 +28,7 @@ const REPORT_KEYS = [
   'exec_summary', 'executive_summary',
 ];
 const CLIENT_KEYS = ['name', 'tags', 'custom_field', 'custom_fields', 'fields'];
-const FINDING_KEYS = ['title', 'severity'];
+const FINDING_KEYS = ['title', 'severity', 'status'];
 const FULL_FINDING_KEYS = [
   'flaw_id', 'title', 'severity', 'status', 'description', 'recommendations', 'references',
   'fields', 'risk_score', 'affected_assets', 'tags',
