@@ -57,7 +57,7 @@ CLIENT_DOCS_LETTER_OF_ATTESTATION_ENABLED=true
 | Placeholder | Filled from |
 |---|---|
 | (CLIENT NAME) | the Plextrac client's name, in all four places |
-| (MONTH YEAR) | the month the letter is issued (the release date, UK time), e.g. `September 2026` |
+| (MONTH YEAR) | the month of the report's start date (UK time), e.g. `September 2026`; the month the letter is issued (the release date) when the report has no start date or it can't be read |
 | (LINKS and APP NAMES) | the **Scope** narrative's hosts, printed as Plextrac shows them: its own table (column widths, header fill, colours) or its own bullet list |
 | (TOTAL ISSUE COUNT) | the number of findings, e.g. `4 issues` |
 | (INSERT ISSUE COUNT HERE) | per severity, e.g. `1 Critical, 1 High, 1 Medium and 1 Informational`; a severity with no findings is left out |

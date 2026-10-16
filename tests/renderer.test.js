@@ -50,10 +50,10 @@ const SCOPE = '<h5 style="margin-left:0px;">In-Scope URLs</h5><figure class="tab
   + '<p>&nbsp;</p><p style="margin-left:0px;">The following activities were out of scope for this engagement:</p>'
   + '<ul><li>Denial of service testing.</li></ul>';
 
-function letterContext({ scope = SCOPE, severities = ['Critical', 'High', 'Medium', 'Informational'], statuses = [], client = 'Northgate Financial Services Ltd' } = {}) {
+function letterContext({ scope = SCOPE, severities = ['Critical', 'High', 'Medium', 'Informational'], statuses = [], client = 'Northgate Financial Services Ltd', startDate } = {}) {
   const rows = severities.map((sev, i) => ({ id: `f${i}`, doc_id: [1, i], data: [i, sev, `Finding ${i}`, statuses[i] ?? 'Open'] }));
   return data.templateContext({
-    report: { name: 'Web App Test', exec_summary: { custom_fields: [{ label: 'Scope', text: scope }] } },
+    report: { name: 'Web App Test', start_date: startDate, exec_summary: { custom_fields: [{ label: 'Scope', text: scope }] } },
     clientRecord: { name: client },
     findings: data.normaliseFindings(rows),
     exportedAt: new Date('2026-09-27T10:00:00Z'),
@@ -152,8 +152,18 @@ const tableRows = (html) => [...scopeHtml(html).matchAll(/<tr>([\s\S]*?)<\/tr>/g
     assert.ok(!html.includes('(CLIENT NAME)'));
   });
 
-  await test('(MONTH YEAR) is the month the letter is issued', async () => {
+  await test('(MONTH YEAR) is the month of the report\'s start date', async () => {
+    assert.ok((await letterHtml({ startDate: '2026-07-14T00:00:00.000Z' })).includes('Northgate Financial Services Ltd during July 2026 to identify'));
+  });
+
+  await test('(MONTH YEAR) reads the start date in UK time: BST midnight on the 1st is that month', async () => {
+    assert.ok((await letterHtml({ startDate: '2026-07-31T23:00:00.000Z' })).includes('during August 2026 to identify'));
+  });
+
+  await test('(MONTH YEAR) is the month the letter is issued when the report has no start date', async () => {
     assert.ok((await letterHtml()).includes('Northgate Financial Services Ltd during September 2026 to identify'));
+    assert.ok((await letterHtml({ startDate: '' })).includes('during September 2026 to identify'));
+    assert.ok((await letterHtml({ startDate: 'not a date' })).includes('during September 2026 to identify'));
   });
 
   await test('(LINKS and APP NAMES): Plextrac\'s own table, printed as-is — header row, styles and all', async () => {
