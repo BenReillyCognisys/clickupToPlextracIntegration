@@ -104,7 +104,7 @@ function renderQueue(entries) {
 
 // Fallback PM allowlist, baked in so /reportqueueall still works if SLACK_PM_USER_IDS
 // is left blank in the environment. Setting SLACK_PM_USER_IDS overrides this list.
-const DEFAULT_PM_USER_IDS = ['U06V88B1MEK', 'U0811891NTU', 'U09CF6MLUF3', 'U07R28NJ0KS'];
+const DEFAULT_PM_USER_IDS = ['U06V88B1MEK', 'U0811891NTU', 'U09CF6MLUF3', 'U07R28NJ0KS', 'U0BL43VQ3QU']; // + Ariela Cogorodrigues
 
 function pmUserIds() {
   const fromEnv = (process.env.SLACK_PM_USER_IDS || '')

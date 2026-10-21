@@ -5,8 +5,8 @@
 | Draft | anyone | nothing |
 | Ready For Review | anyone | first-round QA: AI review → first-round QA channel |
 | In Review | anyone | second-round QA → second-round QA channel |
-| Approved | Alice Elvin, Ben Reilly, Soham Bakore, Punit Sharma, Karan Luniyal, Rajveer Parmar | "approved — ready for release", pinging Alice and Ben → ready-for-release channel; "Ready for Release" in `/reportqueue` |
-| Published | Alice Elvin, Ben Reilly | release announcement + j2 exports (Drive, Artifacts) → ready-for-release channel |
+| Approved | Alice Elvin, Ben Reilly, Soham Bakore, Punit Sharma, Karan Luniyal, Rajveer Parmar, Ariela Cogorodrigues | "approved — ready for release", pinging the publishers → ready-for-release channel; "Ready for Release" in `/reportqueue` |
+| Published | Alice Elvin, Ben Reilly, Ariela Cogorodrigues | release announcement + j2 exports (Drive, Artifacts) → ready-for-release channel |
 
 Matched on each person's **main** Plextrac account email (`config/report-status-permissions.js`,
 or `PLEXTRAC_APPROVER_EMAILS` / `PLEXTRAC_PUBLISHER_EMAILS`).
