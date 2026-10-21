@@ -104,8 +104,9 @@ A retested report gets the retest version of the letter:
   Low. No Critical or High severity issues were identified. On retest, 8 of the 9
   issues were confirmed as remediated, including all Medium severity issues. 1 Low
   severity issue remains open."
-- **Sign-off:** "Cognisys Group is a CREST-accredited penetration testing provider.",
-  then Ben Reilly, Pentest Delivery Lead, Cognisys Group (`SIGNATORY_NAME`,
+- **CREST line:** "Cognisys Group is a CREST-accredited penetration testing provider."
+  ends the Introduction, straight after "…a summary of the results." (`CREST_LINE`).
+- **Sign-off:** Ben Reilly, Pentest Delivery Lead, Cognisys Group (`SIGNATORY_NAME`,
   `SIGNATORY_TITLE`), then the CREST logo.
 
 A report that wasn't retested gets the standard letter, unchanged. If Claude can't tell

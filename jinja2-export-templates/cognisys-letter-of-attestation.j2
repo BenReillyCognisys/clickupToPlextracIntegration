@@ -552,7 +552,7 @@ custom fields:
 <p>Cognisys Group were engaged by {{ client_name }} during {{ month_year }} to identify potential security vulnerabilities that may compromise the confidentiality, integrity, and availability of the {{ client_name }} application.</p>
 {%- endif %}
 <p class="sp-10"></p>
-<p>Cognisys Group performed this assessment under the guidelines provided in the quote for the engagement and in accordance with testing guidelines. This letter provides a high-level overview of the test performed by the security team and a summary of the results.</p>
+<p>Cognisys Group performed this assessment under the guidelines provided in the quote for the engagement and in accordance with testing guidelines. This letter provides a high-level overview of the test performed by the security team and a summary of the results.{% if retest %} {{ CREST_LINE|e }}{% endif %}</p>
 <p class="sp-10"></p>
 
 <p class="loa-h">Assessment Scope</p>
@@ -592,9 +592,6 @@ custom fields:
 <p class="sp-10"></p>
 <p class="sp-10"></p>
 {%- if retest %}
-<p>{{ CREST_LINE|e }}</p>
-<p class="sp-10"></p>
-<p class="sp-10"></p>
 <p>Best regards,</p>
 <p class="sp-10"></p>
 <p>{{ SIGNATORY_NAME|e }}</p>

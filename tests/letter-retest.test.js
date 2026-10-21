@@ -215,9 +215,10 @@ const ANSWER = {
     eq(results(lines), 'During the initial assessment, Cognisys Group identified 9 issues: 5 Medium and 4 Low. '
       + 'No Critical or High severity issues were identified. On retest, 8 of the 9 issues were confirmed as remediated, '
       + 'including all Medium severity issues. 1 Low severity issue remains open.');
-    const crest = lines.indexOf('Cognisys Group is a CREST-accredited penetration testing provider.');
-    eq(lines.slice(crest), ['Cognisys Group is a CREST-accredited penetration testing provider.', 'Best regards,',
-      'Ben Reilly', 'Pentest Delivery Lead', 'Cognisys Group']);
+    eq(lines[4], 'Cognisys Group performed this assessment under the guidelines provided in the quote for the engagement and in accordance '
+      + 'with testing guidelines. This letter provides a high-level overview of the test performed by the security team and a summary of the results. '
+      + 'Cognisys Group is a CREST-accredited penetration testing provider.');
+    eq(lines.slice(lines.indexOf('Best regards,')), ['Best regards,', 'Ben Reilly', 'Pentest Delivery Lead', 'Cognisys Group']);
     assert.ok(html.includes('class="loa-crest"'), 'CREST logo');
   }, { skip: noJinja });
 
