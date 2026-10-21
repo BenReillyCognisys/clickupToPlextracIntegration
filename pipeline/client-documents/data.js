@@ -52,6 +52,11 @@ function exportDatetimeUs(date, tz = TZ) {
   return `${v('month')}-${v('day')}-${v('year')} ${v('hour')}:${v('minute')}`;
 }
 
+// "21 October 2026" - the letter of attestation's issue date (retest letters), in UK time.
+function issueDateLong(date, tz = TZ) {
+  return new Intl.DateTimeFormat('en-GB', { timeZone: tz, day: 'numeric', month: 'long', year: 'numeric' }).format(date);
+}
+
 // The report's start date in the same shape, for the letter's "(MONTH YEAR)" - or
 // undefined when Plextrac has none or it won't parse, and the letter falls back to the
 // issue date. Read in UK time: a date-only ClickUp start is UK midnight, which in BST is
@@ -166,10 +171,15 @@ function reduceFullFinding(f) {
  * @param {Date}   args.exportedAt    the release's export time (issue date)
  * @param {'summary'|'full'} [args.detail='summary']  how much of each finding to pass:
  *                                    FINDING_KEYS or FULL_FINDING_KEYS
+ * @param {object|null} [args.retest] the letter of attestation's retest details
+ *                                    (./retest templateRetest); the letter is the
+ *                                    retest version when they are set
  */
-function templateContext({ report, clientRecord, findings, exportedAt, detail = 'summary' }) {
+function templateContext({ report, clientRecord, findings, exportedAt, detail = 'summary', retest = null }) {
   const REPORT_INFO = pick(report, REPORT_KEYS);
   REPORT_INFO.export_datetime_us = exportDatetimeUs(exportedAt);
+  REPORT_INFO.issue_date = issueDateLong(exportedAt);
+  if (retest) REPORT_INFO.retest = retest;
   const startUs = startDateUs(report?.start_date);
   if (startUs) REPORT_INFO.start_date_us = startUs;
   const included = bySeverity(findings);
@@ -188,6 +198,7 @@ module.exports = {
   FINDING_KEYS,
   FULL_FINDING_KEYS,
   exportDatetimeUs,
+  issueDateLong,
   startDateUs,
   normaliseFindings,
   bySeverity,

@@ -109,6 +109,9 @@ const api = require('../lib/plextrac-api');
 const slack = require('../lib/slack');
 const { runReleaseExports } = require('../pipeline/release-exports');
 const { safeFilename } = require('../pipeline/report-export');
+// Whether a report was retested is read by Claude, which a test never calls: none of
+// these reports were retested, so each gets the standard letter.
+require('../pipeline/client-documents/retest').readRetest = async () => ({ retest: null, notice: null });
 
 // ── Simulated Plextrac ────────────────────────────────────────────────────────
 const NAMES = ["O'Neill & Sons", 'Acme/Corp: Ltd', 'Émile Sécurité', 'Back\\slash Ltd', 'Quote "Q" Co'];

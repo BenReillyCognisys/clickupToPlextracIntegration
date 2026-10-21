@@ -28,6 +28,7 @@ const drive = require('../../lib/google-drive');
 const { documentFilename, looksLikePdf } = require('../report-export');
 const data = require('./data');
 const images = require('./images');
+const retest = require('./retest');
 const { limiter } = require('../../lib/concurrency');
 const DOCUMENTS = require('../../config/client-documents');
 const log = require('../../lib/logger');
@@ -118,6 +119,24 @@ function summariseWarnings(warnings = []) {
 // How much of each finding a document is given: 'full' or 'summary' (see ./data).
 const detailOf = (doc) => (doc.findings === 'full' ? 'full' : 'summary');
 
+// The data a document renders from: its findings detail, or for a document with
+// `retest: true` (the letter of attestation) the summary data plus whether, and when,
+// the report was retested (./retest).
+const sourceOf = (doc) => (doc.retest ? 'retest' : detailOf(doc));
+
+/**
+ * The letter's template context: the summary data, plus the retest details when the
+ * Executive Summary says the report was retested. `notices` carries the reason when it
+ * couldn't be told, for the release's Slack thread; the letter is then the standard one.
+ */
+async function retestContext({ reportId, loaded, exportedAt }) {
+  const read = await retest.readRetest({ report: loaded.report, clientName: loaded.clientRecord?.name, reportId });
+  return {
+    context: data.templateContext({ ...loaded, exportedAt, retest: read.retest }),
+    notices: read.notice ? [read.notice] : [],
+  };
+}
+
 /**
  * The full record of every finding, for the full report. Each is fetched
  * by the release's clientId AND reportId, and must say it belongs to that report.
@@ -197,6 +216,7 @@ async function makeDocument({ doc, data: ready, reportId, exportedAt, output }) 
     made.screenshots = { inlined: source.screenshots.inlined, missing: source.screenshots.missing.length };
     made.notices = source.screenshots.missing.map((m) => `a screenshot in "${m.title}" is missing from the PDF (${m.reason})`);
   }
+  if (source.notices?.length) made.notices = [...(made.notices || []), ...source.notices];
   return made;
 }
 
@@ -217,7 +237,8 @@ async function makeDocument({ doc, data: ready, reportId, exportedAt, output }) 
  *   warnings?: string[], notices?: string[], screenshots?: object, error?: string}>>>}
  *   one promise per active document, in config order, each settling when that document
  *   is made (or has failed) — it never rejects. `notices` are things a person should
- *   check in a document that was made (a screenshot that couldn't be printed).
+ *   check in a document that was made (a screenshot that couldn't be printed, or a
+ *   letter that may have needed to be the retest version).
  *   Rejects only if the report itself can't be loaded; the full findings failing
  *   fails only the documents that need them. With every document switched off,
  *   resolves to [] without contacting Plextrac.
@@ -235,8 +256,12 @@ async function startClientDocuments({
   if (docs.some((doc) => detailOf(doc) === 'full')) {
     sources.full = fullReportContext({ clientId, reportId, loaded, exportedAt });
   }
+  // Whether it was a retest only when the letter is being made: it's a Claude call.
+  if (docs.some((doc) => doc.retest)) {
+    sources.retest = retestContext({ reportId, loaded, exportedAt });
+  }
 
-  return docs.map((doc) => makeDocument({ doc, data: sources[detailOf(doc)], reportId, exportedAt, output }));
+  return docs.map((doc) => makeDocument({ doc, data: sources[sourceOf(doc)], reportId, exportedAt, output }));
 }
 
 /**

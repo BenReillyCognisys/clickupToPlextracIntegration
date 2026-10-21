@@ -16,6 +16,9 @@
 //   findings    'full' = the template gets every finding's write-up, CVSS score,
 //               affected assets and screenshots (pipeline/client-documents/data.js).
 //               Anything else gets each finding's title, severity and status only.
+//   retest      true = the template is also told whether, and when, the report was
+//               retested, read by Claude from its Executive Summary
+//               (pipeline/client-documents/retest.js)
 //   pdfOptions  WeasyPrint write_pdf options for this document (renderer/render.py
 //               accepts dpi, optimize_images and jpeg_quality).
 module.exports = [
@@ -44,9 +47,12 @@ module.exports = [
   {
     // Client name, the month issued, the hosts in the Scope narrative and the counts
     // of the findings still open (Closed ones are left out), all filled by the template.
+    // A retested report gets the retest version instead: issue date, both testing
+    // periods, what was found and what was fixed, a named signatory and CREST.
     key: 'letter-of-attestation',
     name: 'Letter of Attestation',
     template: 'cognisys-letter-of-attestation.j2',
     enabledBy: 'CLIENT_DOCS_LETTER_OF_ATTESTATION_ENABLED',
+    retest: true,
   },
 ];

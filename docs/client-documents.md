@@ -78,6 +78,42 @@ letter never goes out with a silent gap. This includes a report whose scope tabl
 left blank, and a report with no findings. The template deliberately doesn't claim
 "no issues" for an empty list.
 
+### Retest letters
+
+A retest is the same Plextrac report released again, with the fixed findings set to
+**Closed**. The retest date isn't stored in any Plextrac field. It is only written in
+the **Executive Summary**, and worded differently each time. So on every release,
+Claude reads the Executive Summary (`pipeline/client-documents/retest.js`, model
+`LOA_RETEST_MODEL`, default `claude-opus-5-5`, using `ANTHROPIC_API_KEY`) and answers:
+was it retested, when was the initial assessment, when was the retest, what kind of
+test was it and what was tested.
+
+A retested report gets the retest version of the letter:
+
+- **`Date: 21 October 2026`** at the top: the release date, in UK time.
+- **Introduction:** "Cognisys Group were engaged by Userled to perform a grey-box
+  security assessment of the Userled web application and API. The initial assessment
+  was performed between 17 and 26 August 2026, followed by a retest on 5 October 2026
+  to verify remediation." The initial dates come from the Executive Summary, else the
+  report's Plextrac start and end dates (a red placeholder if neither). If Claude can't
+  tell the kind of test or what was tested, the standard "to identify potential
+  security vulnerabilities…" wording is kept, followed by both periods.
+- **Results:** every finding is counted, Closed ones included. Closed
+  (`RETEST_REMEDIATED_STATUSES`) means remediated; every other status is still open.
+  "During the initial assessment, Cognisys Group identified 9 issues: 5 Medium and 4
+  Low. No Critical or High severity issues were identified. On retest, 8 of the 9
+  issues were confirmed as remediated, including all Medium severity issues. 1 Low
+  severity issue remains open."
+- **Sign-off:** "Cognisys Group is a CREST-accredited penetration testing provider.",
+  then Ben Reilly, Pentest Delivery Lead, Cognisys Group (`SIGNATORY_NAME`,
+  `SIGNATORY_TITLE`), then the CREST logo.
+
+A report that wasn't retested gets the standard letter, unchanged. If Claude can't tell
+(the call fails, the summary is unclear, no retest date can be read from it, or there is
+no Executive Summary), the **standard letter** is made and the release thread says so:
+"Letter of Attestation: could not tell whether this report was retested (…), so the
+standard letter was made. If it was a retest, the letter needs redoing by hand."
+
 ## Following an export in the console (PM2)
 
 Each release writes a trail to the console. Every line starts `Release export` and

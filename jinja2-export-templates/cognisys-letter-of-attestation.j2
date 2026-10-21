@@ -19,6 +19,20 @@
     a letter never goes out with a silent gap. That includes a report with no
     findings: the counts stay red rather than claiming "no issues".
 
+    RETEST LETTERS. When the service finds that the report was retested (it reads
+    the Executive Summary - pipeline/client-documents/retest.js), it sets
+    REPORT_INFO.retest:
+      initial_period  "between 17 and 26 August 2026"  (null: not known)
+      retest_period   "on 5 October 2026"
+      assessment      "a grey-box security assessment of the Userled web application
+                      and API"  (null: the standard wording is kept)
+    and the letter becomes the retest version: the issue date at the top
+    (REPORT_INFO.issue_date, "21 October 2026"), both testing periods, every
+    finding counted - what the initial assessment found, how many were remediated
+    (RETEST_REMEDIATED_STATUSES) and what remains open - the CREST line and logo,
+    and SIGNATORY_NAME / SIGNATORY_TITLE above "Cognisys Group". Without it (and in
+    PlexTrac's own export) the letter is exactly the standard one.
+
     Geometry was measured from Word's own PDF rendering of the .docx (see
     README.md), not estimated from the XML alone.
 
@@ -39,6 +53,11 @@
 {%- set NUMBERS_AS_WORDS    = false -%}             {#- true = "nine issues" rather than "9 issues" -#}
 {%- set EXCLUDE_FINDING_TITLES = [] -%}             {#- finding titles left out of the counts -#}
 {%- set EXCLUDE_STATUSES    = ["Closed"] -%}        {#- PlexTrac finding statuses left out of the counts (any case): the letter reports open issues only. "In Process" and a finding with no status still count. Set [] to count every finding. -#}
+{#- Retest letters only (REPORT_INFO.retest set). -#}
+{%- set RETEST_REMEDIATED_STATUSES = ["Closed"] -%}   {#- PlexTrac finding statuses that count as remediated on a retest (any case); every other status, or none, is still open -#}
+{%- set SIGNATORY_NAME      = "Ben Reilly" -%}
+{%- set SIGNATORY_TITLE     = "Pentest Delivery Lead" -%}
+{%- set CREST_LINE          = "Cognisys Group is a CREST-accredited penetration testing provider." -%}
 {%- set DEBUG_CONTEXT       = false -%}             {#- true = dump the render context on a page before the letter -#}
 
 {#- ===================== CONTEXT GUARDS ===================================
@@ -134,6 +153,8 @@
           and (f.status|default("", true)|string|trim|lower) not in _excluded_statuses else "" -}}
 {%- endmacro -%}
 {%- set report_findings = [] -%}
+{#- A retest letter counts every finding, Closed ones included: all_findings. -#}
+{%- set all_findings = [] -%}
 {%- set _entries = FINDINGS.values()|list if FINDINGS is mapping
              else (FINDINGS|list if FINDINGS and FINDINGS is not string else []) -%}
 {%- for _entry in _entries -%}
@@ -148,10 +169,16 @@
       {%- if f is mapping and _counted(f) -%}
         {%- set _ = report_findings.append(f) -%}
       {%- endif -%}
+      {%- if f is mapping and f.title not in EXCLUDE_FINDING_TITLES -%}
+        {%- set _ = all_findings.append(f) -%}
+      {%- endif -%}
     {%- endfor -%}
   {%- elif _entry is mapping and (_entry.title or _entry.severity or _entry.description) -%}
     {%- if _counted(_entry) -%}
       {%- set _ = report_findings.append(_entry) -%}
+    {%- endif -%}
+    {%- if _entry.title not in EXCLUDE_FINDING_TITLES -%}
+      {%- set _ = all_findings.append(_entry) -%}
     {%- endif -%}
   {%- endif -%}
 {%- endfor -%}
@@ -186,6 +213,82 @@
   {%- set issue_breakdown = severity_parts|join("") -%}
 {%- endif -%}
 {%- set total_issues = num(nn.total)|string ~ (" issue" if nn.total == 1 else " issues") -%}
+
+{#- ============================ RETEST LETTER ==============================
+    Only when the service set REPORT_INFO.retest (see the header). Every finding
+    is counted (all_findings): found = all of them, remediated = those whose
+    status is in RETEST_REMEDIATED_STATUSES, open = the rest.
+
+      During the initial assessment, Cognisys Group identified 9 issues: 5 Medium
+      and 4 Low. No Critical or High severity issues were identified. On retest, 8
+      of the 9 issues were confirmed as remediated, including all Medium severity
+      issues. 1 Low severity issue remains open.
+
+    "No ... severity issues were identified" names whichever of Critical and High
+    had none, and is left out when both had some. "including all ..." names every
+    severity whose findings were all remediated. All remediated: "all 9 issues
+    were confirmed as remediated", and nothing remains open.
+=========================================================================== -#}
+{%- set retest = REPORT_INFO.retest if REPORT_INFO.retest is mapping else none -%}
+{%- set _remediated_statuses = RETEST_REMEDIATED_STATUSES|map("lower")|list -%}
+{%- macro _and(parts) -%}
+  {{- (parts[:-1]|join(", ") ~ " and " ~ parts[-1]) if parts|length > 1 else parts|join("") -}}
+{%- endmacro -%}
+{%- macro _issues(n) -%}{{ num(n) }} {{ "issue" if n == 1 else "issues" }}{%- endmacro -%}
+{%- set rt = namespace(found=0, fixed=0) -%}
+{%- set rt_found_parts = [] -%}       {#- "5 Medium", "4 Low" -#}
+{%- set rt_open_parts = [] -%}        {#- "1 Low" -#}
+{%- set rt_open_sevs = [] -%}         {#- severities with something still open -#}
+{%- set rt_cleared_sevs = [] -%}      {#- severities found and all remediated -#}
+{%- set rt_none_sevs = [] -%}         {#- Critical / High with nothing found -#}
+{%- for sev in COUNT_SEVERITIES -%}
+  {%- set nn.f = 0 -%}{%- set nn.x = 0 -%}
+  {%- for f in all_findings -%}
+    {%- set ss.sev = f.severity|default("", true)|string|lower|trim -%}
+    {%- if ss.sev == sev|lower or (sev|lower == "informational" and ss.sev == "info") -%}
+      {%- set nn.f = nn.f + 1 -%}
+      {%- if (f.status|default("", true)|string|trim|lower) in _remediated_statuses -%}
+        {%- set nn.x = nn.x + 1 -%}
+      {%- endif -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {%- set rt.found = rt.found + nn.f -%}
+  {%- set rt.fixed = rt.fixed + nn.x -%}
+  {%- if nn.f -%}
+    {%- set _ = rt_found_parts.append(num(nn.f)|string ~ " " ~ sev|e) -%}
+    {%- if nn.x == nn.f -%}
+      {%- set _ = rt_cleared_sevs.append(sev|e) -%}
+    {%- else -%}
+      {%- set _ = rt_open_parts.append(num(nn.f - nn.x)|string ~ " " ~ sev|e) -%}
+      {%- set _ = rt_open_sevs.append(sev|e) -%}
+    {%- endif -%}
+  {%- elif sev|lower in ["critical", "high"] -%}
+    {%- set _ = rt_none_sevs.append(sev|e) -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- set rt_open = rt.found - rt.fixed -%}
+
+{%- set rt_text = [] -%}
+{%- set _ = rt_text.append("During the initial assessment, Cognisys Group identified " ~ _issues(rt.found) ~ ": " ~ _and(rt_found_parts) ~ ".") -%}
+{%- if rt_none_sevs -%}
+  {%- set _ = rt_text.append("No " ~ rt_none_sevs|join(" or ") ~ " severity issues were identified.") -%}
+{%- endif -%}
+{%- if rt.found == 1 -%}
+  {%- set _ = rt_text.append("On retest, the issue was confirmed as remediated." if rt.fixed else "On retest, the issue was not confirmed as remediated.") -%}
+{%- elif rt.fixed == rt.found -%}
+  {%- set _ = rt_text.append("On retest, all " ~ _issues(rt.found) ~ " were confirmed as remediated.") -%}
+{%- elif not rt.fixed -%}
+  {%- set _ = rt_text.append("On retest, none of the " ~ _issues(rt.found) ~ " were confirmed as remediated.") -%}
+{%- else -%}
+  {%- set _ = rt_text.append("On retest, " ~ num(rt.fixed) ~ " of the " ~ _issues(rt.found) ~ (" was" if rt.fixed == 1 else " were") ~ " confirmed as remediated"
+        ~ (", including all " ~ _and(rt_cleared_sevs) ~ " severity issues" if rt_cleared_sevs else "") ~ ".") -%}
+{%- endif -%}
+{%- if rt_open and rt_open_sevs|length == 1 -%}
+  {%- set _ = rt_text.append(num(rt_open)|string ~ " " ~ rt_open_sevs[0] ~ " severity " ~ ("issue remains" if rt_open == 1 else "issues remain") ~ " open.") -%}
+{%- elif rt_open -%}
+  {%- set _ = rt_text.append(_issues(rt_open) ~ " remain open: " ~ _and(rt_open_parts) ~ ".") -%}
+{%- endif -%}
+{%- set retest_results = rt_text|join(" ") -%}
 
 {#- ========================= (LINKS and APP NAMES) =========================
     Printed straight from the SCOPE_NARRATIVE narrative - tables, bullets and
@@ -402,6 +505,11 @@ p { margin: 0; }
 .scope-table th { font-weight: bold; }
 .scope-table tr { break-inside: avoid; page-break-inside: avoid; }
 
+/* Retest letters: the issue date above the title, and the CREST logo under the
+   signatory - the full report's cover logo (312 x 147px), at letter size. */
+.loa-date  { font-size: 10pt; }
+.loa-crest { display: block; width: 3.6cm; height: 1.7cm; }
+
 /* A placeholder the template could not fill. */
 .tpl-missing { color: #B00020; }
 
@@ -429,12 +537,20 @@ custom fields:
 </section>
 {% endif %}
 
+{%- if retest %}
+<p class="loa-date">Date: {{ REPORT_INFO.issue_date|e if REPORT_INFO.issue_date else missing("(ISSUE DATE)") }}</p>
+<p class="sp-12"></p>
+{%- endif %}
 <p class="loa-title">Letter of Attestation</p>
 <p class="sp-12"></p>
 
 <p class="loa-h">Introduction</p>
 <p class="sp-10"></p>
+{%- if retest %}
+<p>Cognisys Group were engaged by {{ client_name }} to {% if retest.assessment %}perform {{ retest.assessment|e }}{% else %}identify potential security vulnerabilities that may compromise the confidentiality, integrity, and availability of the {{ client_name }} application{% endif %}. The initial assessment was performed {{ retest.initial_period|e if retest.initial_period else missing("(INITIAL ASSESSMENT DATES)") }}, followed by a retest {{ retest.retest_period|e if retest.retest_period else missing("(RETEST DATE)") }} to verify remediation.</p>
+{%- else %}
 <p>Cognisys Group were engaged by {{ client_name }} during {{ month_year }} to identify potential security vulnerabilities that may compromise the confidentiality, integrity, and availability of the {{ client_name }} application.</p>
+{%- endif %}
 <p class="sp-10"></p>
 <p>Cognisys Group performed this assessment under the guidelines provided in the quote for the engagement and in accordance with testing guidelines. This letter provides a high-level overview of the test performed by the security team and a summary of the results.</p>
 <p class="sp-10"></p>
@@ -461,7 +577,11 @@ custom fields:
     empty list is also what a context that failed to come through looks like,
     and a letter must not attest to a clean result by accident. The same goes
     for a report whose findings are all Closed: someone writes that letter by hand. -#}
-{%- if nn.total %}
+{%- if retest and rt.found %}
+<p>{{ retest_results }}</p>
+{%- elif retest %}
+<p>During the initial assessment, Cognisys Group identified a total of {{ missing("(TOTAL ISSUE COUNT)") }}, which consists of {{ missing("(INSERT ISSUE COUNT HERE)") }}.</p>
+{%- elif nn.total %}
 <p>During the assessment, Cognisys Group identified a total of {{ total_issues }}, which consists of {{ issue_breakdown }}.</p>
 {%- else %}
 <p>During the assessment, Cognisys Group identified a total of {{ missing("(TOTAL ISSUE COUNT)") }}, which consists of {{ missing("(INSERT ISSUE COUNT HERE)") }}.</p>
@@ -471,8 +591,21 @@ custom fields:
 <p class="sp-11"></p>
 <p class="sp-10"></p>
 <p class="sp-10"></p>
+{%- if retest %}
+<p>{{ CREST_LINE|e }}</p>
+<p class="sp-10"></p>
+<p class="sp-10"></p>
+<p>Best regards,</p>
+<p class="sp-10"></p>
+<p>{{ SIGNATORY_NAME|e }}</p>
+<p>{{ SIGNATORY_TITLE|e }}</p>
+<p>Cognisys Group</p>
+<p class="sp-10"></p>
+<img class="loa-crest" alt="CREST Penetration Testing and OVS accredited" src="data:image/png;base64,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">
+{%- else %}
 <p>Best regards,</p>
 <p>Cognisys Group</p>
+{%- endif %}
 
 </body>
 </html>

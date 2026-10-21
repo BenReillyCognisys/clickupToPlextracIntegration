@@ -99,7 +99,7 @@ const facts = () => ({ report: fx.report, clientRecord: fx.clientRecord, finding
   });
 
   await test('only allow-listed report and client keys pass through', () => {
-    eq(Object.keys(ctx().REPORT_INFO).sort(), ['custom_field', 'end_date', 'exec_summary', 'export_datetime_us', 'name', 'start_date', 'start_date_us', 'tags']);
+    eq(Object.keys(ctx().REPORT_INFO).sort(), ['custom_field', 'end_date', 'exec_summary', 'export_datetime_us', 'issue_date', 'name', 'start_date', 'start_date_us', 'tags']);
     eq(Object.keys(ctx().CLIENT_INFO).sort(), ['name', 'tags']);
   });
 
